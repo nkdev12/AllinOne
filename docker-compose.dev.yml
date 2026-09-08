@@ -1,0 +1,145 @@
+version: '3.8'
+
+services:
+  # ============================================================================
+  # PostgreSQL Database
+  # ============================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: allinone-postgres-dev
+    environment:
+      POSTGRES_USER: allinone
+      POSTGRES_PASSWORD: allinone
+      POSTGRES_DB: allinone_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data_dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U allinone"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - allinone-dev
+
+  # ============================================================================
+  # Redis Cache & Queue
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: allinone-redis-dev
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data_dev:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - allinone-dev
+
+  # ============================================================================
+  # MinIO (S3-compatible object storage)
+  # ============================================================================
+  minio:
+    image: minio/minio:latest
+    container_name: allinone-minio-dev
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data_dev:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - allinone-dev
+
+  # ============================================================================
+  # Mailpit (Development email testing - replaces paid email services)
+  # ============================================================================
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: allinone-mailpit-dev
+    ports:
+      - "1025:1025"  # SMTP
+      - "8025:8025"  # Web UI
+    volumes:
+      - mailpit_data_dev:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8025/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - allinone-dev
+
+  # ============================================================================
+  # Prometheus (Metrics - open-source monitoring)
+  # ============================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: allinone-prometheus-dev
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infrastructure/prometheus/prometheus.dev.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data_dev:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - allinone-dev
+
+  # ============================================================================
+  # Grafana (Visualization - open-source dashboards)
+  # ============================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: allinone-grafana-dev
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: admin
+      GF_INSTALL_PLUGINS: grafana-piechart-panel
+    volumes:
+      - grafana_data_dev:/var/lib/grafana
+      - ./infrastructure/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - allinone-dev
+
+volumes:
+  postgres_data_dev:
+  redis_data_dev:
+  minio_data_dev:
+  mailpit_data_dev:
+  prometheus_data_dev:
+  grafana_data_dev:
+
+networks:
+  allinone-dev:
+    driver: bridge

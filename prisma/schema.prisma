@@ -1,0 +1,669 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// Users & Authentication
+// ============================================================================
+
+model User {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email             String   @unique @db.VarChar(255)
+  displayName       String?  @db.VarChar(255)
+  avatar            String?  @db.Text
+  locale            String   @default("en-US") @db.VarChar(10)
+  timezone          String   @default("UTC") @db.VarChar(50)
+  status            UserStatus @default(ACTIVE)
+  emailVerifiedAt   DateTime?
+  lastLoginAt       DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  deletedAt         DateTime?
+
+  // Relations
+  authentications   Authentication[]
+  devices           Device[]
+  sessions          Session[]
+  mfaSettings       MFASetting?
+  auditLogs         AuditLog[]
+  folders           Folder[]
+  tags              Tag[]
+  notes             Note[]
+  projects          Project[]
+  tasks             Task[]
+  reminders         Reminder[]
+  calendars         Calendar[]
+  events            Event[]
+  vaultSetting      VaultSetting?
+  vaultItems        VaultItem[]
+
+  @@index([email])
+  @@index([status])
+  @@index([createdAt])
+  // @@softDelete
+}
+
+enum UserStatus {
+  ACTIVE
+  PENDING
+  SUSPENDED
+  DELETED
+}
+
+model Authentication {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId            String   @db.Uuid
+  type              AuthType
+  identifier        String   @db.VarChar(255)
+  passwordHash      String?  @db.Text
+  emailVerified     Boolean  @default(false)
+  lastUsedAt        DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relations
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, type, identifier])
+  @@index([userId])
+  @@index([type])
+}
+
+enum AuthType {
+  EMAIL_PASSWORD
+  GOOGLE
+  APPLE
+  MICROSOFT
+  PASSKEY
+}
+
+model Session {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId            String   @db.Uuid
+  deviceId          String   @db.Uuid
+  accessToken       String   @db.Text @unique
+  refreshToken      String   @db.Text @unique
+  accessExpiresAt   DateTime
+  refreshExpiresAt  DateTime
+  revokedAt         DateTime?
+  lastActivityAt    DateTime @default(now())
+  ipAddress         String?  @db.VarChar(45)
+  userAgent         String?  @db.Text
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relations
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device            Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([deviceId])
+  @@index([accessToken])
+  @@index([refreshToken])
+}
+
+// ============================================================================
+// Devices & Multi-Device Support
+// ============================================================================
+
+model Device {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId            String   @db.Uuid
+  name              String   @db.VarChar(255)
+  platform          Platform
+  appVersion        String   @db.VarChar(50)
+  osVersion        String?  @db.VarChar(50)
+  publicKey         String   @db.Text
+  lastSeenAt        DateTime @default(now())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  revokedAt         DateTime?
+
+  // Relations
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessions          Session[]
+  syncStates        DeviceSyncState[]
+
+  @@index([userId])
+  @@index([platform])
+  // @@softDelete
+}
+
+enum Platform {
+  IOS
+  ANDROID
+  MACOS
+  WINDOWS
+  LINUX
+  WEB
+}
+
+model DeviceSyncState {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  deviceId          String   @db.Uuid @unique
+  lastPulledCursor  String?  @db.Text
+  lastPushedSequence Int     @default(0)
+  lastSuccessfulSyncAt DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relations
+  device            Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+}
+
+// ============================================================================
+// Multi-Factor Authentication
+// ============================================================================
+
+model MFASetting {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId            String   @db.Uuid @unique
+  totpEnabled       Boolean  @default(false)
+  totpSecret        String?  @db.Text // Encrypted at application level
+  recoveryCodes     String?  @db.Text // Encrypted JSON array of recovery codes
+  backupCodesUsed   String?  @db.Text // JSON array of used code indices
+  lastVerifiedAt    DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relations
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ============================================================================
+// Synchronization
+// ============================================================================
+
+model Change {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId            String   @db.Uuid
+  deviceId          String?  @db.Uuid // NULL for server-side changes
+  entityType        String   @db.VarChar(50) // e.g., "note", "task", "event"
+  entityId          String   @db.Uuid
+  operation         ChangeOperation
+  version           Int
+  payload           Json     @db.JsonB // Contains only non-sensitive metadata
+  cursor            BigInt   @default(autoincrement())
+  createdAt         DateTime @default(now())
+
+  @@index([userId])
+  @@index([deviceId])
+  @@index([userId, cursor])
+  @@index([createdAt])
+}
+
+enum ChangeOperation {
+  CREATE
+  UPDATE
+  DELETE
+  RESTORE
+}
+
+model IdempotencyKey {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  key               String   @unique @db.VarChar(255)
+  userId            String   @db.Uuid
+  endpoint          String   @db.VarChar(255)
+  method            String   @db.VarChar(10)
+  statusCode        Int
+  response          Json     @db.JsonB
+  expiresAt         DateTime
+  createdAt         DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ============================================================================
+// Audit Logging
+// ============================================================================
+
+model AuditLog {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId            String?  @db.Uuid
+  action            AuditAction
+  resourceType      String?  @db.VarChar(50)
+  resourceId        String?  @db.Uuid
+  requestId         String?  @db.Uuid
+  changes           Json?    @db.JsonB // Diff of changes
+  ipAddress         String?  @db.VarChar(45)
+  userAgent         String?  @db.Text
+  metadata          Json?    @db.JsonB
+  createdAt         DateTime @default(now())
+
+  // Relations
+  user              User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@index([requestId])
+}
+
+enum AuditAction {
+  LOGIN_SUCCESS
+  LOGIN_FAILURE
+  LOGOUT
+  PASSWORD_CHANGED
+  EMAIL_CHANGED
+  MFA_ENABLED
+  MFA_DISABLED
+  DEVICE_ADDED
+  DEVICE_REVOKED
+  SESSION_REVOKED
+  ACCOUNT_CREATED
+  ACCOUNT_DELETED
+  ACCOUNT_EXPORTED
+  OAUTH_CONNECTED
+  OAUTH_REVOKED
+}
+
+
+// ============================================================================
+// Notes & Content Management (Stage 4)
+// ============================================================================
+
+model Folder {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String   @db.Uuid
+  parentId    String?  @db.Uuid
+  name        String   @db.VarChar(255)
+  color       String?  @db.VarChar(20)
+  icon        String?  @db.VarChar(50)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  deletedAt   DateTime?
+
+  // Relations
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parent      Folder?  @relation("FolderHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  children    Folder[] @relation("FolderHierarchy")
+  notes       Note[]
+
+  @@index([userId])
+  @@index([parentId])
+}
+
+model Tag {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String   @db.Uuid
+  name        String   @db.VarChar(100)
+  color       String?  @db.VarChar(20)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  noteTags    NoteTag[]
+  taskLabels  TaskLabel[]
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+model Note {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String   @db.Uuid
+  folderId    String?  @db.Uuid
+  title       String   @db.VarChar(255)
+  content     String?  @db.Text
+  isPinned    Boolean  @default(false)
+  isArchived  Boolean  @default(false)
+  isEncrypted Boolean  @default(false)
+  version     Int      @default(1)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  deletedAt   DateTime?
+
+  // Relations
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  folder      Folder?  @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  noteTags    NoteTag[]
+  history     NoteHistory[]
+  attachments Attachment[]
+
+  @@index([userId])
+  @@index([folderId])
+  @@index([updatedAt])
+}
+
+model NoteTag {
+  noteId      String   @db.Uuid
+  tagId       String   @db.Uuid
+  createdAt   DateTime @default(now())
+
+  // Relations
+  note        Note     @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  tag         Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([noteId, tagId])
+  @@index([noteId])
+  @@index([tagId])
+}
+
+model NoteHistory {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  noteId      String   @db.Uuid
+  version     Int
+  title       String   @db.VarChar(255)
+  content     String?  @db.Text
+  createdAt   DateTime @default(now())
+
+  // Relations
+  note        Note     @relation(fields: [noteId], references: [id], onDelete: Cascade)
+
+  @@index([noteId])
+}
+
+model Attachment {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  noteId      String   @db.Uuid
+  userId      String   @db.Uuid
+  filename    String   @db.VarChar(255)
+  mimeType    String   @db.VarChar(100)
+  size        Int
+  storagePath String   @db.Text
+  checksum    String?  @db.VarChar(64)
+  createdAt   DateTime @default(now())
+
+  // Relations
+  note        Note     @relation(fields: [noteId], references: [id], onDelete: Cascade)
+
+  @@index([noteId])
+  @@index([userId])
+}
+
+// ============================================================================
+// Tasks & Todo Management (Stage 5)
+// ============================================================================
+
+enum TaskPriority {
+  P1_URGENT
+  P2_HIGH
+  P3_MEDIUM
+  P4_LOW
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum ReminderChannel {
+  NOTIFICATION
+  EMAIL
+}
+
+model Project {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String   @db.Uuid
+  name        String   @db.VarChar(255)
+  description String?  @db.Text
+  color       String?  @db.VarChar(20)
+  icon        String?  @db.VarChar(50)
+  sortOrder   Int      @default(0)
+  isArchived  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  deletedAt   DateTime?
+
+  // Relations
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sections    Section[]
+  tasks       Task[]
+
+  @@index([userId])
+}
+
+model Section {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId   String   @db.Uuid
+  name        String   @db.VarChar(255)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tasks       Task[]
+
+  @@index([projectId])
+}
+
+model Task {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId         String       @db.Uuid
+  projectId      String?      @db.Uuid
+  sectionId      String?      @db.Uuid
+  parentId       String?      @db.Uuid
+  title          String       @db.VarChar(255)
+  description    String?      @db.Text
+  priority       TaskPriority @default(P4_LOW)
+  status         TaskStatus   @default(TODO)
+  dueDate        DateTime?
+  dueTime        String?      @db.VarChar(10)
+  recurrenceRule String?      @db.VarChar(255)
+  completedAt    DateTime?
+  sortOrder      Int          @default(0)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  deletedAt      DateTime?
+
+  // Relations
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project        Project?     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  section        Section?     @relation(fields: [sectionId], references: [id], onDelete: SetNull)
+  parent         Task?        @relation("TaskSubtasks", fields: [parentId], references: [id], onDelete: Cascade)
+  subtasks       Task[]       @relation("TaskSubtasks")
+  taskLabels     TaskLabel[]
+  reminders      Reminder[]
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([sectionId])
+  @@index([parentId])
+  @@index([dueDate])
+  @@index([status])
+}
+
+model TaskLabel {
+  taskId      String   @db.Uuid
+  tagId       String   @db.Uuid
+  createdAt   DateTime @default(now())
+
+  // Relations
+  task        Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  tag         Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, tagId])
+  @@index([taskId])
+  @@index([tagId])
+}
+
+model Reminder {
+  id          String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  taskId      String          @db.Uuid
+  userId      String          @db.Uuid
+  remindAt    DateTime
+  isSent      Boolean         @default(false)
+  channel     ReminderChannel @default(NOTIFICATION)
+  createdAt   DateTime        @default(now())
+
+  // Relations
+  task        Task            @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+  @@index([userId])
+  @@index([remindAt])
+}
+
+// ============================================================================
+// Calendar & Events Management (Stage 6)
+// ============================================================================
+
+enum CalendarProvider {
+  LOCAL
+  GOOGLE
+  MICROSOFT
+  ICAL
+}
+
+enum EventStatus {
+  CONFIRMED
+  TENTATIVE
+  CANCELLED
+}
+
+enum AttendeeStatus {
+  NEEDS_ACTION
+  ACCEPTED
+  DECLINED
+  TENTATIVE
+}
+
+model Calendar {
+  id               String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId           String           @db.Uuid
+  name             String           @db.VarChar(255)
+  description      String?          @db.Text
+  color            String?          @db.VarChar(20)
+  timeZone         String           @default("UTC") @db.VarChar(50)
+  isPrimary        Boolean          @default(false)
+  isPublic         Boolean          @default(false)
+  externalProvider CalendarProvider @default(LOCAL)
+  externalId       String?          @db.VarChar(255)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  deletedAt        DateTime?
+
+  // Relations
+  user             User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  events           Event[]
+
+  @@index([userId])
+}
+
+model Event {
+  id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId         String          @db.Uuid
+  calendarId     String          @db.Uuid
+  title          String          @db.VarChar(255)
+  description    String?         @db.Text
+  location       String?         @db.Text
+  startAt        DateTime
+  endAt          DateTime
+  isAllDay       Boolean         @default(false)
+  recurrenceRule String?         @db.VarChar(255)
+  status         EventStatus     @default(CONFIRMED)
+  color          String?         @db.VarChar(20)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  deletedAt      DateTime?
+
+  // Relations
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  calendar       Calendar        @relation(fields: [calendarId], references: [id], onDelete: Cascade)
+  attendees      EventAttendee[]
+  reminders      EventReminder[]
+
+  @@index([userId])
+  @@index([calendarId])
+  @@index([startAt, endAt])
+}
+
+model EventAttendee {
+  id          String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId     String         @db.Uuid
+  email       String         @db.VarChar(255)
+  displayName String?        @db.VarChar(255)
+  status      AttendeeStatus @default(NEEDS_ACTION)
+  isOrganizer Boolean        @default(false)
+  createdAt   DateTime       @default(now())
+
+  // Relations
+  event       Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([eventId])
+  @@index([email])
+}
+
+model EventReminder {
+  id            String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId       String          @db.Uuid
+  userId        String          @db.Uuid
+  minutesBefore Int             @default(15)
+  channel       ReminderChannel @default(NOTIFICATION)
+  createdAt     DateTime        @default(now())
+
+  // Relations
+  event         Event           @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([eventId])
+  @@index([userId])
+}
+
+// ============================================================================
+// Zero-Knowledge Password Vault (Stage 7)
+// ============================================================================
+
+enum VaultItemType {
+  LOGIN
+  SECURE_NOTE
+  CREDIT_CARD
+  IDENTITY
+  PASSWORD
+}
+
+model VaultSetting {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId            String   @db.Uuid @unique
+  masterKeyHash     String   @db.Text
+  keySalt           String   @db.Text
+  kdfIterations     Int      @default(100000)
+  kdfMemory         Int?     @default(65536)
+  isVaultConfigured Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relations
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VaultItem {
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId        String        @db.Uuid
+  type          VaultItemType @default(LOGIN)
+  name          String        @db.VarChar(255)
+  category      String?       @db.VarChar(100)
+  encryptedData String        @db.Text
+  iv            String        @db.VarChar(255)
+  authTag       String        @db.VarChar(255)
+  isFavorite    Boolean       @default(false)
+  version       Int           @default(1)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  deletedAt     DateTime?
+
+  // Relations
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([type])
+  @@index([category])
+}

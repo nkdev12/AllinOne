@@ -1,0 +1,29 @@
+{$DOMAIN} {
+  # Reverse proxy to API
+  reverse_proxy /api/* api:3000
+
+  # Reverse proxy root to API
+  reverse_proxy / api:3000
+
+  # Security headers
+  header / Strict-Transport-Security "max-age=31536000; includeSubDomains"
+  header / X-Content-Type-Options "nosniff"
+  header / X-Frame-Options "DENY"
+  header / X-XSS-Protection "1; mode=block"
+  header / Referrer-Policy "strict-origin-when-cross-origin"
+
+  # Compression
+  encode gzip
+
+  # Logging
+  log {
+    output stdout
+    format json
+  }
+}
+
+# Optional: Grafana access (if you want to expose it)
+# {$DOMAIN}:3001 {
+#   reverse_proxy grafana:3000
+#   encode gzip
+# }

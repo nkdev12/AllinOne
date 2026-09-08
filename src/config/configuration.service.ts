@@ -1,0 +1,255 @@
+import { Injectable, Logger } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+
+@Injectable()
+export class ConfigurationService {
+  private readonly logger = new Logger("ConfigurationService");
+
+  constructor(private configService: ConfigService) {
+    this.validateConfiguration();
+  }
+
+  /**
+   * Validate all required configuration is present
+   */
+  private validateConfiguration(): void {
+    const requiredVars = [
+      "DATABASE_URL",
+      "REDIS_URL",
+      "JWT_ACCESS_SECRET",
+      "JWT_REFRESH_SECRET",
+      "OBJECT_STORAGE_ENDPOINT",
+      "OBJECT_STORAGE_ACCESS_KEY",
+      "OBJECT_STORAGE_SECRET_KEY",
+      "OBJECT_STORAGE_BUCKET",
+      "SMTP_HOST",
+      "SMTP_PORT",
+      "SMTP_FROM",
+      "ENCRYPTION_KEY",
+    ];
+
+    const missing = requiredVars.filter(
+      (variable) => !this.configService.get(variable),
+    );
+
+    if (missing.length > 0) {
+      const message = `Missing required environment variables: ${missing.join(", ")}`;
+      this.logger.error(message);
+      throw new Error(message);
+    }
+
+    this.logger.log("✓ All required configuration variables are present");
+  }
+
+  // ========================================================================
+  // Application Configuration
+  // ========================================================================
+
+  get appEnv(): string {
+    return this.configService.get("APP_ENV", "development");
+  }
+
+  get appPort(): number {
+    return this.configService.get("APP_PORT", 3000);
+  }
+
+  get appUrl(): string {
+    return this.configService.get<string>("APP_URL", "http://localhost:3000");
+  }
+
+  get isProduction(): boolean {
+    return this.appEnv === "production";
+  }
+
+  get isDevelopment(): boolean {
+    return this.appEnv === "development";
+  }
+
+  // ========================================================================
+  // Database Configuration
+  // ========================================================================
+
+  get databaseUrl(): string {
+    return this.configService.getOrThrow<string>("DATABASE_URL");
+  }
+
+  // ========================================================================
+  // Redis Configuration
+  // ========================================================================
+
+  get redisUrl(): string {
+    return this.configService.getOrThrow<string>("REDIS_URL");
+  }
+
+  // ========================================================================
+  // JWT Configuration
+  // ========================================================================
+
+  get jwtAccessSecret(): string {
+    return this.configService.getOrThrow<string>("JWT_ACCESS_SECRET");
+  }
+
+  get jwtAccessExpiration(): string {
+    return this.configService.get<string>("JWT_ACCESS_EXPIRATION", "15m");
+  }
+
+  get jwtRefreshSecret(): string {
+    return this.configService.getOrThrow<string>("JWT_REFRESH_SECRET");
+  }
+
+  get jwtRefreshExpiration(): string {
+    return this.configService.get<string>("JWT_REFRESH_EXPIRATION", "7d");
+  }
+
+  // ========================================================================
+  // Object Storage Configuration
+  // ========================================================================
+
+  get objectStorageEndpoint(): string {
+    return this.configService.getOrThrow<string>("OBJECT_STORAGE_ENDPOINT");
+  }
+
+  get objectStorageRegion(): string {
+    return this.configService.get<string>("OBJECT_STORAGE_REGION", "us-east-1");
+  }
+
+  get objectStorageBucket(): string {
+    return this.configService.getOrThrow<string>("OBJECT_STORAGE_BUCKET");
+  }
+
+  get objectStorageAccessKey(): string {
+    return this.configService.getOrThrow<string>("OBJECT_STORAGE_ACCESS_KEY");
+  }
+
+  get objectStorageSecretKey(): string {
+    return this.configService.getOrThrow<string>("OBJECT_STORAGE_SECRET_KEY");
+  }
+
+  get objectStorageUseSsl(): boolean {
+    return this.configService.get<boolean>("OBJECT_STORAGE_USE_SSL", false);
+  }
+
+  // ========================================================================
+  // SMTP Configuration
+  // ========================================================================
+
+  get smtpHost(): string {
+    return this.configService.getOrThrow<string>("SMTP_HOST");
+  }
+
+  get smtpPort(): number {
+    return this.configService.getOrThrow<number>("SMTP_PORT");
+  }
+
+  get smtpUser(): string | undefined {
+    return this.configService.get<string>("SMTP_USER");
+  }
+
+  get smtpPassword(): string | undefined {
+    return this.configService.get<string>("SMTP_PASSWORD");
+  }
+
+  get smtpFrom(): string {
+    return this.configService.getOrThrow<string>("SMTP_FROM");
+  }
+
+  get smtpTls(): boolean {
+    return this.configService.get<boolean>("SMTP_TLS", true);
+  }
+
+  get emailVerifyEnabled(): boolean {
+    return this.configService.get<boolean>("EMAIL_VERIFY_ENABLED", true);
+  }
+
+  // ========================================================================
+  // Encryption Configuration
+  // ========================================================================
+
+  get encryptionKey(): string {
+    return this.configService.getOrThrow<string>("ENCRYPTION_KEY");
+  }
+
+  // ========================================================================
+  // Rate Limiting Configuration
+  // ========================================================================
+
+  get rateLimitWindowMs(): number {
+    return this.configService.get("RATE_LIMIT_WINDOW_MS", 60000);
+  }
+
+  get rateLimitMaxRequests(): number {
+    return this.configService.get("RATE_LIMIT_MAX_REQUESTS", 100);
+  }
+
+  // ========================================================================
+  // Logging Configuration
+  // ========================================================================
+
+  get logFormat(): "json" | "simple" {
+    return this.configService.get("LOG_FORMAT", "json");
+  }
+
+  get logLevel(): string {
+    return this.configService.get("LOG_LEVEL", "debug");
+  }
+
+  get logOutput(): string {
+    return this.configService.get("LOG_OUTPUT", "console");
+  }
+
+  // ========================================================================
+  // Monitoring Configuration
+  // ========================================================================
+
+  get metricsEnabled(): boolean {
+    return this.configService.get("METRICS_ENABLED", true);
+  }
+
+  get prometheusPort(): number {
+    return this.configService.get("PROMETHEUS_PORT", 9090);
+  }
+
+  // ========================================================================
+  // OpenTelemetry Configuration
+  // ========================================================================
+
+  get otelEnabled(): boolean {
+    return this.configService.get("OTEL_ENABLED", false);
+  }
+
+  get otelExporterOtlpEndpoint(): string | undefined {
+    return this.configService.get("OTEL_EXPORTER_OTLP_ENDPOINT");
+  }
+
+  // ========================================================================
+  // Backup Configuration
+  // ========================================================================
+
+  get backupEnabled(): boolean {
+    return this.configService.get("BACKUP_ENABLED", true);
+  }
+
+  get backupSchedule(): string {
+    return this.configService.get("BACKUP_SCHEDULE", "0 2 * * *");
+  }
+
+  get backupRetentionDays(): number {
+    return this.configService.get("BACKUP_RETENTION_DAYS", 30);
+  }
+
+  // ========================================================================
+  // OAuth Configuration
+  // ========================================================================
+
+  get googleClientId(): string | undefined {
+    return this.configService.get("GOOGLE_CLIENT_ID");
+  }
+
+  get appleClientId(): string | undefined {
+    return this.configService.get("APPLE_CLIENT_ID");
+  }
+
+  get microsoftClientId(): string | undefined {
+    return this.configService.get("MICROSOFT_CLIENT_ID");
+  }
+}
