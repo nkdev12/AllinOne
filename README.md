@@ -457,3 +457,4 @@ Detailed documentation is available in the [`docs/`](docs/) directory:
 
 **Made with ❤️ for privacy-conscious developers**
 # AllinOne
+# AllinOne
