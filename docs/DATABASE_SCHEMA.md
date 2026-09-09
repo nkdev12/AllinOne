@@ -1,6 +1,6 @@
 # Allinone Backend — Database Schema & Data Dictionary
 
-This document provides a comprehensive entity-relationship dictionary for all database tables and models defined in `prisma/schema.prisma`.
+This document provides a comprehensive entity-relationship dictionary for all MongoDB collections and models defined in `prisma/schema.prisma`.
 
 ---
 

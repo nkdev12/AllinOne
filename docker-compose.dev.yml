@@ -2,21 +2,18 @@ version: '3.8'
 
 services:
   # ============================================================================
-  # PostgreSQL Database
+  # MongoDB Database
   # ============================================================================
-  postgres:
-    image: postgres:16-alpine
-    container_name: allinone-postgres-dev
-    environment:
-      POSTGRES_USER: allinone
-      POSTGRES_PASSWORD: allinone
-      POSTGRES_DB: allinone_dev
+  mongodb:
+    image: mongo:7.0
+    container_name: allinone-mongodb-dev
+    command: ["--replSet", "rs0", "--bind_ip_all"]
     ports:
-      - "5432:5432"
+      - "27017:27017"
     volumes:
-      - postgres_data_dev:/var/lib/postgresql/data
+      - mongo_data_dev:/data/db
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U allinone"]
+      test: ["CMD", "mongosh", "--eval", "try { rs.status().ok } catch (e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'127.0.0.1:27017'}]}).ok }"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -133,7 +130,7 @@ services:
       - allinone-dev
 
 volumes:
-  postgres_data_dev:
+  mongo_data_dev:
   redis_data_dev:
   minio_data_dev:
   mailpit_data_dev:

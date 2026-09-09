@@ -14,13 +14,23 @@ async function bootstrap() {
   const logger = new Logger("Bootstrap");
 
   // ========================================================================
-  // Security
+  // Security (Helmet & CORS)
   // ========================================================================
-  app.use(helmet());
+  app.use(
+    helmet({
+      contentSecurityPolicy: false, // Prevents Helmet from upgrading Swagger UI HTTP assets to HTTPS
+      crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" },
+    }),
+  );
   app.enableCors({
     origin: configService.get<string>("CORS_ORIGIN", "http://localhost:3000"),
     credentials: true,
-    allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "Idempotency-Key",
+      "X-Request-ID",
+    ],
     exposedHeaders: ["X-Request-ID"],
   });
 
@@ -74,8 +84,8 @@ async function bootstrap() {
 
   await app.listen(port, "0.0.0.0");
 
-  logger.log(`🚀 Allinone Backend started on http://0.0.0.0:${port}`);
-  logger.log(`📚 API Documentation: http://0.0.0.0:${port}/api`);
+  logger.log(`🚀 Allinone Backend started on http://localhost:${port}`);
+  logger.log(`📚 API Documentation: http://localhost:${port}/api`);
   logger.log(`Environment: ${environment}`);
   logger.log(`Database: ${configService.get("DATABASE_URL")?.split("@")[1]}`);
 }

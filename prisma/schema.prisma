@@ -6,7 +6,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "mongodb"
   url      = env("DATABASE_URL")
 }
 
@@ -15,12 +15,12 @@ datasource db {
 // ============================================================================
 
 model User {
-  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  email             String   @unique @db.VarChar(255)
-  displayName       String?  @db.VarChar(255)
-  avatar            String?  @db.Text
-  locale            String   @default("en-US") @db.VarChar(10)
-  timezone          String   @default("UTC") @db.VarChar(50)
+  id                String   @id @default(uuid()) @map("_id")
+  email             String   @unique
+  displayName       String?
+  avatar            String?
+  locale            String   @default("en-US")
+  timezone          String   @default("UTC")
   status            UserStatus @default(ACTIVE)
   emailVerifiedAt   DateTime?
   lastLoginAt       DateTime?
@@ -45,10 +45,8 @@ model User {
   vaultSetting      VaultSetting?
   vaultItems        VaultItem[]
 
-  @@index([email])
   @@index([status])
   @@index([createdAt])
-  // @@softDelete
 }
 
 enum UserStatus {
@@ -59,11 +57,11 @@ enum UserStatus {
 }
 
 model Authentication {
-  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId            String   @db.Uuid
+  id                String   @id @default(uuid()) @map("_id")
+  userId            String
   type              AuthType
-  identifier        String   @db.VarChar(255)
-  passwordHash      String?  @db.Text
+  identifier        String
+  passwordHash      String?
   emailVerified     Boolean  @default(false)
   lastUsedAt        DateTime?
   createdAt         DateTime @default(now())
@@ -86,17 +84,17 @@ enum AuthType {
 }
 
 model Session {
-  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId            String   @db.Uuid
-  deviceId          String   @db.Uuid
-  accessToken       String   @db.Text @unique
-  refreshToken      String   @db.Text @unique
+  id                String   @id @default(uuid()) @map("_id")
+  userId            String
+  deviceId          String
+  accessToken       String   @unique
+  refreshToken      String   @unique
   accessExpiresAt   DateTime
   refreshExpiresAt  DateTime
   revokedAt         DateTime?
   lastActivityAt    DateTime @default(now())
-  ipAddress         String?  @db.VarChar(45)
-  userAgent         String?  @db.Text
+  ipAddress         String?
+  userAgent         String?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
@@ -106,8 +104,6 @@ model Session {
 
   @@index([userId])
   @@index([deviceId])
-  @@index([accessToken])
-  @@index([refreshToken])
 }
 
 // ============================================================================
@@ -115,13 +111,13 @@ model Session {
 // ============================================================================
 
 model Device {
-  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId            String   @db.Uuid
-  name              String   @db.VarChar(255)
+  id                String   @id @default(uuid()) @map("_id")
+  userId            String
+  name              String
   platform          Platform
-  appVersion        String   @db.VarChar(50)
-  osVersion        String?  @db.VarChar(50)
-  publicKey         String   @db.Text
+  appVersion        String
+  osVersion        String?
+  publicKey         String
   lastSeenAt        DateTime @default(now())
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
@@ -134,7 +130,6 @@ model Device {
 
   @@index([userId])
   @@index([platform])
-  // @@softDelete
 }
 
 enum Platform {
@@ -147,9 +142,9 @@ enum Platform {
 }
 
 model DeviceSyncState {
-  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  deviceId          String   @db.Uuid @unique
-  lastPulledCursor  String?  @db.Text
+  id                String   @id @default(uuid()) @map("_id")
+  deviceId          String   @unique
+  lastPulledCursor  String?
   lastPushedSequence Int     @default(0)
   lastSuccessfulSyncAt DateTime?
   createdAt         DateTime @default(now())
@@ -164,20 +159,18 @@ model DeviceSyncState {
 // ============================================================================
 
 model MFASetting {
-  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId            String   @db.Uuid @unique
+  id                String   @id @default(uuid()) @map("_id")
+  userId            String   @unique
   totpEnabled       Boolean  @default(false)
-  totpSecret        String?  @db.Text // Encrypted at application level
-  recoveryCodes     String?  @db.Text // Encrypted JSON array of recovery codes
-  backupCodesUsed   String?  @db.Text // JSON array of used code indices
+  totpSecret        String?  // Encrypted at application level
+  recoveryCodes     String?  // Encrypted JSON array of recovery codes
+  backupCodesUsed   String?  // JSON array of used code indices
   lastVerifiedAt    DateTime?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
   // Relations
   user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
 }
 
 // ============================================================================
@@ -185,15 +178,15 @@ model MFASetting {
 // ============================================================================
 
 model Change {
-  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId            String   @db.Uuid
-  deviceId          String?  @db.Uuid // NULL for server-side changes
-  entityType        String   @db.VarChar(50) // e.g., "note", "task", "event"
-  entityId          String   @db.Uuid
+  id                String   @id @default(uuid()) @map("_id")
+  userId            String
+  deviceId          String?  // NULL for server-side changes
+  entityType        String
+  entityId          String
   operation         ChangeOperation
   version           Int
-  payload           Json     @db.JsonB // Contains only non-sensitive metadata
-  cursor            BigInt   @default(autoincrement())
+  payload           Json     // Contains only non-sensitive metadata
+  cursor            BigInt   @default(0)
   createdAt         DateTime @default(now())
 
   @@index([userId])
@@ -210,13 +203,13 @@ enum ChangeOperation {
 }
 
 model IdempotencyKey {
-  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  key               String   @unique @db.VarChar(255)
-  userId            String   @db.Uuid
-  endpoint          String   @db.VarChar(255)
-  method            String   @db.VarChar(10)
+  id                String   @id @default(uuid()) @map("_id")
+  key               String   @unique
+  userId            String
+  endpoint          String
+  method            String
   statusCode        Int
-  response          Json     @db.JsonB
+  response          Json
   expiresAt         DateTime
   createdAt         DateTime @default(now())
 
@@ -229,16 +222,16 @@ model IdempotencyKey {
 // ============================================================================
 
 model AuditLog {
-  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId            String?  @db.Uuid
+  id                String   @id @default(uuid()) @map("_id")
+  userId            String?
   action            AuditAction
-  resourceType      String?  @db.VarChar(50)
-  resourceId        String?  @db.Uuid
-  requestId         String?  @db.Uuid
-  changes           Json?    @db.JsonB // Diff of changes
-  ipAddress         String?  @db.VarChar(45)
-  userAgent         String?  @db.Text
-  metadata          Json?    @db.JsonB
+  resourceType      String?
+  resourceId        String?
+  requestId         String?
+  changes           Json?
+  ipAddress         String?
+  userAgent         String?
+  metadata          Json?
   createdAt         DateTime @default(now())
 
   // Relations
@@ -268,18 +261,17 @@ enum AuditAction {
   OAUTH_REVOKED
 }
 
-
 // ============================================================================
-// Notes & Content Management (Stage 4)
+// Notes & Content Management
 // ============================================================================
 
 model Folder {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId      String   @db.Uuid
-  parentId    String?  @db.Uuid
-  name        String   @db.VarChar(255)
-  color       String?  @db.VarChar(20)
-  icon        String?  @db.VarChar(50)
+  id          String   @id @default(uuid()) @map("_id")
+  userId      String
+  parentId    String?
+  name        String
+  color       String?
+  icon        String?
   sortOrder   Int      @default(0)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -287,7 +279,7 @@ model Folder {
 
   // Relations
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  parent      Folder?  @relation("FolderHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  parent      Folder?  @relation("FolderHierarchy", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   children    Folder[] @relation("FolderHierarchy")
   notes       Note[]
 
@@ -296,10 +288,10 @@ model Folder {
 }
 
 model Tag {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId      String   @db.Uuid
-  name        String   @db.VarChar(100)
-  color       String?  @db.VarChar(20)
+  id          String   @id @default(uuid()) @map("_id")
+  userId      String
+  name        String
+  color       String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -313,11 +305,11 @@ model Tag {
 }
 
 model Note {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId      String   @db.Uuid
-  folderId    String?  @db.Uuid
-  title       String   @db.VarChar(255)
-  content     String?  @db.Text
+  id          String   @id @default(uuid()) @map("_id")
+  userId      String
+  folderId    String?
+  title       String
+  content     String?
   isPinned    Boolean  @default(false)
   isArchived  Boolean  @default(false)
   isEncrypted Boolean  @default(false)
@@ -328,7 +320,7 @@ model Note {
 
   // Relations
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  folder      Folder?  @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  folder      Folder?  @relation(fields: [folderId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   noteTags    NoteTag[]
   history     NoteHistory[]
   attachments Attachment[]
@@ -339,25 +331,26 @@ model Note {
 }
 
 model NoteTag {
-  noteId      String   @db.Uuid
-  tagId       String   @db.Uuid
+  id          String   @id @default(uuid()) @map("_id")
+  noteId      String
+  tagId       String
   createdAt   DateTime @default(now())
 
   // Relations
   note        Note     @relation(fields: [noteId], references: [id], onDelete: Cascade)
   tag         Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
 
-  @@id([noteId, tagId])
+  @@unique([noteId, tagId])
   @@index([noteId])
   @@index([tagId])
 }
 
 model NoteHistory {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  noteId      String   @db.Uuid
+  id          String   @id @default(uuid()) @map("_id")
+  noteId      String
   version     Int
-  title       String   @db.VarChar(255)
-  content     String?  @db.Text
+  title       String
+  content     String?
   createdAt   DateTime @default(now())
 
   // Relations
@@ -367,14 +360,14 @@ model NoteHistory {
 }
 
 model Attachment {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  noteId      String   @db.Uuid
-  userId      String   @db.Uuid
-  filename    String   @db.VarChar(255)
-  mimeType    String   @db.VarChar(100)
+  id          String   @id @default(uuid()) @map("_id")
+  noteId      String
+  userId      String
+  filename    String
+  mimeType    String
   size        Int
-  storagePath String   @db.Text
-  checksum    String?  @db.VarChar(64)
+  storagePath String
+  checksum    String?
   createdAt   DateTime @default(now())
 
   // Relations
@@ -385,7 +378,7 @@ model Attachment {
 }
 
 // ============================================================================
-// Tasks & Todo Management (Stage 5)
+// Tasks & Todo Management
 // ============================================================================
 
 enum TaskPriority {
@@ -408,12 +401,12 @@ enum ReminderChannel {
 }
 
 model Project {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId      String   @db.Uuid
-  name        String   @db.VarChar(255)
-  description String?  @db.Text
-  color       String?  @db.VarChar(20)
-  icon        String?  @db.VarChar(50)
+  id          String   @id @default(uuid()) @map("_id")
+  userId      String
+  name        String
+  description String?
+  color       String?
+  icon        String?
   sortOrder   Int      @default(0)
   isArchived  Boolean  @default(false)
   createdAt   DateTime @default(now())
@@ -429,9 +422,9 @@ model Project {
 }
 
 model Section {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  projectId   String   @db.Uuid
-  name        String   @db.VarChar(255)
+  id          String   @id @default(uuid()) @map("_id")
+  projectId   String
+  name        String
   sortOrder   Int      @default(0)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -444,18 +437,18 @@ model Section {
 }
 
 model Task {
-  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId         String       @db.Uuid
-  projectId      String?      @db.Uuid
-  sectionId      String?      @db.Uuid
-  parentId       String?      @db.Uuid
-  title          String       @db.VarChar(255)
-  description    String?      @db.Text
+  id             String       @id @default(uuid()) @map("_id")
+  userId         String
+  projectId      String?
+  sectionId      String?
+  parentId       String?
+  title          String
+  description    String?
   priority       TaskPriority @default(P4_LOW)
   status         TaskStatus   @default(TODO)
   dueDate        DateTime?
-  dueTime        String?      @db.VarChar(10)
-  recurrenceRule String?      @db.VarChar(255)
+  dueTime        String?
+  recurrenceRule String?
   completedAt    DateTime?
   sortOrder      Int          @default(0)
   createdAt      DateTime     @default(now())
@@ -465,8 +458,8 @@ model Task {
   // Relations
   user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   project        Project?     @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  section        Section?     @relation(fields: [sectionId], references: [id], onDelete: SetNull)
-  parent         Task?        @relation("TaskSubtasks", fields: [parentId], references: [id], onDelete: Cascade)
+  section        Section?     @relation(fields: [sectionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  parent         Task?        @relation("TaskSubtasks", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   subtasks       Task[]       @relation("TaskSubtasks")
   taskLabels     TaskLabel[]
   reminders      Reminder[]
@@ -480,23 +473,24 @@ model Task {
 }
 
 model TaskLabel {
-  taskId      String   @db.Uuid
-  tagId       String   @db.Uuid
+  id          String   @id @default(uuid()) @map("_id")
+  taskId      String
+  tagId       String
   createdAt   DateTime @default(now())
 
   // Relations
   task        Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
   tag         Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
 
-  @@id([taskId, tagId])
+  @@unique([taskId, tagId])
   @@index([taskId])
   @@index([tagId])
 }
 
 model Reminder {
-  id          String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  taskId      String          @db.Uuid
-  userId      String          @db.Uuid
+  id          String          @id @default(uuid()) @map("_id")
+  taskId      String
+  userId      String
   remindAt    DateTime
   isSent      Boolean         @default(false)
   channel     ReminderChannel @default(NOTIFICATION)
@@ -512,7 +506,7 @@ model Reminder {
 }
 
 // ============================================================================
-// Calendar & Events Management (Stage 6)
+// Calendar & Events Management
 // ============================================================================
 
 enum CalendarProvider {
@@ -536,16 +530,16 @@ enum AttendeeStatus {
 }
 
 model Calendar {
-  id               String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId           String           @db.Uuid
-  name             String           @db.VarChar(255)
-  description      String?          @db.Text
-  color            String?          @db.VarChar(20)
-  timeZone         String           @default("UTC") @db.VarChar(50)
+  id               String           @id @default(uuid()) @map("_id")
+  userId           String
+  name             String
+  description      String?
+  color            String?
+  timeZone         String           @default("UTC")
   isPrimary        Boolean          @default(false)
   isPublic         Boolean          @default(false)
   externalProvider CalendarProvider @default(LOCAL)
-  externalId       String?          @db.VarChar(255)
+  externalId       String?
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
   deletedAt        DateTime?
@@ -558,18 +552,18 @@ model Calendar {
 }
 
 model Event {
-  id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId         String          @db.Uuid
-  calendarId     String          @db.Uuid
-  title          String          @db.VarChar(255)
-  description    String?         @db.Text
-  location       String?         @db.Text
+  id             String          @id @default(uuid()) @map("_id")
+  userId         String
+  calendarId     String
+  title          String
+  description    String?
+  location       String?
   startAt        DateTime
   endAt          DateTime
   isAllDay       Boolean         @default(false)
-  recurrenceRule String?         @db.VarChar(255)
+  recurrenceRule String?
   status         EventStatus     @default(CONFIRMED)
-  color          String?         @db.VarChar(20)
+  color          String?
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
   deletedAt      DateTime?
@@ -586,10 +580,10 @@ model Event {
 }
 
 model EventAttendee {
-  id          String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  eventId     String         @db.Uuid
-  email       String         @db.VarChar(255)
-  displayName String?        @db.VarChar(255)
+  id          String         @id @default(uuid()) @map("_id")
+  eventId     String
+  email       String
+  displayName String?
   status      AttendeeStatus @default(NEEDS_ACTION)
   isOrganizer Boolean        @default(false)
   createdAt   DateTime       @default(now())
@@ -602,9 +596,9 @@ model EventAttendee {
 }
 
 model EventReminder {
-  id            String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  eventId       String          @db.Uuid
-  userId        String          @db.Uuid
+  id            String          @id @default(uuid()) @map("_id")
+  eventId       String
+  userId        String
   minutesBefore Int             @default(15)
   channel       ReminderChannel @default(NOTIFICATION)
   createdAt     DateTime        @default(now())
@@ -617,7 +611,7 @@ model EventReminder {
 }
 
 // ============================================================================
-// Zero-Knowledge Password Vault (Stage 7)
+// Zero-Knowledge Password Vault
 // ============================================================================
 
 enum VaultItemType {
@@ -629,10 +623,10 @@ enum VaultItemType {
 }
 
 model VaultSetting {
-  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId            String   @db.Uuid @unique
-  masterKeyHash     String   @db.Text
-  keySalt           String   @db.Text
+  id                String   @id @default(uuid()) @map("_id")
+  userId            String   @unique
+  masterKeyHash     String
+  keySalt           String
   kdfIterations     Int      @default(100000)
   kdfMemory         Int?     @default(65536)
   isVaultConfigured Boolean  @default(true)
@@ -641,19 +635,17 @@ model VaultSetting {
 
   // Relations
   user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
 }
 
 model VaultItem {
-  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId        String        @db.Uuid
+  id            String        @id @default(uuid()) @map("_id")
+  userId        String
   type          VaultItemType @default(LOGIN)
-  name          String        @db.VarChar(255)
-  category      String?       @db.VarChar(100)
-  encryptedData String        @db.Text
-  iv            String        @db.VarChar(255)
-  authTag       String        @db.VarChar(255)
+  name          String
+  category      String?
+  encryptedData String
+  iv            String
+  authTag       String
   isFavorite    Boolean       @default(false)
   version       Int           @default(1)
   createdAt     DateTime      @default(now())

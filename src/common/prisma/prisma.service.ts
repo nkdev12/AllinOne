@@ -29,7 +29,7 @@ export class PrismaService
   async checkHealth(): Promise<{ status: string; latency: number }> {
     const start = Date.now();
     try {
-      await this.$queryRaw`SELECT 1`;
+      await this.$runCommandRaw({ ping: 1 });
       const latency = Date.now() - start;
       return { status: "healthy", latency };
     } catch (error) {

@@ -86,16 +86,29 @@ export class AllExceptionsFilter implements ExceptionFilter {
       path: request.url || request.originalUrl,
     };
 
-    this.logger.error(
-      `[${request.method}] ${request.url} - ${status} - ${code}`,
-      {
-        requestId,
-        method: request.method,
-        url: request.url,
-        statusCode: status,
-        errorCode: code,
-      },
-    );
+    if (status >= 500) {
+      this.logger.error(
+        `[${request.method}] ${request.url} - ${status} - ${code}`,
+        {
+          requestId,
+          method: request.method,
+          url: request.url,
+          statusCode: status,
+          errorCode: code,
+        },
+      );
+    } else {
+      this.logger.warn(
+        `[${request.method}] ${request.url} - ${status} - ${code}`,
+        {
+          requestId,
+          method: request.method,
+          url: request.url,
+          statusCode: status,
+          errorCode: code,
+        },
+      );
+    }
 
     response
       .status(status)

@@ -25,37 +25,24 @@ services:
       DOMAIN=${DOMAIN:-app.example.com}
 
   # ============================================================================
-  # PostgreSQL Database (Production)
+android   # MongoDB Database (Production)
   # ============================================================================
-  postgres:
-    image: postgres:16-alpine
-    container_name: allinone-postgres-prod
-    environment:
-      POSTGRES_USER: ${DB_USER:-allinone}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_DB: ${DB_NAME:-allinone_prod}
-      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+  mongodb:
+    image: mongo:7.0
+    container_name: allinone-mongodb-prod
+    command: ["--replSet", "rs0", "--bind_ip_all"]
     ports:
-      - "5432:5432"
+      - "27017:27017"
     volumes:
-      - postgres_data_prod:/var/lib/postgresql/data
-      - ./infrastructure/postgres/backup:/backups
+      - mongo_data_prod:/data/db
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-allinone}"]
+      test: ["CMD", "mongosh", "--eval", "try { rs.status().ok } catch (e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'127.0.0.1:27017'}]}).ok }"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
       - allinone-prod
     restart: unless-stopped
-    command: 
-      - "postgres"
-      - "-c"
-      - "max_connections=200"
-      - "-c"
-      - "shared_buffers=256MB"
-      - "-c"
-      - "effective_cache_size=1GB"
 
   # ============================================================================
   # Redis (Production)
@@ -115,7 +102,7 @@ services:
       APP_ENV: production
       APP_PORT: 3000
       APP_URL: ${APP_URL}
-      DATABASE_URL: postgresql://${DB_USER:-allinone}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-allinone_prod}
+      DATABASE_URL: mongodb://mongodb:27017/${DB_NAME:-allinone_prod}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
@@ -135,7 +122,7 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      postgres:
+      mongodb:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -164,7 +151,7 @@ services:
     environment:
       NODE_ENV: production
       APP_ENV: production
-      DATABASE_URL: postgresql://${DB_USER:-allinone}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-allinone_prod}
+      DATABASE_URL: mongodb://mongodb:27017/${DB_NAME:-allinone_prod}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       OBJECT_STORAGE_ENDPOINT: http://minio:9000
       OBJECT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER}
@@ -178,7 +165,7 @@ services:
       LOG_LEVEL: info
       LOG_FORMAT: json
     depends_on:
-      postgres:
+      mongodb:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -234,7 +221,7 @@ services:
     restart: unless-stopped
 
 volumes:
-  postgres_data_prod:
+  mongo_data_prod:
   redis_data_prod:
   minio_data_prod:
   prometheus_data_prod:
