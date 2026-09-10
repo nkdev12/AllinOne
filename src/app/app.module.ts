@@ -26,6 +26,9 @@ import { MetricsModule } from "@/common/metrics/metrics.module";
 import { MetricsInterceptor } from "@/common/metrics/metrics.interceptor";
 import { CustomThrottlerGuard } from "@/common/guards/custom-throttler.guard";
 import { IdempotencyInterceptor } from "@/common/interceptors/idempotency.interceptor";
+import { RedisThrottlerStorage } from "@/common/throttler/redis-throttler.storage";
+import { TracingModule } from "@/common/tracing/tracing.module";
+import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
 
 @Module({
   imports: [
@@ -111,6 +114,7 @@ import { IdempotencyInterceptor } from "@/common/interceptors/idempotency.interc
     ConfigurationModule,
     LoggingModule,
     PrismaModule,
+    TracingModule,
     ErrorHandlingModule,
     QueuesModule,
     AuditLogModule,
@@ -128,6 +132,15 @@ import { IdempotencyInterceptor } from "@/common/interceptors/idempotency.interc
           limit: config.rateLimitMaxRequests,
         },
       ],
+      useFactory: (config: ConfigurationService) => ({
+        throttlers: [
+          {
+            ttl: config.rateLimitWindowMs,
+            limit: config.rateLimitMaxRequests,
+          },
+        ],
+        storage: new RedisThrottlerStorage(config),
+      }),
     }),
 
     // ====================================================================
@@ -150,6 +163,10 @@ import { IdempotencyInterceptor } from "@/common/interceptors/idempotency.interc
     {
       provide: APP_GUARD,
       useClass: CustomThrottlerGuard,
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: TracingInterceptor,
     },
     {
       provide: APP_INTERCEPTOR,

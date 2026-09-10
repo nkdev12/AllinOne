@@ -24,6 +24,8 @@ model User {
   status            UserStatus @default(ACTIVE)
   emailVerifiedAt   DateTime?
   lastLoginAt       DateTime?
+  failedLoginAttempts Int      @default(0)
+  lockedUntil       DateTime?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
   deletedAt         DateTime?
@@ -257,6 +259,8 @@ enum AuditAction {
   ACCOUNT_CREATED
   ACCOUNT_DELETED
   ACCOUNT_EXPORTED
+  ACCOUNT_LOCKED
+  ACCOUNT_UNLOCKED
   OAUTH_CONNECTED
   OAUTH_REVOKED
 }

@@ -94,3 +94,13 @@ export class AdminDisableMfaDto {
   @IsNotEmpty()
   reason!: string;
 }
+
+export class AdminUnlockUserDto {
+  @ApiPropertyOptional({
+    description: "Administrative reason for unlocking user account",
+    example: "User identity confirmed via out-of-band support verification",
+  })
+  @IsOptional()
+  @IsString()
+  reason?: string;
+}

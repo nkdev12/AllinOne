@@ -224,11 +224,18 @@ Edit a file, save, and the server recompiles.
 # Unit tests
 npm run test
 
+# End-to-end (E2E) tests
+npm run test:e2e
+
 # Watch mode (re-run on file changes)
 npm run test:watch
 
 # Coverage report
 npm run test:cov
+
+# Performance / Load tests (requires k6)
+npm run test:load:sync
+npm run test:load:auth
 ```
 
 ### Code Quality

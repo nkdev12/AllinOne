@@ -25,6 +25,7 @@ import {
   AdminRevokeSessionsDto,
   AdminDisableMfaDto,
   UpdateUserStatusDto,
+  AdminUnlockUserDto,
 } from "./dto/admin.dto";
 
 @ApiTags("Admin")
@@ -99,5 +100,24 @@ export class AdminController {
   @ApiResponse({ status: 200, description: "User security posture overview" })
   async getUserOverview(@Param("userId") userId: string) {
     return this.adminService.getUserOverview(userId);
+  }
+
+  @Post("users/:userId/unlock")
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: "Administratively unlock a locked user account" })
+  @ApiResponse({
+    status: 200,
+    description: "User account unlocked successfully",
+  })
+  async unlockUser(
+    @Param("userId") userId: string,
+    @GetUser("id") operatorId: string,
+    @Body() dto: AdminUnlockUserDto,
+  ) {
+    return this.adminService.unlockUserAccount(
+      userId,
+      operatorId || "00000000-0000-0000-0000-000000000000",
+      dto?.reason,
+    );
   }
 }

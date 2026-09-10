@@ -4,6 +4,7 @@ import { ValidationPipe, Logger } from "@nestjs/common";
 import helmet from "helmet";
 import { AppModule } from "./app/app.module";
 import { ConfigService } from "@nestjs/config";
+import { RedisIoAdapter } from "./sync/adapters/redis-io.adapter";
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -57,6 +58,14 @@ async function bootstrap() {
   );
 
   // ========================================================================
+  // WebSocket Adapter (Redis Pub/Sub Clustering)
+  // ========================================================================
+  const redisUrl = configService.get<string>("REDIS_URL");
+  const redisIoAdapter = new RedisIoAdapter(app, redisUrl);
+  await redisIoAdapter.connectToRedis();
+  app.useWebSocketAdapter(redisIoAdapter);
+
+  // ========================================================================
   // OpenAPI/Swagger Documentation
   // ========================================================================
   const swaggerConfig = new DocumentBuilder()
@@ -74,6 +83,10 @@ async function bootstrap() {
     .addTag("Users", "User management endpoints")
     .addTag("Devices", "Device management endpoints")
     .addTag("Sync", "Synchronization endpoints")
+    .addTag("Notes", "Notes, folders, and tags management")
+    .addTag("Tasks", "Tasks, projects, sections, and reminders")
+    .addTag("Calendar", "Calendars and events management")
+    .addTag("Vault", "Zero-knowledge encrypted password and secret vault")
     .addTag("Admin", "Operational administration and incident response")
     .build();
 

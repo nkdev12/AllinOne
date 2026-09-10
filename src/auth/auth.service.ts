@@ -161,19 +161,89 @@ export class AuthService {
       throw new UnauthorizedException("Invalid email or password");
     }
 
+    const user = authRecord.user;
+
+    // Check if account is currently locked due to failed attempts
+    if (user.lockedUntil && user.lockedUntil > new Date()) {
+      const remainingMinutes = Math.max(
+        1,
+        Math.ceil((user.lockedUntil.getTime() - Date.now()) / 60000),
+      );
+      await this.auditLogService?.recordAuditLog({
+        userId: user.id,
+        action: AuditAction.LOGIN_FAILURE,
+        ipAddress,
+        userAgent,
+        metadata: {
+          email: dto.email,
+          reason: "Account is temporarily locked",
+          lockedUntil: user.lockedUntil,
+        },
+      });
+      throw new UnauthorizedException(
+        `Account is temporarily locked due to multiple failed login attempts. Please try again in ${remainingMinutes} minute(s).`,
+      );
+    }
+
     const isPasswordValid = await argon2.verify(
       authRecord.passwordHash,
       dto.password,
     );
 
     if (!isPasswordValid) {
+      const attempts = (user.failedLoginAttempts || 0) + 1;
+      const MAX_FAILED_ATTEMPTS = 5;
+      const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
+      const isNowLocked = attempts >= MAX_FAILED_ATTEMPTS;
+      const lockedUntil = isNowLocked
+        ? new Date(Date.now() + LOCKOUT_DURATION_MS)
+        : null;
+
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          failedLoginAttempts: attempts,
+          lockedUntil,
+        },
+      });
+
+      if (isNowLocked) {
+        await this.auditLogService?.recordAuditLog({
+          userId: user.id,
+          action: AuditAction.ACCOUNT_LOCKED,
+          ipAddress,
+          userAgent,
+          metadata: {
+            email: dto.email,
+            attempts,
+            lockedUntil,
+            reason: "Maximum failed password attempts reached",
+          },
+        });
+
+        this.logger.warn(
+          `[AuthService] Account ${user.id} locked for 15 minutes after ${attempts} failed attempts`,
+        );
+
+        throw new UnauthorizedException(
+          "Account has been temporarily locked for 15 minutes due to multiple failed login attempts.",
+        );
+      }
+
       await this.auditLogService?.recordAuditLog({
         userId: authRecord.userId,
+        userId: user.id,
         action: AuditAction.LOGIN_FAILURE,
         ipAddress,
         userAgent,
         metadata: { email: dto.email, reason: "Password verification failed" },
+        metadata: {
+          email: dto.email,
+          failedLoginAttempts: attempts,
+          reason: "Password verification failed",
+        },
       });
+
       throw new UnauthorizedException("Invalid email or password");
     }
 
@@ -183,6 +253,17 @@ export class AuthService {
       throw new UnauthorizedException(
         "Account is disabled or pending verification",
       );
+    }
+
+    // Reset failed login attempts and lockout upon successful authentication
+    if (user.failedLoginAttempts > 0 || user.lockedUntil !== null) {
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+        },
+      });
     }
 
     let device = await this.prisma.device.findFirst({

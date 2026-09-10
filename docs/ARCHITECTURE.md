@@ -471,6 +471,11 @@ When data changes:
 - Request correlation IDs
 - No sensitive data (passwords, tokens, vault contents)
 - Different log levels for development/production
+- Structured JSON format via custom `LoggerService`
+- Trace and span correlation (`traceId`, `spanId`) automatically injected from active `AsyncLocalStorage` context
+- Request correlation IDs (`requestId`)
+- Zero sensitive data logged (passwords, tokens, vault contents, encryption keys excluded)
+- Environment-aware log levels (debug/verbose in development, info/warn/error in production)
 
 ### Metrics
 
@@ -480,9 +485,14 @@ When data changes:
 - Redis latency & memory
 - Queue depth & processing time
 - Business metrics (notes created, tasks completed, etc.)
+- Database latency & connection pool stats via Prisma telemetry hooks
+- Redis latency & memory utilization
+- Queue depth & processing time (Bull queues)
+- Business metrics (notes created, tasks completed, delta changes processed)
 
 ### Tracing
 ### Tracing (Planned — Roadmap)
+### Distributed Tracing & W3C TraceContext (Implemented)
 
 - Distributed tracing (OpenTelemetry)
 - Request flow across services
@@ -492,6 +502,15 @@ When data changes:
 - Database query tracing and slow query instrumentation — *Planned / Roadmap*
 - External API call tracing (OAuth providers, webhook endpoints) — *Planned / Roadmap*
 - *Current active capability*: Request correlation across services, controllers, and security `AuditLog` records is fully active via `X-Request-ID` and auto-generated UUIDv4 request IDs.
+The backend implements end-to-end distributed tracing following the **W3C TraceContext** standard (`traceparent: 00-{traceId}-{spanId}-{traceFlags}`):
+
+- **`TracingService` (`src/common/tracing/tracing.service.ts`)**: Manages active spans, child span creation, span tags/attributes, execution timing, and asynchronous context propagation via Node.js `AsyncLocalStorage<TraceContext>`.
+- **`TracingInterceptor` (`src/common/tracing/tracing.interceptor.ts`)**: Global HTTP interceptor that:
+  1. Extracts incoming W3C `traceparent` headers, creating child spans for upstream traces, or automatically initializes a 128-bit `traceId` if none is provided.
+  2. Injects `X-Trace-ID` and `traceparent` response headers for downstream client and microservice correlation.
+  3. Records HTTP status codes, routing metadata, and latency on span completion.
+- **Log Enrichment**: `LoggerService` queries `TracingService.getTraceId()` and `TracingService.getSpanId()` to automatically tag every log event with active trace coordinates.
+- **OpenTelemetry Compatibility**: The in-memory span registry (`Span`, `SpanStatus`) is structured to export directly to OpenTelemetry collectors (OTLP gRPC/HTTP to Jaeger, Tempo, or Datadog).
 
 ### Health Checks
 
@@ -501,6 +520,10 @@ When data changes:
 - Liveness probe — is application running? (`GET /health/live`)
 - Readiness probe — can it accept traffic? (`GET /health/ready`)
 - Service-specific Terminus checks for database (PostgreSQL latency) and Redis (`GET /health`)
+- Liveness probe — is application process alive? (`GET /health/live`)
+- Readiness probe — can application accept traffic? (`GET /health/ready`)
+- Deep service checks — dynamic Terminus probes verifying PostgreSQL and Redis responsiveness (`GET /health`)
+- Service information probe — build, version, uptime, and system status (`GET /info`)
 
 ## Scaling Considerations
 
@@ -585,6 +608,28 @@ All error responses return a standardized flat JSON envelope conforming to `AllE
 > 1. `requestId` is **always populated** in every error response payload.
 > 2. `X-Request-ID` is echoed back in the response headers.
 > 3. The `requestId` is attached to structured log entries and security `AuditLog` records for end-to-end tracing.
+
+## Testing Architecture & Quality Assurance
+
+The codebase employs a multi-tiered testing strategy spanning unit, end-to-end (E2E), and load testing harnesses:
+
+### 1. Unit Testing Suite (`npm test`)
+- Built with **Jest** testing framework (`jest.config.ts`).
+- 19 test suites covering services, controllers, guards, interceptors, and utilities.
+- Strict isolation using mock implementations for external dependencies (Prisma, Redis, Config, Bull).
+
+### 2. End-to-End (E2E) Test Suite (`npm run test:e2e`)
+- Built using **Supertest** and NestJS `Test.createTestingModule` (`test/jest-e2e.json`).
+- Path mapping `@/*` resolves cleanly to `src/*`.
+- Key functional flows verified end-to-end:
+  - **Health & Telemetry (`test/e2e/health.e2e-spec.ts`)**: Ingress root, liveness probe, dynamic readiness, system info probe, and upstream W3C `traceparent` ingestion.
+  - **Authentication & Lockout Lifecycle (`test/e2e/auth-flow.e2e-spec.ts`)**: Registration validation, user onboarding, password verification, 5-attempt brute-force lockout envelope, token refresh rotation, and logout session revocation.
+  - **Device & Delta Sync Flow (`test/e2e/sync-flow.e2e-spec.ts`)**: Device registration, device enumeration, batch delta push validation, cursor-based delta pull, and device sync status probe.
+
+### 3. Load & Performance Testing (`npm run test:load:*`)
+- Executed via **k6** load testing engine (`test/load/`):
+  - `test/load/k6-sync-load.js`: Simulates 50–100 concurrent virtual users (VUs) executing delta push/pull cycles with performance thresholds (p95 < 250ms, error rate < 1%).
+  - `test/load/k6-auth-load.js`: Evaluates authentication throughput, token refresh rotation, and rate-limiting guard performance under sustained traffic.
 
 ## Performance Targets
 

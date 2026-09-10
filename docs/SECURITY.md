@@ -41,6 +41,15 @@ This document outlines security practices and threat models for the Allinone bac
 - Never logged or exposed
 - **Dual-Factor Enforcement on MFA Disable**: Disabling MFA strictly requires the primary factor (account password) **AND** the second factor (valid TOTP code or single-use recovery code). A single factor alone cannot disable 2FA.
 
+### Account Lockout & Credential-Stuffing Defense
+
+- **Lockout Threshold**: 5 consecutive failed password attempts automatically lock the user account.
+- **Lockout Duration**: 15 minutes (`lockedUntil = Date.now() + 15 * 60 * 1000`).
+- **Response Behavior**: Subsequent login requests while locked are rejected with HTTP 401: `"Account is temporarily locked due to multiple failed login attempts. Please try again in X minute(s)."` (password verification is skipped to conserve server CPU).
+- **Audit & SIEM Logging**: Lock triggers an immutable `AuditAction.ACCOUNT_LOCKED` audit log event recording IP address, user agent, and timestamp.
+- **Auto-Reset on Success**: Valid authentication resets `failedLoginAttempts = 0` and clears `lockedUntil = null`.
+- **Administrative Incident Response**: Support/Security administrators can proactively unlock locked accounts via `POST /admin/users/:userId/unlock`, logging `AuditAction.ACCOUNT_UNLOCKED`.
+
 ### OAuth 2.0 & OpenID Connect Signature Verification
 
 - **Google**: ID tokens verified cryptographically via `google-auth-library` (`OAuth2Client.verifyIdToken`) with audience and email verification.
@@ -233,8 +242,10 @@ Use one of:
 ## API Security
 
 ### Rate Limiting
+### Rate Limiting & Distributed Throttling
 
 Protect sensitive endpoints:
+Protect sensitive endpoints with distributed Redis-backed throttling (`RedisThrottlerStorage`):
 
 ```
 POST /auth/login     — 5 attempts per minute
@@ -243,6 +254,21 @@ POST /auth/mfa       — 5 attempts per minute
 GET  /api/search     — 100 per minute
 GET  /api/export     — 10 per hour
 ```
+- **Cluster-Wide Enforcement**: Rate limiting state is synchronized across all horizontally scaled backend instances using Redis atomic pipelines (`INCR` + `PTTL`), preventing clients from bypassing rate limits by hitting different pods.
+- **Fail-Open Resilience**: If Redis experiences transient degradation, the storage layer logs a warning and permits requests rather than failing open to DoS or terminating API operations.
+- **Protected Endpoint Budgets**:
+  ```
+  POST /auth/login     — 5 attempts per minute
+  POST /auth/register  — 3 per hour per IP
+  POST /auth/mfa       — 5 attempts per minute
+  GET  /api/search     — 100 per minute
+  GET  /api/export     — 10 per hour
+  ```
+
+### Clustered WebSocket Gateway
+
+- Horizontally distributed realtime events using `@socket.io/redis-adapter`.
+- Redis Pub/Sub channels ensure room broadcasts (e.g. `user:<userId>`) correctly cross server boundaries to all client connections regardless of which backend node terminates their WebSocket connection.
 
 ### CORS Configuration
 

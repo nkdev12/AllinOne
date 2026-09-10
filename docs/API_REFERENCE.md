@@ -205,7 +205,12 @@ All error responses return standard HTTP status codes and a consistent JSON payl
   ```
 - **Response**: `200 OK`
   - When MFA is disabled: Returns `user` and `tokens` object; sets `httpOnly; Secure; SameSite=Strict` cookie `refresh_token` scoped to `/auth/refresh`.
+  - When MFA is disabled: Returns `user` and `tokens` object; sets `httpOnly; Secure; SameSite=Strict` cookie `refresh_token` scoped to `/auth/refresh`. Resets failed login attempts counter.
   - When MFA is enabled: Returns `{ "mfaRequired": true, "tempToken": "<TICKET_JWT>" }`.
+- **Lockout Defense**:
+  - 5 consecutive invalid password attempts automatically locks the account for 15 minutes.
+  - Subsequent requests during lockout fail with `401 Unauthorized`: `"Account is temporarily locked due to multiple failed login attempts. Please try again in X minute(s)."`.
+  - Emits `ACCOUNT_LOCKED` audit log event. Account can be unlocked by admin via `POST /admin/users/:userId/unlock`.
 
 #### `POST /auth/oauth/google`
 - **Access**: `@Public()`
@@ -1016,13 +1021,46 @@ All error responses return standard HTTP status codes and a consistent JSON payl
     "displayName": "Alex Mercer",
     "status": "ACTIVE",
     "isEmailVerified": true,
+    "user": {
+      "id": "123e4567-e89b-12d3-a456-426614174000",
+      "email": "user@example.com",
+      "displayName": "Alex Mercer",
+      "status": "ACTIVE",
+      "failedLoginAttempts": 5,
+      "lockedUntil": "2026-09-10T22:45:00.000Z",
+      "isLocked": true,
+      "createdAt": "2026-09-01T10:00:00.000Z"
+    },
     "mfaEnabled": true,
     "activeSessionsCount": 2,
     "registeredDevicesCount": 3,
     "vaultConfigured": true,
     "createdAt": "2026-09-01T10:00:00.000Z"
+    "activeDevicesCount": 3,
+    "activeSessions": [...],
+    "activeDevices": [...],
+    "recentAuditLogs": [...]
   }
   ```
+
+#### `POST /admin/users/:userId/unlock`
+- **Access**: `JwtAuthGuard` + `AdminGuard`
+- **Purpose**: Administratively unlock an account locked by brute-force lockout, resetting failed attempt counter.
+- **Body**:
+  ```json
+  {
+    "reason": "Customer identity verified via out-of-band video verification"
+  }
+  ```
+- **Response**: `200 OK`
+  ```json
+  {
+    "success": true,
+    "targetUserId": "123e4567-e89b-12d3-a456-426614174000",
+    "message": "User account unlocked successfully"
+  }
+  ```
+- **Audit Action**: Emits `ACCOUNT_UNLOCKED` audit log event.
 
 ---
 
