@@ -35,4 +35,3 @@ export interface LoginOptionsResponse {
     transports?: string[];
   }>;
 }
-

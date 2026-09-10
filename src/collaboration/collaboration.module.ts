@@ -12,4 +12,3 @@ import { AuditLogModule } from "@/common/audit/audit-log.module";
   exports: [CollaborationService],
 })
 export class CollaborationModule {}
-

@@ -19,4 +19,3 @@ export interface SharePermissionResult {
   role?: ShareRole;
   isOwner: boolean;
 }
-

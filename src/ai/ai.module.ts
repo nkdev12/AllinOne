@@ -11,4 +11,3 @@ import { ConfigurationModule } from "@/config/configuration.module";
   exports: [AiService],
 })
 export class AiModule {}
-

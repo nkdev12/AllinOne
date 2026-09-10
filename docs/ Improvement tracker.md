@@ -67,8 +67,7 @@ Priority key:
 2. **Distributed Redis Rate Limiting**: Wired `@nestjs/throttler` with Redis backend and user/IP keying.
 3. **Brute-Force Account Lockout**: Implemented 5-failed-attempt / 15-minute lockout with admin unlock API (`POST /admin/users/:userId/unlock`) and SIEM logging.
 
-### Phase 2: Observability & End-to-End Testing (Current)
-### Phase 2: Observability & End-to-End Testing
+### Phase 2: Observability & End-to-End Testing (Completed)
 
 1. **Distributed Tracing & W3C TraceContext**:
    - `TracingService` using `AsyncLocalStorage<TraceContext>` for non-intrusive asynchronous context propagation.

@@ -428,7 +428,6 @@ npm run db:migrate
 
 **Q: Can I deploy to production now?**
 
-A: Not yet. The backend is still under development. Wait for Stage 1 to complete, then Stage 2 (Authentication) and Stage 3 (Sync) before considering production deployment.
 A: Yes, all core application stages (Stages 1–7: Architecture & Foundations, Authentication & Admin RBAC, Real-time Delta Sync, Notes, Tasks, Calendar, and Zero-Knowledge Vault) are fully implemented and verified with test suites. Follow the production runbook in [docs/DEPLOYMENT.md](DEPLOYMENT.md) for pre-flight checks, infrastructure provisioning, secrets management, and automated backups.
 
 **Q: How do I set up for mobile development?**

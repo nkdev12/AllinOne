@@ -1,4 +1,3 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
 import { Injectable, NotFoundException, Optional } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { CollaborationService } from "@/collaboration/collaboration.service";
@@ -9,7 +8,6 @@ import { ChangeOperation } from "@prisma/client";
 
 @Injectable()
 export class NotesService {
-  constructor(private readonly prisma: PrismaService) {}
   constructor(
     private readonly prisma: PrismaService,
     @Optional() private readonly collaborationService?: CollaborationService,
@@ -134,7 +132,6 @@ export class NotesService {
   }
 
   async getNoteById(userId: string, noteId: string) {
-    const note = await this.prisma.note.findFirst({
     let note = await this.prisma.note.findFirst({
       where: { id: noteId, userId, deletedAt: null },
       include: {
@@ -174,7 +171,6 @@ export class NotesService {
   }
 
   async updateNote(userId: string, noteId: string, dto: UpdateNoteDto) {
-    const existing = await this.prisma.note.findFirst({
     let existing = await this.prisma.note.findFirst({
       where: { id: noteId, userId, deletedAt: null },
     });

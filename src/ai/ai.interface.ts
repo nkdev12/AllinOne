@@ -30,4 +30,3 @@ export interface SuggestedTagsResult {
   suggestedCategories: string[];
   provider: "gemini" | "heuristic";
 }
-
