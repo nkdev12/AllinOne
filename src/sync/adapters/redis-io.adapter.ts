@@ -7,6 +7,8 @@ import { Logger } from "@nestjs/common";
 export class RedisIoAdapter extends IoAdapter {
   private adapterConstructor?: ReturnType<typeof createAdapter>;
   private readonly logger = new Logger(RedisIoAdapter.name);
+  private pubClient?: Redis;
+  private subClient?: Redis;
 
   constructor(
     app: any,
@@ -18,27 +20,58 @@ export class RedisIoAdapter extends IoAdapter {
   async connectToRedis(): Promise<void> {
     const url =
       this.redisUrl || process.env.REDIS_URL || "redis://localhost:6379";
+
     try {
-      const pubClient = new Redis(url, {
-        maxRetriesPerRequest: null,
-        enableReadyCheck: false,
+      this.pubClient = new Redis(url, {
+        lazyConnect: true,
+        connectTimeout: 3000,
+        maxRetriesPerRequest: 1,
+        retryStrategy: (times) => {
+          if (times > 3) {
+            return null;
+          }
+          return Math.min(times * 200, 1000);
+        },
       });
-      const subClient = pubClient.duplicate();
 
-      pubClient.on("error", (err) => {
-        this.logger.error(`Redis PubClient error: ${err.message}`);
-      });
-      subClient.on("error", (err) => {
-        this.logger.error(`Redis SubClient error: ${err.message}`);
+      this.pubClient.on("error", (err) => {
+        if (this.adapterConstructor) {
+          this.logger.warn(`Redis PubClient error: ${err?.message || err}`);
+        }
       });
 
-      this.adapterConstructor = createAdapter(pubClient, subClient);
+      await this.pubClient.connect();
+
+      this.subClient = this.pubClient.duplicate({
+        lazyConnect: true,
+      });
+
+      this.subClient.on("error", (err) => {
+        if (this.adapterConstructor) {
+          this.logger.warn(`Redis SubClient error: ${err?.message || err}`);
+        }
+      });
+
+      await this.subClient.connect();
+
+      this.adapterConstructor = createAdapter(this.pubClient, this.subClient);
       this.logger.log(
         "Redis WebSocket adapter successfully connected and configured for cluster broadcast.",
       );
     } catch (err: any) {
+      if (this.pubClient) {
+        try {
+          this.pubClient.disconnect();
+        } catch (_) {}
+      }
+      if (this.subClient) {
+        try {
+          this.subClient.disconnect();
+        } catch (_) {}
+      }
+      this.adapterConstructor = undefined;
       this.logger.warn(
-        `Failed to initialize RedisIoAdapter: ${err?.message}. Falling back to default in-memory adapter.`,
+        `Redis is unavailable at ${url} (${err?.message || "Connection refused"}). Real-time sync will use the default in-memory WebSocket adapter.`,
       );
     }
   }

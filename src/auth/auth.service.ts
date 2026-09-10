@@ -231,12 +231,10 @@ export class AuthService {
       }
 
       await this.auditLogService?.recordAuditLog({
-        userId: authRecord.userId,
         userId: user.id,
         action: AuditAction.LOGIN_FAILURE,
         ipAddress,
         userAgent,
-        metadata: { email: dto.email, reason: "Password verification failed" },
         metadata: {
           email: dto.email,
           failedLoginAttempts: attempts,
@@ -246,8 +244,6 @@ export class AuthService {
 
       throw new UnauthorizedException("Invalid email or password");
     }
-
-    const user = authRecord.user;
 
     if (user.status !== "ACTIVE" || user.deletedAt) {
       throw new UnauthorizedException(

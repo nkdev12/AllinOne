@@ -1,4 +1,3 @@
-import { Injectable } from "@nestjs/common";
 import { Injectable, Optional } from "@nestjs/common";
 import { ConfigurationService } from "@/config/configuration.service";
 import { TracingService } from "@/common/tracing/tracing.service";
@@ -18,7 +17,6 @@ export interface LogContext {
 export class LoggerService {
   private logFormat: "json" | "simple";
 
-  constructor(private configService: ConfigurationService) {
   constructor(
     private configService: ConfigurationService,
     @Optional() private readonly tracingService?: TracingService,

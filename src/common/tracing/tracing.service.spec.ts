@@ -202,4 +202,3 @@ describe("Distributed Tracing & W3C TraceContext", () => {
     });
   });
 });
-

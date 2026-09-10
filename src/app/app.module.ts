@@ -126,12 +126,6 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
     ThrottlerModule.forRootAsync({
       imports: [ConfigurationModule],
       inject: [ConfigurationService],
-      useFactory: (config: ConfigurationService) => [
-        {
-          ttl: config.rateLimitWindowMs,
-          limit: config.rateLimitMaxRequests,
-        },
-      ],
       useFactory: (config: ConfigurationService) => ({
         throttlers: [
           {

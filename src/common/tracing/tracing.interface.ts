@@ -97,4 +97,3 @@ export function formatTraceParent(
 ): string {
   return `00-${traceId}-${spanId}-${flags}`;
 }
-

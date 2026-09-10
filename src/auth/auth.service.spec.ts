@@ -5,7 +5,6 @@ import { UsersService } from "@/users/users.service";
 import { JwtService } from "@nestjs/jwt";
 import { ConfigurationService } from "@/config/configuration.service";
 import { MailService } from "@/common/mail/mail.service";
-import { ConflictException } from "@nestjs/common";
 import { ConflictException, UnauthorizedException } from "@nestjs/common";
 import { AuditAction } from "@prisma/client";
 import { AuditLogService } from "@/common/audit/audit-log.service";
