@@ -18,7 +18,15 @@ async function bootstrap() {
   // ========================================================================
   app.use(
     helmet({
-      contentSecurityPolicy: false, // Prevents Helmet from upgrading Swagger UI HTTP assets to HTTPS
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          styleSrc: ["'self'", "'unsafe-inline'"],
+          scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+          imgSrc: ["'self'", "data:", "https:"],
+          connectSrc: ["'self'", "ws:", "wss:"],
+        },
+      },
       crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" },
     }),
   );
@@ -66,6 +74,7 @@ async function bootstrap() {
     .addTag("Users", "User management endpoints")
     .addTag("Devices", "Device management endpoints")
     .addTag("Sync", "Synchronization endpoints")
+    .addTag("Admin", "Operational administration and incident response")
     .build();
 
   const document = SwaggerModule.createDocument(app, swaggerConfig);

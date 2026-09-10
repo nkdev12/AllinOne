@@ -44,8 +44,17 @@ if PGPASSWORD="$DB_PASSWORD" pg_dump \
   --verbose | gzip > "$BACKUP_FILE"; then
   
   FILE_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
-  echo -e "${GREEN}✓ Backup completed successfully${NC}"
+  echo -e "${GREEN}✓ Backup created successfully${NC}"
   echo "File size: $FILE_SIZE"
+  
+  # Verify archive integrity
+  echo "Verifying archive integrity..."
+  if gzip -t "$BACKUP_FILE"; then
+    echo -e "${GREEN}✓ Integrity check passed${NC}"
+  else
+    echo -e "${RED}✗ Backup archive corrupted!${NC}"
+    exit 1
+  fi
   
 else
   echo -e "${RED}✗ Backup failed${NC}"

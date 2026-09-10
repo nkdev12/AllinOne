@@ -482,17 +482,25 @@ When data changes:
 - Business metrics (notes created, tasks completed, etc.)
 
 ### Tracing
+### Tracing (Planned — Roadmap)
 
 - Distributed tracing (OpenTelemetry)
 - Request flow across services
 - Database query tracing
 - External API call tracing
+- Distributed tracing via OpenTelemetry (`@opentelemetry/api`, `@opentelemetry/sdk-node`) — *Planned / Roadmap*
+- Database query tracing and slow query instrumentation — *Planned / Roadmap*
+- External API call tracing (OAuth providers, webhook endpoints) — *Planned / Roadmap*
+- *Current active capability*: Request correlation across services, controllers, and security `AuditLog` records is fully active via `X-Request-ID` and auto-generated UUIDv4 request IDs.
 
 ### Health Checks
 
 - Liveness probe — is application running?
 - Readiness probe — can it accept traffic?
 - Service-specific checks (DB, Redis, storage)
+- Liveness probe — is application running? (`GET /health/live`)
+- Readiness probe — can it accept traffic? (`GET /health/ready`)
+- Service-specific Terminus checks for database (PostgreSQL latency) and Redis (`GET /health`)
 
 ## Scaling Considerations
 
@@ -504,6 +512,7 @@ Multiple API instances
 Shared PostgreSQL
         ↓
 Shared Redis
+Shared Redis (Socket.IO adapter for real-time invalidation)
         ↓
 Shared MinIO
         ↓
@@ -523,6 +532,7 @@ Sticky sessions or token-based auth
 - Query indexing strategy
 - Connection pooling
 - Read replicas for queries
+- Read replicas for read-heavy queries via Prisma extension (`@prisma/extension-read-replicas`) — *Planned / Roadmap*
 - Archival of old data
 - Partitioning for large tables
 
@@ -564,6 +574,10 @@ All error responses return a standardized flat JSON envelope conforming to `AllE
   "path": "/users/me"
 }
 ```
+
+> [!NOTE]
+> **Error Message Shape (`string | string[]`)**:
+> The `message` property is typed as `string | string[]`. For validation failures (HTTP 400 `VALIDATION_ERROR` triggered by `ValidationPipe`), `message` is an array of individual validation error messages (e.g. `["email must be an email", "password must be at least 8 characters"]`). For all other operational and HTTP exceptions (401, 403, 404, 409, 429, 500), `message` is a single human-readable string describing the error.
 
 > [!IMPORTANT]
 > **Request Correlation (`X-Request-ID`)**:

@@ -36,6 +36,7 @@ describe("MetricsService", () => {
 
       service.incrementSyncPush(3);
       service.incrementSyncPull();
+      service.incrementSyncChangesCompacted(5);
 
       const output = await service.getPrometheusMetrics();
 
@@ -45,6 +46,7 @@ describe("MetricsService", () => {
       expect(output).toContain("sync_throughput_pushes_total 1");
       expect(output).toContain("sync_throughput_changes_total 3");
       expect(output).toContain("sync_throughput_pulls_total 1");
+      expect(output).toContain("sync_changes_compacted_total 5");
       expect(output).toContain("# HELP http_request_duration_seconds");
       expect(output).toContain(
         'method="POST",route="/sync/push",status_code="200"',

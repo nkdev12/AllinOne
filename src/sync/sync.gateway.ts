@@ -104,11 +104,15 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     const userRoom = `user:${userId}`;
 
+    // Broadcast across instances to user room via Socket.IO adapter
+    this.server.to(userRoom).emit("sync:invalidation", payload);
+
+    // Also dispatch directly to local non-origin sockets
     if (originDeviceId) {
-      const roomSockets = this.server.sockets.adapter.rooms?.get(userRoom);
+      const roomSockets = this.server.sockets?.adapter?.rooms?.get(userRoom);
       if (roomSockets) {
         for (const socketId of roomSockets) {
-          const socket = this.server.sockets.sockets.get(
+          const socket = this.server.sockets?.sockets?.get(
             socketId,
           ) as AuthenticatedSocket;
           if (socket && socket.data?.deviceId !== originDeviceId) {
@@ -116,8 +120,6 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
           }
         }
       }
-    } else {
-      this.server.to(userRoom).emit("sync:invalidation", payload);
     }
 
     this.logger.log(

@@ -88,6 +88,12 @@ This document provides a comprehensive entity-relationship dictionary for all Mo
 - **Fields**: `userId` (`Uuid`), `deviceId` (`Uuid`?), `entityType` (VarChar 50), `entityId` (`Uuid`), `operation` (`CREATE`, `UPDATE`, `DELETE`, `RESTORE`), `version` (Int), `payload` (`JsonB`), `cursor` (`BigInt`, autoincrement()), `createdAt`.
 - **Indexes**: `@@index([userId])`, `@@index([deviceId])`, `@@index([cursor])`, `@@index([entityType, entityId])`.
 
+#### `IdempotencyKey`
+- **Primary Key**: `id` (`Uuid`)
+- **Fields**: `key` (VarChar 255, Unique), `userId` (`Uuid`), `endpoint` (VarChar 255), `method` (VarChar 10), `statusCode` (Int), `response` (`JsonB`), `expiresAt` (DateTime), `createdAt` (DateTime).
+- **Indexes**: `@@index([userId])`, `@@index([expiresAt])`.
+- **Design Rationale**: Provides persistent database-backed storage for mutated idempotent requests, ensuring reliable exactly-once semantics across server restarts and Redis cache evictions.
+
 ---
 
 ### 3. Notes Subsystem Models

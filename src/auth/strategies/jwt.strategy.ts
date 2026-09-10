@@ -19,7 +19,21 @@ export class JwtStrategy extends PassportStrategy(Strategy, "jwt") {
     private readonly usersService: UsersService,
   ) {
     super({
-      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      jwtFromRequest: ExtractJwt.fromExtractors([
+        ExtractJwt.fromAuthHeaderAsBearerToken(),
+        (req: any) => {
+          const auth = req?.headers?.authorization;
+          if (auth && typeof auth === "string") {
+            const match = auth.match(
+              /(?:Bearer\s+)+([A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]*)/i,
+            );
+            if (match) {
+              return match[1];
+            }
+          }
+          return null;
+        },
+      ]),
       ignoreExpiration: false,
       secretOrKey: configService.jwtAccessSecret,
     });

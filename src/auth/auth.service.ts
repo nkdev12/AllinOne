@@ -11,6 +11,7 @@ import * as argon2 from "argon2";
 import { generateSecret, generateURI, verify } from "otplib";
 import * as qrcode from "qrcode";
 import * as crypto from "crypto";
+import * as jwt from "jsonwebtoken";
 import { OAuth2Client } from "google-auth-library";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { UsersService } from "@/users/users.service";
@@ -35,6 +36,9 @@ import { AuthType, Platform, AuditAction } from "@prisma/client";
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
   private readonly googleClient = new OAuth2Client();
+  private appleJwksCache: { keys: any[]; fetchedAt: number } | null = null;
+  private microsoftJwksCache: { keys: any[]; fetchedAt: number } | null = null;
+  private readonly JWKS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
 
   constructor(
     private readonly prisma: PrismaService,
@@ -288,16 +292,13 @@ export class AuthService {
     ipAddress?: string,
     userAgent?: string,
   ): Promise<AuthResponseDto> {
-    const payload = this.jwtService.decode(dto.idToken) as any;
-    if (!payload || !payload.sub || !payload.email) {
-      throw new UnauthorizedException("Invalid Apple ID token");
-    }
+    const verified = await this.verifyAppleToken(dto.idToken);
 
     return this.processOAuthLogin(
       AuthType.APPLE,
-      payload.sub,
-      payload.email,
-      payload.email.split("@")[0],
+      verified.sub,
+      verified.email,
+      verified.name || verified.email.split("@")[0],
       undefined,
       dto,
       ipAddress,
@@ -310,26 +311,170 @@ export class AuthService {
     ipAddress?: string,
     userAgent?: string,
   ): Promise<AuthResponseDto> {
-    const payload = this.jwtService.decode(dto.idToken) as any;
-    if (
-      !payload ||
-      !payload.sub ||
-      (!payload.email && !payload.preferred_username)
-    ) {
-      throw new UnauthorizedException("Invalid Microsoft ID token");
-    }
+    const verified = await this.verifyMicrosoftToken(dto.idToken);
 
-    const email = payload.email || payload.preferred_username;
     return this.processOAuthLogin(
       AuthType.MICROSOFT,
-      payload.sub,
-      email,
-      payload.name || email.split("@")[0],
+      verified.sub,
+      verified.email,
+      verified.name || verified.email.split("@")[0],
       undefined,
       dto,
       ipAddress,
       userAgent,
     );
+  }
+
+  private async getAppleJwks(): Promise<any[]> {
+    const now = Date.now();
+    if (
+      this.appleJwksCache &&
+      now - this.appleJwksCache.fetchedAt < this.JWKS_CACHE_TTL
+    ) {
+      return this.appleJwksCache.keys;
+    }
+    try {
+      const res = await fetch("https://appleid.apple.com/auth/keys");
+      if (!res.ok) {
+        throw new Error(`Failed to fetch Apple JWKS: HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as { keys: any[] };
+      this.appleJwksCache = { keys: data.keys, fetchedAt: now };
+      return data.keys;
+    } catch (err: any) {
+      this.logger.error("Failed to fetch Apple JWKS", err);
+      if (this.appleJwksCache) {
+        return this.appleJwksCache.keys;
+      }
+      throw new UnauthorizedException(
+        "Unable to verify Apple ID token signature",
+      );
+    }
+  }
+
+  private async getMicrosoftJwks(): Promise<any[]> {
+    const now = Date.now();
+    if (
+      this.microsoftJwksCache &&
+      now - this.microsoftJwksCache.fetchedAt < this.JWKS_CACHE_TTL
+    ) {
+      return this.microsoftJwksCache.keys;
+    }
+    try {
+      const res = await fetch(
+        "https://login.microsoftonline.com/common/discovery/v2.0/keys",
+      );
+      if (!res.ok) {
+        throw new Error(`Failed to fetch Microsoft JWKS: HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as { keys: any[] };
+      this.microsoftJwksCache = { keys: data.keys, fetchedAt: now };
+      return data.keys;
+    } catch (err: any) {
+      this.logger.error("Failed to fetch Microsoft JWKS", err);
+      if (this.microsoftJwksCache) {
+        return this.microsoftJwksCache.keys;
+      }
+      throw new UnauthorizedException(
+        "Unable to verify Microsoft ID token signature",
+      );
+    }
+  }
+
+  async verifyAppleToken(
+    idToken: string,
+  ): Promise<{ sub: string; email: string; name?: string }> {
+    try {
+      const decoded = jwt.decode(idToken, { complete: true }) as any;
+      if (!decoded?.header?.kid) {
+        throw new UnauthorizedException("Invalid Apple ID token header");
+      }
+      const keys = await this.getAppleJwks();
+      const matchingKey = keys.find((k) => k.kid === decoded.header.kid);
+      if (!matchingKey) {
+        throw new UnauthorizedException("Unknown Apple signing key (kid)");
+      }
+      const publicKey = crypto.createPublicKey({
+        key: matchingKey,
+        format: "jwk",
+      });
+
+      const verifyOptions: jwt.VerifyOptions = {
+        algorithms: ["RS256"],
+        issuer: "https://appleid.apple.com",
+      };
+      if (this.configService.appleClientId) {
+        verifyOptions.audience = this.configService.appleClientId;
+      }
+
+      const payload = jwt.verify(idToken, publicKey, verifyOptions) as any;
+      if (!payload || !payload.sub || !payload.email) {
+        throw new UnauthorizedException("Invalid Apple ID token claims");
+      }
+      return {
+        sub: payload.sub,
+        email: payload.email,
+        name: payload.email.split("@")[0],
+      };
+    } catch (error: any) {
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
+      this.logger.error("Failed to verify Apple ID token signature", error);
+      throw new UnauthorizedException("Invalid or forged Apple ID token");
+    }
+  }
+
+  async verifyMicrosoftToken(
+    idToken: string,
+  ): Promise<{ sub: string; email: string; name?: string }> {
+    try {
+      const decoded = jwt.decode(idToken, { complete: true }) as any;
+      if (!decoded?.header?.kid) {
+        throw new UnauthorizedException("Invalid Microsoft ID token header");
+      }
+      const keys = await this.getMicrosoftJwks();
+      const matchingKey = keys.find((k) => k.kid === decoded.header.kid);
+      if (!matchingKey) {
+        throw new UnauthorizedException("Unknown Microsoft signing key (kid)");
+      }
+      const publicKey = crypto.createPublicKey({
+        key: matchingKey,
+        format: "jwk",
+      });
+
+      const verifyOptions: jwt.VerifyOptions = {
+        algorithms: ["RS256"],
+      };
+      if (this.configService.microsoftClientId) {
+        verifyOptions.audience = this.configService.microsoftClientId;
+      }
+
+      const payload = jwt.verify(idToken, publicKey, verifyOptions) as any;
+      const email = payload?.email || payload?.preferred_username;
+      if (!payload || !payload.sub || !email) {
+        throw new UnauthorizedException("Invalid Microsoft ID token claims");
+      }
+      const iss = payload.iss as string;
+      if (
+        !iss ||
+        (!iss.startsWith("https://login.microsoftonline.com/") &&
+          !iss.startsWith("https://sts.windows.net/"))
+      ) {
+        throw new UnauthorizedException("Invalid Microsoft ID token issuer");
+      }
+      return {
+        sub: payload.sub,
+        email,
+        name: payload.name || email.split("@")[0],
+      };
+    } catch (error: any) {
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
+      this.logger.error("Failed to verify Microsoft ID token signature", error);
+      throw new UnauthorizedException("Invalid or forged Microsoft ID token");
+    }
   }
 
   private async verifyGoogleToken(idToken: string) {
@@ -727,6 +872,54 @@ export class AuthService {
     };
   }
 
+  private async redeemRecoveryCode(
+    userId: string,
+    rawCode: string,
+  ): Promise<boolean> {
+    const codeHash = crypto
+      .createHash("sha256")
+      .update(rawCode.trim())
+      .digest("hex");
+
+    return this.prisma.$transaction(async (tx) => {
+      const mfaSetting = await tx.mFASetting.findUnique({
+        where: { userId },
+      });
+
+      if (!mfaSetting || !mfaSetting.totpEnabled || !mfaSetting.recoveryCodes) {
+        return false;
+      }
+
+      const recoveryCodes: string[] = JSON.parse(mfaSetting.recoveryCodes);
+      const usedCodes: string[] = mfaSetting.backupCodesUsed
+        ? JSON.parse(mfaSetting.backupCodesUsed)
+        : [];
+
+      if (usedCodes.includes(codeHash)) {
+        return false;
+      }
+
+      const codeIndex = recoveryCodes.indexOf(codeHash);
+      if (codeIndex === -1) {
+        return false;
+      }
+
+      recoveryCodes.splice(codeIndex, 1);
+      usedCodes.push(codeHash);
+
+      await tx.mFASetting.update({
+        where: { userId },
+        data: {
+          recoveryCodes: JSON.stringify(recoveryCodes),
+          backupCodesUsed: JSON.stringify(usedCodes),
+          lastVerifiedAt: new Date(),
+        },
+      });
+
+      return true;
+    });
+  }
+
   async disableMfa(
     userId: string,
     dto: DisableMfaDto,
@@ -757,17 +950,34 @@ export class AuthService {
       );
     }
 
-    const verifyRes = verify({
-      token: dto.totpCode,
-      secret: mfaSetting.totpSecret,
-    });
-    const isTotpValid = Boolean(
-      verifyRes &&
-      (typeof verifyRes === "boolean" ? verifyRes : (verifyRes as any).valid),
-    );
+    if (!dto.totpCode && !dto.recoveryCode) {
+      throw new BadRequestException(
+        "Either a valid TOTP code or recovery code must be provided alongside your password to disable MFA",
+      );
+    }
 
-    if (!isTotpValid) {
-      throw new BadRequestException("Invalid TOTP verification code");
+    let isSecondFactorValid = false;
+
+    if (dto.totpCode) {
+      const verifyRes = verify({
+        token: dto.totpCode,
+        secret: mfaSetting.totpSecret,
+      });
+      isSecondFactorValid = Boolean(
+        verifyRes &&
+        (typeof verifyRes === "boolean" ? verifyRes : (verifyRes as any).valid),
+      );
+    } else if (dto.recoveryCode) {
+      isSecondFactorValid = await this.redeemRecoveryCode(
+        userId,
+        dto.recoveryCode,
+      );
+    }
+
+    if (!isSecondFactorValid) {
+      throw new BadRequestException(
+        "Invalid TOTP verification code or recovery code",
+      );
     }
 
     await this.prisma.mFASetting.update({
@@ -835,25 +1045,7 @@ export class AuthService {
         (typeof verifyRes === "boolean" ? verifyRes : (verifyRes as any).valid),
       );
     } else if (dto.recoveryCode) {
-      const codeHash = crypto
-        .createHash("sha256")
-        .update(dto.recoveryCode.trim())
-        .digest("hex");
-      const hashedCodes: string[] = mfaSetting.recoveryCodes
-        ? JSON.parse(mfaSetting.recoveryCodes)
-        : [];
-
-      const codeIndex = hashedCodes.indexOf(codeHash);
-      if (codeIndex !== -1) {
-        isCodeValid = true;
-        hashedCodes.splice(codeIndex, 1);
-        await this.prisma.mFASetting.update({
-          where: { userId },
-          data: {
-            recoveryCodes: JSON.stringify(hashedCodes),
-          },
-        });
-      }
+      isCodeValid = await this.redeemRecoveryCode(userId, dto.recoveryCode);
     }
 
     if (!isCodeValid) {

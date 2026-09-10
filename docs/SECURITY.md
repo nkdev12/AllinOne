@@ -35,10 +35,23 @@ This document outlines security practices and threat models for the Allinone bac
 ### MFA Implementation
 
 - TOTP (Time-based One-Time Password)
-- Recovery codes (10 codes, single-use)
+- Recovery codes (10 codes, single-use, atomic redemption via database transaction preventing double-spend race conditions)
 - Backup MFA method required
 - Recovery codes printed and stored safely
 - Never logged or exposed
+- **Dual-Factor Enforcement on MFA Disable**: Disabling MFA strictly requires the primary factor (account password) **AND** the second factor (valid TOTP code or single-use recovery code). A single factor alone cannot disable 2FA.
+
+### OAuth 2.0 & OpenID Connect Signature Verification
+
+- **Google**: ID tokens verified cryptographically via `google-auth-library` (`OAuth2Client.verifyIdToken`) with audience and email verification.
+- **Apple**: ID tokens verified against Apple's live JWKS (`https://appleid.apple.com/auth/keys`) verifying RS256 signature, `iss: https://appleid.apple.com`, and `aud: APPLE_CLIENT_ID`.
+- **Microsoft**: ID tokens verified against Microsoft's live JWKS (`https://login.microsoftonline.com/common/discovery/v2.0/keys`) verifying RS256 signature, Microsoft issuer, and `aud: MICROSOFT_CLIENT_ID`.
+- Tokens are never accepted via unverified decoding. All signing keys are fetched via HTTPS with in-memory caching.
+
+### Vault Zero-Knowledge vs. Sync Encryption Trust Models
+
+- **Password Vault Items (`VaultModule`)**: True zero-knowledge architecture. Master encryption keys are derived client-side with client-only master passwords. All vault item payloads (passwords, secure notes, credentials) are encrypted client-side using AES-256-GCM before transmission. The server stores only opaque ciphertext, IV, and auth tag; the server stores zero plaintext keys and has no ability to decrypt vault items.
+- **General Sync Payloads (`SyncModule`)**: Transport and at-rest envelope encryption. Payloads are protected in transit and at rest with field-level conflict resolution (LWW CRDT) performed across multi-device synchronizations.
 
 ## Authorization Security
 

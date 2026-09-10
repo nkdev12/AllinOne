@@ -14,6 +14,7 @@ export class MetricsService {
   private syncPushesTotal = 0;
   private syncPushedChangesTotal = 0;
   private syncPullsTotal = 0;
+  private syncChangesCompactedTotal = 0;
 
   // Latency samples: method:route:status -> duration array
   private httpRequests: Array<{
@@ -48,6 +49,13 @@ export class MetricsService {
    */
   incrementSyncPull() {
     this.syncPullsTotal += 1;
+  }
+
+  /**
+   * Increment compacted/pruned change log counter.
+   */
+  incrementSyncChangesCompacted(count: number) {
+    this.syncChangesCompactedTotal += count;
   }
 
   /**
@@ -105,6 +113,15 @@ export class MetricsService {
     );
     lines.push("# TYPE sync_throughput_pulls_total counter");
     lines.push(`sync_throughput_pulls_total ${this.syncPullsTotal}`);
+    lines.push("");
+
+    lines.push(
+      "# HELP sync_changes_compacted_total Total number of historical sync change records pruned.",
+    );
+    lines.push("# TYPE sync_changes_compacted_total counter");
+    lines.push(
+      `sync_changes_compacted_total ${this.syncChangesCompactedTotal}`,
+    );
     lines.push("");
 
     // HTTP Request Duration Histogram

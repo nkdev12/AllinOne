@@ -15,6 +15,25 @@ export interface RecordAuditLogParams {
   metadata?: Record<string, any>;
 }
 
+export interface QueryAuditLogsDto {
+  userId?: string;
+  action?: AuditAction;
+  resourceType?: string;
+  resourceId?: string;
+  from?: string | Date;
+  to?: string | Date;
+  page?: number;
+  limit?: number;
+}
+
+export interface PaginatedAuditLogsDto {
+  data: any[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+}
+
 @Injectable()
 export class AuditLogService {
   private readonly logger = new Logger(AuditLogService.name);
@@ -62,5 +81,47 @@ export class AuditLogService {
       );
       throw error;
     }
+  }
+
+  /**
+   * Queries security audit logs for administrative SIEM monitoring.
+   *
+   * @param dto Query filters and pagination parameters
+   * @returns Paginated audit log records
+   */
+  async queryLogs(dto: QueryAuditLogsDto): Promise<PaginatedAuditLogsDto> {
+    const page = Math.max(1, dto.page || 1);
+    const limit = Math.min(100, Math.max(1, dto.limit || 20));
+    const skip = (page - 1) * limit;
+
+    const where: any = {};
+    if (dto.userId) where.userId = dto.userId;
+    if (dto.action) where.action = dto.action;
+    if (dto.resourceType) where.resourceType = dto.resourceType;
+    if (dto.resourceId) where.resourceId = dto.resourceId;
+
+    if (dto.from || dto.to) {
+      where.createdAt = {};
+      if (dto.from) where.createdAt.gte = new Date(dto.from);
+      if (dto.to) where.createdAt.lte = new Date(dto.to);
+    }
+
+    const [data, total] = await Promise.all([
+      this.prisma.auditLog.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: "desc" },
+      }),
+      this.prisma.auditLog.count({ where }),
+    ]);
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
   }
 }

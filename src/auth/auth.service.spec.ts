@@ -172,6 +172,11 @@ describe("AuthService", () => {
   describe("OAuth integration", () => {
     it("should authenticate user with Apple ID token", async () => {
       usersService.findByEmail.mockResolvedValue(mockUser);
+      jest.spyOn(service, "verifyAppleToken").mockResolvedValue({
+        sub: "apple-123",
+        email: "test@example.com",
+        name: "Test User",
+      });
 
       const result = await service.loginWithApple({
         idToken: "valid-apple-id-token",
@@ -184,6 +189,11 @@ describe("AuthService", () => {
 
     it("should authenticate user with Microsoft ID token", async () => {
       usersService.findByEmail.mockResolvedValue(mockUser);
+      jest.spyOn(service, "verifyMicrosoftToken").mockResolvedValue({
+        sub: "ms-123",
+        email: "test@example.com",
+        name: "Test User",
+      });
 
       const result = await service.loginWithMicrosoft({
         idToken: "valid-microsoft-id-token",
@@ -192,6 +202,36 @@ describe("AuthService", () => {
       expect(result).toBeDefined();
       expect(result.user?.email).toBe("test@example.com");
       expect(result.tokens?.accessToken).toBe("mock-jwt-token");
+    });
+  });
+
+  describe("disableMfa", () => {
+    it("should require both password and totpCode/recoveryCode", async () => {
+      prismaService.authentication.findFirst.mockResolvedValue({
+        id: "auth-1",
+        userId: "user-uuid-123",
+        passwordHash: "valid-hash",
+      });
+      (argon2.verify as jest.Mock).mockResolvedValue(true);
+      prismaService.mFASetting.findUnique.mockResolvedValue({
+        id: "mfa-1",
+        userId: "user-uuid-123",
+        totpEnabled: true,
+        totpSecret: "MOCKSECRET123",
+      });
+
+      const result = await service.disableMfa("user-uuid-123", {
+        password: "Password123!",
+        totpCode: "123456",
+      });
+
+      expect(result.success).toBe(true);
+      expect(prismaService.mFASetting.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { userId: "user-uuid-123" },
+          data: expect.objectContaining({ totpEnabled: false }),
+        }),
+      );
     });
   });
 

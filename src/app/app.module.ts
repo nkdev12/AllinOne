@@ -18,6 +18,7 @@ import { NotesModule } from "@/notes/notes.module";
 import { TasksModule } from "@/tasks/tasks.module";
 import { CalendarModule } from "@/calendar/calendar.module";
 import { VaultModule } from "@/vault/vault.module";
+import { AdminModule } from "@/admin/admin.module";
 import { QueuesModule } from "@/queues/queues.module";
 import { ErrorHandlingModule } from "@/common/error-handling/error-handling.module";
 import { AuditLogModule } from "@/common/audit/audit-log.module";
@@ -141,6 +142,7 @@ import { IdempotencyInterceptor } from "@/common/interceptors/idempotency.interc
     TasksModule,
     CalendarModule,
     VaultModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [

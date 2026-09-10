@@ -30,6 +30,9 @@ describe("Queue Processors", () => {
       idempotencyKey: {
         deleteMany: jest.fn().mockResolvedValue({ count: 3 }),
       },
+      change: {
+        deleteMany: jest.fn().mockResolvedValue({ count: 12 }),
+      },
       user: {
         findUnique: jest.fn().mockResolvedValue(mockUser),
       },
@@ -117,8 +120,10 @@ describe("Queue Processors", () => {
       expect(result).toBeDefined();
       expect(result.purgedSessions).toBe(5);
       expect(result.purgedIdempotencyKeys).toBe(3);
+      expect(result.purgedChanges).toBe(12);
       expect(prismaService.session.deleteMany).toHaveBeenCalled();
       expect(prismaService.idempotencyKey.deleteMany).toHaveBeenCalled();
+      expect(prismaService.change.deleteMany).toHaveBeenCalled();
     });
   });
 });

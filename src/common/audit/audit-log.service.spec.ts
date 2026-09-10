@@ -75,4 +75,34 @@ describe("AuditLogService", () => {
       });
     });
   });
+
+  describe("queryLogs", () => {
+    it("should query logs with filters and pagination", async () => {
+      prismaService.auditLog.findMany = jest
+        .fn()
+        .mockResolvedValue([mockAuditEntry]);
+      prismaService.auditLog.count = jest.fn().mockResolvedValue(1);
+
+      const result = await service.queryLogs({
+        userId: "user-uuid-123",
+        action: AuditAction.LOGIN_SUCCESS,
+        page: 1,
+        limit: 10,
+      });
+
+      expect(result.data).toHaveLength(1);
+      expect(result.total).toBe(1);
+      expect(result.totalPages).toBe(1);
+      expect(prismaService.auditLog.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            userId: "user-uuid-123",
+            action: AuditAction.LOGIN_SUCCESS,
+          }),
+          skip: 0,
+          take: 10,
+        }),
+      );
+    });
+  });
 });

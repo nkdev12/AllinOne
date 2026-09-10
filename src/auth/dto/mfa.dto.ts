@@ -38,11 +38,19 @@ export class DisableMfaDto {
   @IsNotEmpty()
   password!: string;
 
-  @ApiProperty({ example: "123456", description: "6-digit TOTP code" })
+  @ApiPropertyOptional({ example: "123456", description: "6-digit TOTP code" })
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
   @Length(6, 6, { message: "TOTP code must be 6 digits" })
-  totpCode!: string;
+  totpCode?: string;
+
+  @ApiPropertyOptional({
+    example: "ABCD-1234-EFGH",
+    description: "Single-use backup recovery code",
+  })
+  @IsOptional()
+  @IsString()
+  recoveryCode?: string;
 }
 
 export class MfaSecretResponseDto {
