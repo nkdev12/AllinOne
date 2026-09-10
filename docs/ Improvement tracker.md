@@ -57,6 +57,7 @@ Priority key:
 ---
 
 ## Suggested sequencing
+## Implementation Summary
 
 1. **P0-1** (API reference gaps) can be done in parallel with everything else — it's pure documentation, no code risk.
 2. **P0-2, P0-5, P0-6** (auth/MFA correctness) — verify against actual code first; these may already be correct and just under-documented, or may be real bugs. Worth a quick audit before assuming the worst.
