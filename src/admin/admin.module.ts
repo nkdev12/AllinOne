@@ -12,4 +12,3 @@ import { AuditLogModule } from "@/common/audit/audit-log.module";
   exports: [AdminService, AdminGuard],
 })
 export class AdminModule {}
-
