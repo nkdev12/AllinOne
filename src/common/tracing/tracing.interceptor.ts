@@ -26,6 +26,10 @@ export class TracingInterceptor implements NestInterceptor {
       req.headers?.traceparent || req.headers?.["x-trace-id"];
     const traceContext =
       this.tracingService.createContextFromHeader(inboundTraceParent);
+    if (req) {
+      (req as any).traceContext = traceContext;
+      (req as any).traceId = traceContext.traceId;
+    }
 
     // Populate response headers for upstream client correlation
     const formattedTraceParent = formatTraceParent(

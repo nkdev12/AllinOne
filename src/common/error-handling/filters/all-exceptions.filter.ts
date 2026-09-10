@@ -14,6 +14,7 @@ interface CanonicalErrorResponse {
   code: string;
   message: string | string[];
   requestId: string;
+  traceId?: string;
   timestamp: string;
   path: string;
 }
@@ -52,6 +53,13 @@ export class AllExceptionsFilter implements ExceptionFilter {
         ? inboundRequestId
         : uuidv4();
 
+    const inboundTraceId =
+      (request as any)?.traceId ||
+      (request as any)?.traceContext?.traceId ||
+      (typeof request.headers["x-trace-id"] === "string"
+        ? request.headers["x-trace-id"]
+        : undefined);
+
     let status = HttpStatus.INTERNAL_SERVER_ERROR;
     let code = "INTERNAL_ERROR";
     let message: string | string[] = "An unexpected error occurred";
@@ -82,6 +90,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       code,
       message,
       requestId,
+      ...(inboundTraceId ? { traceId: inboundTraceId } : {}),
       timestamp: new Date().toISOString(),
       path: request.url || request.originalUrl,
     };
@@ -91,6 +100,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
         `[${request.method}] ${request.url} - ${status} - ${code}`,
         {
           requestId,
+          traceId: inboundTraceId,
           method: request.method,
           url: request.url,
           statusCode: status,
@@ -102,6 +112,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
         `[${request.method}] ${request.url} - ${status} - ${code}`,
         {
           requestId,
+          traceId: inboundTraceId,
           method: request.method,
           url: request.url,
           statusCode: status,
@@ -110,9 +121,10 @@ export class AllExceptionsFilter implements ExceptionFilter {
       );
     }
 
-    response
-      .status(status)
-      .header("X-Request-ID", requestId)
-      .json(canonicalBody);
+    const res = response.status(status).header("X-Request-ID", requestId);
+    if (inboundTraceId) {
+      res.header("X-Trace-ID", inboundTraceId);
+    }
+    res.json(canonicalBody);
   }
 }

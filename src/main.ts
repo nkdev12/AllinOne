@@ -39,8 +39,11 @@ async function bootstrap() {
       "Authorization",
       "Idempotency-Key",
       "X-Request-ID",
+      "X-Trace-ID",
+      "traceparent",
+      "tracestate",
     ],
-    exposedHeaders: ["X-Request-ID"],
+    exposedHeaders: ["X-Request-ID", "X-Trace-ID", "traceparent"],
   });
 
   // ========================================================================
