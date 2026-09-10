@@ -88,4 +88,3 @@ describe("RedisIoAdapter", () => {
     expect(mockServer.adapter).not.toHaveBeenCalled();
   });
 });
-
