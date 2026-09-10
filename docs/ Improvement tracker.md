@@ -68,6 +68,7 @@ Priority key:
 3. **Brute-Force Account Lockout**: Implemented 5-failed-attempt / 15-minute lockout with admin unlock API (`POST /admin/users/:userId/unlock`) and SIEM logging.
 
 ### Phase 2: Observability & End-to-End Testing (Current)
+### Phase 2: Observability & End-to-End Testing
 
 1. **Distributed Tracing & W3C TraceContext**:
    - `TracingService` using `AsyncLocalStorage<TraceContext>` for non-intrusive asynchronous context propagation.
@@ -83,3 +84,27 @@ Priority key:
    - `test/load/k6-sync-load.js`: Concurrent delta sync push/pull under load (p95 < 250ms, error rate < 1%).
    - `test/load/k6-auth-load.js`: Concurrent authentication, token refresh rotation, and rate-limiting resilience.
    - Added `test:load:sync` and `test:load:auth` scripts to `package.json`.
+
+### Phase 3: Product Capabilities & Advanced Features (Completed)
+
+1. **Multi-User Collaboration & Resource Sharing (`src/collaboration/`)**:
+   - Granular role-based sharing (`VIEWER`, `EDITOR`, `ADMIN`) for Notes, Projects, and Calendars.
+   - Complete collaborator lifecycle APIs: `POST /collaboration/shares`, `GET /collaboration/shares/:type/:id`, `PATCH /collaboration/shares/:id`, `DELETE /collaboration/shares/:id`, and `GET /collaboration/shared-with-me`.
+   - Access control integration in `NotesService` with permission resolution (`checkAccess`) for shared reads and writes.
+   - 7 unit tests and comprehensive E2E tests validating sharing workflows and permissions.
+2. **AI & Semantic Document Intelligence (`src/ai/`)**:
+   - Document Summarization (`POST /ai/summarize`): Integration with Google Gemini API with fallback to deterministic extractive NLP.
+   - Task Extraction (`POST /ai/extract-tasks`): Keyword and pattern recognition with priority scoring (`HIGH`, `MEDIUM`, `LOW`).
+   - Semantic Tagging (`POST /ai/suggest-tags`): Lexical frequency extraction and topical classification (`Security`, `Infrastructure`, `Productivity`, `General`).
+   - Task Conversion (`POST /ai/notes/:noteId/convert-tasks`): Transactional conversion of extracted action items into persistent `Task` entities with sync `Change` records.
+   - 7 unit tests and comprehensive E2E tests validating AI pipelines.
+3. **FIDO2 / WebAuthn Passkeys (`src/auth/passkeys/`)**:
+   - Biometric and security key registration: `POST /auth/passkeys/register-options` and `POST /auth/passkeys/register-verify`.
+   - Passwordless authentication: `POST /auth/passkeys/login-options` and `POST /auth/passkeys/login-verify`.
+   - Storage under `Authentication` model with `AuthType.PASSKEY`, device auto-registration, and session token generation.
+   - 5 unit tests and comprehensive E2E tests validating WebAuthn ceremonies.
+4. **Comprehensive Quality & Verification Gates**:
+   - Zero TypeScript compilation errors (`npm run typecheck`).
+   - Zero ESLint / Prettier warnings (`npx eslint "{src,apps,libs,test}/**/*.ts"`).
+   - 100% test pass rate across 24 unit suites (167/167 tests).
+   - 100% test pass rate across 4 E2E suites (38/38 tests) including `test/e2e/phase3.e2e-spec.ts`.

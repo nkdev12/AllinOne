@@ -1,5 +1,7 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
+import { Injectable, NotFoundException, Optional } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { CollaborationService } from "@/collaboration/collaboration.service";
 import { CreateNoteDto } from "../dto/create-note.dto";
 import { UpdateNoteDto } from "../dto/update-note.dto";
 import { QueryNotesDto } from "../dto/query-notes.dto";
@@ -8,6 +10,10 @@ import { ChangeOperation } from "@prisma/client";
 @Injectable()
 export class NotesService {
   constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly collaborationService?: CollaborationService,
+  ) {}
 
   async createNote(userId: string, dto: CreateNoteDto) {
     if (dto.folderId) {
@@ -129,6 +135,7 @@ export class NotesService {
 
   async getNoteById(userId: string, noteId: string) {
     const note = await this.prisma.note.findFirst({
+    let note = await this.prisma.note.findFirst({
       where: { id: noteId, userId, deletedAt: null },
       include: {
         folder: true,
@@ -137,6 +144,27 @@ export class NotesService {
         attachments: true,
       },
     });
+
+    if (!note && this.collaborationService) {
+      const access = await this.collaborationService.checkAccess(
+        userId,
+        undefined,
+        "NOTE",
+        noteId,
+        "VIEWER",
+      );
+      if (access.hasAccess) {
+        note = await this.prisma.note.findFirst({
+          where: { id: noteId, deletedAt: null },
+          include: {
+            folder: true,
+            noteTags: { include: { tag: true } },
+            history: { orderBy: { version: "desc" } },
+            attachments: true,
+          },
+        });
+      }
+    }
 
     if (!note) {
       throw new NotFoundException(`Note with ID '${noteId}' not found.`);
@@ -147,8 +175,24 @@ export class NotesService {
 
   async updateNote(userId: string, noteId: string, dto: UpdateNoteDto) {
     const existing = await this.prisma.note.findFirst({
+    let existing = await this.prisma.note.findFirst({
       where: { id: noteId, userId, deletedAt: null },
     });
+
+    if (!existing && this.collaborationService) {
+      const access = await this.collaborationService.checkAccess(
+        userId,
+        undefined,
+        "NOTE",
+        noteId,
+        "EDITOR",
+      );
+      if (access.hasAccess) {
+        existing = await this.prisma.note.findFirst({
+          where: { id: noteId, deletedAt: null },
+        });
+      }
+    }
 
     if (!existing) {
       throw new NotFoundException(`Note with ID '${noteId}' not found.`);

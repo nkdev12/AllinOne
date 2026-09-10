@@ -1064,6 +1064,305 @@ All error responses return standard HTTP status codes and a consistent JSON payl
 
 ---
 
+### 18. Multi-User Collaboration & Resource Sharing (`/collaboration`)
+
+Role-based access control (`VIEWER`, `EDITOR`, `ADMIN`) enabling granular sharing of Notes, Projects, and Calendars between authenticated users.
+
+#### `POST /collaboration/shares`
+- **Access**: `JwtAuthGuard`
+- **Purpose**: Share a workspace resource with a target user via their email.
+- **Body**:
+  ```json
+  {
+    "resourceType": "NOTE",
+    "resourceId": "c7b3d8e0-5e8a-4b9c-8a1d-2e3f4a5b6c7d",
+    "email": "collaborator@example.com",
+    "role": "EDITOR"
+  }
+  ```
+  *(Roles: `VIEWER`, `EDITOR`, `ADMIN`. Resource types: `NOTE`, `PROJECT`, `CALENDAR`)*
+- **Response**: `201 Created`
+  ```json
+  {
+    "id": "share-7e3f8901-abcd",
+    "resourceType": "NOTE",
+    "resourceId": "c7b3d8e0-5e8a-4b9c-8a1d-2e3f4a5b6c7d",
+    "ownerId": "123e4567-e89b-12d3-a456-426614174000",
+    "granteeEmail": "collaborator@example.com",
+    "granteeId": "user-uuid-999",
+    "role": "EDITOR",
+    "createdAt": "2026-09-11T00:00:00.000Z",
+    "updatedAt": "2026-09-11T00:00:00.000Z"
+  }
+  ```
+
+#### `GET /collaboration/shares/:resourceType/:resourceId`
+- **Access**: `JwtAuthGuard`
+- **Purpose**: List all active collaborators and their assigned roles for a given resource. Only the owner or an admin collaborator can view shares.
+- **Response**: `200 OK` — Array of `ResourceShare` objects.
+
+#### `PATCH /collaboration/shares/:shareId`
+- **Access**: `JwtAuthGuard`
+- **Purpose**: Update an existing collaborator's access role (e.g. promote from `VIEWER` to `EDITOR`).
+- **Body**:
+  ```json
+  {
+    "role": "VIEWER"
+  }
+  ```
+- **Response**: `200 OK` — Updated `ResourceShare` object.
+
+#### `DELETE /collaboration/shares/:shareId`
+- **Access**: `JwtAuthGuard`
+- **Purpose**: Revoke a collaborator's access to a shared resource.
+- **Response**: `204 No Content`
+
+#### `GET /collaboration/shared-with-me`
+- **Access**: `JwtAuthGuard`
+- **Purpose**: List all resources shared with the authenticated user, filterable by resource type with cursor pagination.
+- **Query Parameters**:
+  - `resourceType` *(optional)*: `NOTE`, `PROJECT`, `CALENDAR`
+  - `limit` *(optional, default 50, max 100)*: integer
+  - `offset` *(optional, default 0)*: integer
+- **Response**: `200 OK`
+  ```json
+  {
+    "data": [
+      {
+        "id": "share-7e3f8901-abcd",
+        "resourceType": "NOTE",
+        "resourceId": "c7b3d8e0-5e8a-4b9c-8a1d-2e3f4a5b6c7d",
+        "ownerId": "owner-user-uuid",
+        "granteeEmail": "collaborator@example.com",
+        "role": "VIEWER",
+        "createdAt": "2026-09-11T00:00:00.000Z"
+      }
+    ],
+    "total": 1,
+    "limit": 50,
+    "offset": 0
+  }
+  ```
+
+---
+
+### 19. AI & Semantic Capabilities (`/ai`)
+
+Natural language document intelligence powered by Google Gemini with deterministic heuristic NLP fallback for air-gapped or offline operation.
+
+#### `POST /ai/summarize`
+- **Access**: `JwtAuthGuard`
+- **Purpose**: Generate an intelligent summary of raw text or an existing note.
+- **Body**:
+  ```json
+  {
+    "noteId": "c7b3d8e0-5e8a-4b9c-8a1d-2e3f4a5b6c7d",
+    "text": "Optional raw text if noteId is not provided",
+    "length": "brief",
+    "format": "paragraph"
+  }
+  ```
+  *(Lengths: `brief`, `standard`, `detailed`. Formats: `paragraph`, `bullet_points`)*
+- **Response**: `200 OK`
+  ```json
+  {
+    "summary": "This document outlines the distributed sync protocol and database replication architecture.",
+    "originalLength": 4500,
+    "summaryLength": 102,
+    "compressionRatio": 0.02,
+    "format": "paragraph",
+    "provider": "gemini"
+  }
+  ```
+
+#### `POST /ai/extract-tasks`
+- **Access**: `JwtAuthGuard`
+- **Purpose**: Parse meeting notes or raw text into actionable tasks with automated priority scoring (`HIGH`, `MEDIUM`, `LOW`).
+- **Body**:
+  ```json
+  {
+    "text": "TODO: Deploy Redis cluster ASAP\n- [ ] Write integration documentation"
+  }
+  ```
+- **Response**: `200 OK`
+  ```json
+  {
+    "tasks": [
+      {
+        "title": "Deploy Redis cluster ASAP",
+        "priority": "HIGH"
+      },
+      {
+        "title": "Write integration documentation",
+        "priority": "MEDIUM"
+      }
+    ],
+    "totalFound": 2,
+    "provider": "heuristic"
+  }
+  ```
+
+#### `POST /ai/suggest-tags`
+- **Access**: `JwtAuthGuard`
+- **Purpose**: Recommend semantic tags and topical categories (Security, Infrastructure, Productivity, General) based on word frequency and lexical analysis.
+- **Body**:
+  ```json
+  {
+    "text": "OAuth2 PKCE flow with Redis token blacklist cache"
+  }
+  ```
+- **Response**: `200 OK`
+  ```json
+  {
+    "tags": ["oauth2", "pkce", "redis", "token", "blacklist"],
+    "suggestedCategories": ["Security", "Infrastructure"],
+    "provider": "heuristic"
+  }
+  ```
+
+#### `POST /ai/notes/:noteId/convert-tasks`
+- **Access**: `JwtAuthGuard`
+- **Purpose**: Converts a list of extracted action items into persistent `Task` database entities with audit `Change` sync entries within an atomic transaction.
+- **Body**:
+  ```json
+  {
+    "tasks": [
+      {
+        "title": "Deploy Redis cluster ASAP",
+        "description": "Extracted from note Sprint Planning",
+        "priority": "HIGH"
+      }
+    ]
+  }
+  ```
+- **Response**: `201 Created`
+  ```json
+  {
+    "createdCount": 1,
+    "tasks": [
+      {
+        "id": "task-uuid-8888",
+        "userId": "123e4567-e89b-12d3-a456-426614174000",
+        "title": "Deploy Redis cluster ASAP",
+        "priority": "P1_URGENT"
+      }
+    ]
+  }
+  ```
+
+---
+
+### 20. FIDO2 / WebAuthn Passkeys (`/auth/passkeys`)
+
+Passwordless authentication and biometric registration adhering to FIDO2 / W3C WebAuthn standards.
+
+#### `POST /auth/passkeys/register-options`
+- **Access**: `JwtAuthGuard`
+- **Purpose**: Generate a cryptographically secure registration challenge and WebAuthn relying party options for an authenticated user.
+- **Body**:
+  ```json
+  {
+    "deviceName": "MacBook Pro TouchID"
+  }
+  ```
+- **Response**: `200 OK`
+  ```json
+  {
+    "challenge": "dGhpcy1pcy1hLWNyZWRlbnRpYWwtY2hhbGxlbmdl",
+    "rp": {
+      "name": "AllinOne Workspace",
+      "id": "localhost"
+    },
+    "user": {
+      "id": "123e4567-e89b-12d3-a456-426614174000",
+      "name": "user@example.com",
+      "displayName": "Alex Mercer"
+    },
+    "pubKeyCredParams": [
+      { "alg": -7, "type": "public-key" },
+      { "alg": -257, "type": "public-key" }
+    ],
+    "timeout": 60000,
+    "attestation": "none"
+  }
+  ```
+
+#### `POST /auth/passkeys/register-verify`
+- **Access**: `JwtAuthGuard`
+- **Purpose**: Verify the client's WebAuthn credential creation response, persist the passkey credential under `Authentication` (`AuthType.PASSKEY`), and auto-register the device.
+- **Body**:
+  ```json
+  {
+    "id": "base64url-credential-id",
+    "clientDataJSON": "base64url-clientDataJSON",
+    "attestationObject": "base64url-attestationObject",
+    "transports": ["internal", "hybrid"],
+    "deviceName": "MacBook Pro TouchID"
+  }
+  ```
+- **Response**: `201 Created`
+  ```json
+  {
+    "verified": true,
+    "credentialId": "base64url-credential-id",
+    "deviceName": "MacBook Pro TouchID"
+  }
+  ```
+
+#### `POST /auth/passkeys/login-options`
+- **Access**: `@Public()`
+- **Purpose**: Generate an authentication challenge for passwordless or discoverable passkey login.
+- **Body**:
+  ```json
+  {
+    "email": "user@example.com"
+  }
+  ```
+- **Response**: `200 OK`
+  ```json
+  {
+    "challenge": "dGhpcy1pcy1hLWxvZ2luLWNoYWxsZW5nZQ",
+    "rpId": "localhost",
+    "timeout": 60000,
+    "userVerification": "preferred",
+    "allowCredentials": [
+      { "id": "base64url-credential-id", "type": "public-key" }
+    ]
+  }
+  ```
+
+#### `POST /auth/passkeys/login-verify`
+- **Access**: `@Public()`
+- **Purpose**: Verify passkey assertion signature, authenticate the user, auto-register/update device, and issue JWT access/refresh token pair with an active session.
+- **Body**:
+  ```json
+  {
+    "id": "base64url-credential-id",
+    "clientDataJSON": "base64url-clientDataJSON",
+    "authenticatorData": "base64url-authenticatorData",
+    "signature": "base64url-signature",
+    "userHandle": "base64url-userHandle"
+  }
+  ```
+- **Response**: `200 OK`
+  ```json
+  {
+    "user": {
+      "id": "123e4567-e89b-12d3-a456-426614174000",
+      "email": "user@example.com",
+      "displayName": "Alex Mercer"
+    },
+    "tokens": {
+      "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+      "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+      "expiresIn": 900
+    },
+    "sessionId": "session-123e4567-e89b"
+  }
+  ```
+
+---
+
 ## 📡 WebSockets Specification (`/sync` Namespace)
 
 - **Connection URL**: `wss://<DOMAIN>/sync`

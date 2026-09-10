@@ -19,6 +19,9 @@ import { TasksModule } from "@/tasks/tasks.module";
 import { CalendarModule } from "@/calendar/calendar.module";
 import { VaultModule } from "@/vault/vault.module";
 import { AdminModule } from "@/admin/admin.module";
+import { CollaborationModule } from "@/collaboration/collaboration.module";
+import { AiModule } from "@/ai/ai.module";
+import { PasskeysModule } from "@/auth/passkeys/passkeys.module";
 import { QueuesModule } from "@/queues/queues.module";
 import { ErrorHandlingModule } from "@/common/error-handling/error-handling.module";
 import { AuditLogModule } from "@/common/audit/audit-log.module";
@@ -143,6 +146,7 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
     HealthModule,
     UsersModule,
     AuthModule,
+    PasskeysModule,
     DevicesModule,
     SyncModule,
     NotesModule,
@@ -150,6 +154,8 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
     CalendarModule,
     VaultModule,
     AdminModule,
+    CollaborationModule,
+    AiModule,
   ],
   controllers: [AppController],
   providers: [
