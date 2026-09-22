@@ -62,10 +62,27 @@ Priority key:
 6. **P2 items** — Completed: NestJS dependency alignment, Helmet CSP enforcement, backup integrity verification (`tar -tzf` / `gzip -t`), `npm run audit` automation script, and sync compaction metrics.
 
 ### Phase 1: Distributed Infrastructure & Security Hardening
+### Phase 1: Distributed Infrastructure & Security Hardening (Completed)
 
 1. **Multi-Instance WebSocket Clustering**: Configured `@socket.io/redis-adapter` with connection resilience and room broadcasting.
 2. **Distributed Redis Rate Limiting**: Wired `@nestjs/throttler` with Redis backend and user/IP keying.
 3. **Brute-Force Account Lockout**: Implemented 5-failed-attempt / 15-minute lockout with admin unlock API (`POST /admin/users/:userId/unlock`) and SIEM logging.
+1. **Multi-Instance WebSocket Clustering**:
+   - Integrated `@socket.io/redis-adapter` (`RedisIoAdapter`) with dedicated Redis Pub/Sub clients in `src/sync/adapters/redis-io.adapter.ts`.
+   - Configured in `src/main.ts` via `app.useWebSocketAdapter(redisIoAdapter)`.
+   - Propagates sync invalidation events across multiple API instances with local origin-device suppression.
+   - Comprehensive unit test suite in `src/sync/adapters/redis-io.adapter.spec.ts`.
+2. **Distributed Redis Rate Limiting**:
+   - Built `RedisThrottlerStorage` in `src/common/throttler/redis-throttler.storage.ts` implementing `@nestjs/throttler`'s `ThrottlerStorage` contract.
+   - Atomic Redis pipeline execution (`INCR` + `PTTL`) ensuring cluster-wide request budget accuracy with fail-open safety.
+   - Wired compound keying (`user:<userId>:<tracker>` falling back to `ip:<ip>:<tracker>`) in `CustomThrottlerGuard`.
+   - Comprehensive unit test suite in `src/common/throttler/redis-throttler.storage.spec.ts`.
+3. **Brute-Force Account Lockout Protection**:
+   - Automated 15-minute temporary account lockout on 5 consecutive failed login attempts within 15 minutes.
+   - Immediate rejection with `ACCOUNT_LOCKED` error envelope and remaining lockout duration.
+   - Automatic failed attempt counter reset on successful authentication.
+   - Administrative override via `POST /admin/users/:userId/unlock` with mandatory justification and immutable SIEM `AuditLog` records (`ACCOUNT_LOCKED` and `ACCOUNT_UNLOCKED`).
+   - Covered in unit test suites (`src/auth/auth.service.spec.ts`, `src/admin/admin.service.spec.ts`) and E2E test suite (`test/e2e/auth-flow.e2e-spec.ts`).
 
 ### Phase 2: Observability & End-to-End Testing (Completed)
 

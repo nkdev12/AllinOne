@@ -11,6 +11,7 @@ import { MailModule } from "@/common/mail/mail.module";
 import { AuditLogModule } from "@/common/audit/audit-log.module";
 import { JwtStrategy } from "./strategies/jwt.strategy";
 import { JwtAuthGuard } from "./guards/jwt-auth.guard";
+import { BullModule } from "@nestjs/bull";
 
 @Module({
   imports: [
@@ -19,6 +20,9 @@ import { JwtAuthGuard } from "./guards/jwt-auth.guard";
     ConfigurationModule,
     MailModule,
     AuditLogModule,
+    BullModule.registerQueue({
+      name: "mail",
+    }),
     PassportModule.register({ defaultStrategy: "jwt" }),
     JwtModule.registerAsync({
       imports: [ConfigurationModule],

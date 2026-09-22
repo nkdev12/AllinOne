@@ -1,12 +1,10 @@
 import { Test, TestingModule } from "@nestjs/testing";
-import { MailProcessor, SendMailJobData } from "./mail.processor";
-import {
-  NotificationProcessor,
-  SendNotificationJobData,
-} from "./notification.processor";
+import { MailProcessor, SendVerificationEmailJobData, SendPasswordResetEmailJobData } from "./mail.processor";
+import { NotificationProcessor, SendNotificationJobData } from "./notification.processor";
 import { ExportProcessor, ProcessExportJobData } from "./export.processor";
 import { MaintenanceProcessor } from "./maintenance.processor";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { MailService } from "@/common/mail/mail.service";
 import { Job } from "bull";
 
 describe("Queue Processors", () => {
@@ -15,6 +13,7 @@ describe("Queue Processors", () => {
   let exportProcessor: ExportProcessor;
   let maintenanceProcessor: MaintenanceProcessor;
   let prismaService: any;
+  let mailService: any;
 
   const mockUser = {
     id: "user-uuid-123",
@@ -38,6 +37,11 @@ describe("Queue Processors", () => {
       },
     };
 
+    mailService = {
+      sendVerificationEmail: jest.fn().mockResolvedValue(undefined),
+      sendPasswordResetEmail: jest.fn().mockResolvedValue(undefined),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         MailProcessor,
@@ -45,6 +49,7 @@ describe("Queue Processors", () => {
         ExportProcessor,
         MaintenanceProcessor,
         { provide: PrismaService, useValue: prismaService },
+        { provide: MailService, useValue: mailService },
       ],
     }).compile();
 
@@ -58,18 +63,32 @@ describe("Queue Processors", () => {
   });
 
   describe("MailProcessor", () => {
-    it("should process send-email job successfully", async () => {
+    it("should process send-verification-email job successfully", async () => {
       const mockJob = {
         id: 1,
         data: {
-          to: "test@example.com",
-          subject: "Welcome to Allinone",
-        } as SendMailJobData,
-      } as Job<SendMailJobData>;
+          email: "test@example.com",
+          token: "12345",
+        } as SendVerificationEmailJobData,
+      } as Job<SendVerificationEmailJobData>;
 
-      const result = await mailProcessor.handleSendEmail(mockJob);
+      const result = await mailProcessor.handleSendVerificationEmail(mockJob);
       expect(result).toBeDefined();
-      expect(result.recipient).toBe("test@example.com");
+      expect(mailService.sendVerificationEmail).toHaveBeenCalledWith("test@example.com", "12345");
+    });
+    
+    it("should process send-password-reset-email job successfully", async () => {
+      const mockJob = {
+        id: 2,
+        data: {
+          email: "test@example.com",
+          token: "67890",
+        } as SendPasswordResetEmailJobData,
+      } as Job<SendPasswordResetEmailJobData>;
+
+      const result = await mailProcessor.handleSendPasswordResetEmail(mockJob);
+      expect(result).toBeDefined();
+      expect(mailService.sendPasswordResetEmail).toHaveBeenCalledWith("test@example.com", "67890");
     });
   });
 

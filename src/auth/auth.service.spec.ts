@@ -4,7 +4,7 @@ import { PrismaService } from "@/common/prisma/prisma.service";
 import { UsersService } from "@/users/users.service";
 import { JwtService } from "@nestjs/jwt";
 import { ConfigurationService } from "@/config/configuration.service";
-import { MailService } from "@/common/mail/mail.service";
+import { getQueueToken } from "@nestjs/bull";
 import { ConflictException, UnauthorizedException } from "@nestjs/common";
 import { AuditAction } from "@prisma/client";
 import { AuditLogService } from "@/common/audit/audit-log.service";
@@ -20,7 +20,6 @@ describe("AuthService", () => {
   let usersService: any;
   let jwtService: any;
   let configService: any;
-  let mailService: any;
   let auditLogService: any;
 
   const mockUser = {
@@ -119,9 +118,8 @@ describe("AuthService", () => {
       googleClientId: "google-client-id",
     };
 
-    mailService = {
-      sendVerificationEmail: jest.fn().mockResolvedValue(true),
-      sendPasswordResetEmail: jest.fn().mockResolvedValue(true),
+    let mailQueue = {
+      add: jest.fn().mockResolvedValue(true),
     };
 
     auditLogService = {
@@ -139,7 +137,7 @@ describe("AuthService", () => {
         { provide: UsersService, useValue: usersService },
         { provide: JwtService, useValue: jwtService },
         { provide: ConfigurationService, useValue: configService },
-        { provide: MailService, useValue: mailService },
+        { provide: getQueueToken("mail"), useValue: mailQueue },
         { provide: AuditLogService, useValue: auditLogService },
       ],
     }).compile();

@@ -13,10 +13,11 @@ import * as qrcode from "qrcode";
 import * as crypto from "crypto";
 import * as jwt from "jsonwebtoken";
 import { OAuth2Client } from "google-auth-library";
+import { InjectQueue } from "@nestjs/bull";
+import { Queue } from "bull";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { UsersService } from "@/users/users.service";
 import { ConfigurationService } from "@/config/configuration.service";
-import { MailService } from "@/common/mail/mail.service";
 import { AuditLogService } from "@/common/audit/audit-log.service";
 import { RegisterDto } from "./dto/register.dto";
 import { LoginDto } from "./dto/login.dto";
@@ -45,7 +46,7 @@ export class AuthService {
     private readonly usersService: UsersService,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigurationService,
-    private readonly mailService: MailService,
+    @InjectQueue("mail") private readonly mailQueue: Queue,
     @Optional() private readonly auditLogService?: AuditLogService,
   ) {}
 
@@ -761,7 +762,10 @@ export class AuthService {
         { secret: this.configService.jwtAccessSecret, expiresIn: "24h" },
       );
 
-      await this.mailService.sendVerificationEmail(user.email, token);
+      await this.mailQueue.add("send-verification-email", {
+        email: user.email,
+        token,
+      });
     }
 
     return {
@@ -806,7 +810,10 @@ export class AuthService {
         { secret: this.configService.jwtAccessSecret, expiresIn: "1h" },
       );
 
-      await this.mailService.sendPasswordResetEmail(user.email, token);
+      await this.mailQueue.add("send-password-reset-email", {
+        email: user.email,
+        token,
+      });
     }
 
     return {
