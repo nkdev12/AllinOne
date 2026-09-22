@@ -19,6 +19,8 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
+    "test:load:sync": "k6 run test/load/k6-sync-load.js",
+    "test:load:auth": "k6 run test/load/k6-auth-load.js",
     "typecheck": "tsc --noEmit",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
@@ -44,6 +46,7 @@
     "@nestjs/throttler": "^5.2.0",
     "@nestjs/websockets": "^10.4.22",
     "@prisma/client": "^5.0",
+    "@socket.io/redis-adapter": "^8.3.0",
     "argon2": "^0.31",
     "bull": "^4.11",
     "class-transformer": "^0.5",
@@ -91,7 +94,6 @@
     "tsconfig-paths": "^4.2",
     "typescript": "^5.3"
   },
-  
   "jest": {
     "moduleFileExtensions": [
       "js",

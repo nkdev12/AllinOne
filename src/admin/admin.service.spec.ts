@@ -150,4 +150,39 @@ describe("AdminService", () => {
       expect(auditLogService.recordAuditLog).toHaveBeenCalled();
     });
   });
+
+  describe("unlockUserAccount", () => {
+    it("should reset failed attempts, clear lockedUntil, and record an audit log", async () => {
+      const result = await service.unlockUserAccount(
+        "user-123",
+        "operator-456",
+        "Customer support request",
+      );
+
+      expect(result.success).toBe(true);
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: "user-123" },
+        data: {
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+        },
+      });
+      expect(auditLogService.recordAuditLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: "operator-456",
+          action: AuditAction.ACCOUNT_UNLOCKED,
+          resourceType: "User",
+          resourceId: "user-123",
+        }),
+      );
+    });
+
+    it("should throw NotFoundException if user is not found", async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.unlockUserAccount("non-existent", "operator-456"),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
 });

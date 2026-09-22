@@ -24,6 +24,8 @@ model User {
   status            UserStatus @default(ACTIVE)
   emailVerifiedAt   DateTime?
   lastLoginAt       DateTime?
+  failedLoginAttempts Int      @default(0)
+  lockedUntil       DateTime?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
   deletedAt         DateTime?
@@ -257,6 +259,8 @@ enum AuditAction {
   ACCOUNT_CREATED
   ACCOUNT_DELETED
   ACCOUNT_EXPORTED
+  ACCOUNT_LOCKED
+  ACCOUNT_UNLOCKED
   OAUTH_CONNECTED
   OAUTH_REVOKED
 }
@@ -451,6 +455,7 @@ model Task {
   recurrenceRule String?
   completedAt    DateTime?
   sortOrder      Int          @default(0)
+  version        Int          @default(1)
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
   deletedAt      DateTime?
@@ -564,6 +569,7 @@ model Event {
   recurrenceRule String?
   status         EventStatus     @default(CONFIRMED)
   color          String?
+  version        Int             @default(1)
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
   deletedAt      DateTime?

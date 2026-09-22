@@ -4,8 +4,10 @@ import { PrismaService } from "@/common/prisma/prisma.service";
 import { UsersService } from "@/users/users.service";
 import { JwtService } from "@nestjs/jwt";
 import { ConfigurationService } from "@/config/configuration.service";
-import { MailService } from "@/common/mail/mail.service";
-import { ConflictException } from "@nestjs/common";
+import { getQueueToken } from "@nestjs/bull";
+import { ConflictException, UnauthorizedException } from "@nestjs/common";
+import { AuditAction } from "@prisma/client";
+import { AuditLogService } from "@/common/audit/audit-log.service";
 import * as argon2 from "argon2";
 import { generateSecret, generateURI, verify } from "otplib";
 
@@ -18,7 +20,7 @@ describe("AuthService", () => {
   let usersService: any;
   let jwtService: any;
   let configService: any;
-  let mailService: any;
+  let auditLogService: any;
 
   const mockUser = {
     id: "user-uuid-123",
@@ -30,6 +32,8 @@ describe("AuthService", () => {
     createdAt: new Date(),
     deletedAt: null,
     emailVerifiedAt: null,
+    failedLoginAttempts: 0,
+    lockedUntil: null,
   };
 
   const mockDevice = {
@@ -114,9 +118,12 @@ describe("AuthService", () => {
       googleClientId: "google-client-id",
     };
 
-    mailService = {
-      sendVerificationEmail: jest.fn().mockResolvedValue(true),
-      sendPasswordResetEmail: jest.fn().mockResolvedValue(true),
+    let mailQueue = {
+      add: jest.fn().mockResolvedValue(true),
+    };
+
+    auditLogService = {
+      recordAuditLog: jest.fn().mockResolvedValue({ id: "audit-1" }),
     };
 
     (generateSecret as jest.Mock).mockReturnValue("MOCKSECRET123");
@@ -130,7 +137,8 @@ describe("AuthService", () => {
         { provide: UsersService, useValue: usersService },
         { provide: JwtService, useValue: jwtService },
         { provide: ConfigurationService, useValue: configService },
-        { provide: MailService, useValue: mailService },
+        { provide: getQueueToken("mail"), useValue: mailQueue },
+        { provide: AuditLogService, useValue: auditLogService },
       ],
     }).compile();
 
@@ -166,6 +174,157 @@ describe("AuthService", () => {
       expect(result.user?.email).toBe("test@example.com");
       expect(result.tokens?.accessToken).toBe("mock-jwt-token");
       expect(result.sessionId).toBe("session-uuid-789");
+    });
+  });
+
+  describe("login and account lockout", () => {
+    const validAuthRecord = {
+      id: "auth-1",
+      userId: "user-uuid-123",
+      type: "EMAIL_PASSWORD",
+      identifier: "test@example.com",
+      passwordHash: "valid-hash",
+      user: {
+        ...mockUser,
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+      },
+    };
+
+    it("should throw UnauthorizedException if auth record is missing", async () => {
+      prismaService.authentication.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.login({
+          email: "missing@example.com",
+          password: "Password123!",
+        }),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(auditLogService.recordAuditLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: AuditAction.LOGIN_FAILURE,
+        }),
+      );
+    });
+
+    it("should throw UnauthorizedException if account is currently locked", async () => {
+      const lockedUntil = new Date(Date.now() + 10 * 60 * 1000);
+      prismaService.authentication.findFirst.mockResolvedValue({
+        ...validAuthRecord,
+        user: {
+          ...mockUser,
+          failedLoginAttempts: 5,
+          lockedUntil,
+        },
+      });
+
+      await expect(
+        service.login({
+          email: "test@example.com",
+          password: "Password123!",
+        }),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(auditLogService.recordAuditLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: AuditAction.LOGIN_FAILURE,
+          userId: "user-uuid-123",
+        }),
+      );
+    });
+
+    it("should increment failedLoginAttempts on incorrect password", async () => {
+      prismaService.authentication.findFirst.mockResolvedValue({
+        ...validAuthRecord,
+        user: {
+          ...mockUser,
+          failedLoginAttempts: 2,
+          lockedUntil: null,
+        },
+      });
+      (argon2.verify as jest.Mock).mockResolvedValue(false);
+
+      await expect(
+        service.login({
+          email: "test@example.com",
+          password: "WrongPassword!",
+        }),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(prismaService.user.update).toHaveBeenCalledWith({
+        where: { id: "user-uuid-123" },
+        data: {
+          failedLoginAttempts: 3,
+          lockedUntil: null,
+        },
+      });
+      expect(auditLogService.recordAuditLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: AuditAction.LOGIN_FAILURE,
+          userId: "user-uuid-123",
+        }),
+      );
+    });
+
+    it("should lock account for 15 minutes when reaching 5 failed attempts", async () => {
+      prismaService.authentication.findFirst.mockResolvedValue({
+        ...validAuthRecord,
+        user: {
+          ...mockUser,
+          failedLoginAttempts: 4,
+          lockedUntil: null,
+        },
+      });
+      (argon2.verify as jest.Mock).mockResolvedValue(false);
+
+      await expect(
+        service.login({
+          email: "test@example.com",
+          password: "WrongPassword!",
+        }),
+      ).rejects.toThrow("Account has been temporarily locked for 15 minutes");
+
+      expect(prismaService.user.update).toHaveBeenCalledWith({
+        where: { id: "user-uuid-123" },
+        data: {
+          failedLoginAttempts: 5,
+          lockedUntil: expect.any(Date),
+        },
+      });
+      expect(auditLogService.recordAuditLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: AuditAction.ACCOUNT_LOCKED,
+          userId: "user-uuid-123",
+        }),
+      );
+    });
+
+    it("should reset failedLoginAttempts to 0 upon successful login", async () => {
+      prismaService.authentication.findFirst.mockResolvedValue({
+        ...validAuthRecord,
+        user: {
+          ...mockUser,
+          failedLoginAttempts: 3,
+          lockedUntil: null,
+        },
+      });
+      (argon2.verify as jest.Mock).mockResolvedValue(true);
+
+      const result = await service.login({
+        email: "test@example.com",
+        password: "CorrectPassword123!",
+      });
+
+      expect(result).toBeDefined();
+      expect(result.tokens?.accessToken).toBe("mock-jwt-token");
+      expect(prismaService.user.update).toHaveBeenCalledWith({
+        where: { id: "user-uuid-123" },
+        data: {
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+        },
+      });
     });
   });
 

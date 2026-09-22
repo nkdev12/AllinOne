@@ -50,6 +50,7 @@ This document provides a comprehensive entity-relationship dictionary for all Mo
 #### `User`
 - **Primary Key**: `id` (`Uuid`, `gen_random_uuid()`)
 - **Fields**: `email` (VarChar 255, Unique), `displayName`, `avatar`, `locale` (default `"en-US"`), `timezone` (default `"UTC"`), `status` (`ACTIVE`, `PENDING`, `SUSPENDED`, `DELETED`), `emailVerifiedAt`, `lastLoginAt`, `createdAt`, `updatedAt`, `deletedAt`.
+- **Fields**: `email` (VarChar 255, Unique), `displayName`, `avatar`, `locale` (default `"en-US"`), `timezone` (default `"UTC"`), `status` (`ACTIVE`, `PENDING`, `SUSPENDED`, `DELETED`), `emailVerifiedAt`, `lastLoginAt`, `failedLoginAttempts` (Int, default `0`), `lockedUntil` (DateTime?, null if active), `createdAt`, `updatedAt`, `deletedAt`.
 - **Indexes**: `@@index([email])`, `@@index([status])`, `@@index([createdAt])`.
 
 #### `Authentication`
@@ -68,6 +69,7 @@ This document provides a comprehensive entity-relationship dictionary for all Mo
 #### `AuditLog`
 - **Primary Key**: `id` (`Uuid`)
 - **Fields**: `userId` (`Uuid`?, nullable for failed logins/system events), `action` (`AuditAction`), `resourceType` (VarChar 50, optional), `resourceId` (`Uuid`, optional), `requestId` (`Uuid`, optional correlation ID), `changes` (`JsonB` diff), `ipAddress`, `userAgent`, `metadata` (`JsonB`), `createdAt`.
+- **Fields**: `userId` (`Uuid`?, nullable for failed logins/system events), `action` (`AuditAction`, including `LOGIN_FAILURE`, `ACCOUNT_LOCKED`, `ACCOUNT_UNLOCKED`, `MFA_DISABLED`, `DEVICE_REVOKED`), `resourceType` (VarChar 50, optional), `resourceId` (`Uuid`, optional), `requestId` (`Uuid`, optional correlation ID), `changes` (`JsonB` diff), `ipAddress`, `userAgent`, `metadata` (`JsonB`), `createdAt`.
 - **Indexes**: `@@index([userId])`, `@@index([action])`, `@@index([createdAt])`, `@@index([requestId])`.
 - **Design Rationale**: `changes` (`JsonB`) stores attribute-level mutation diffs of altered entities, while `metadata` (`JsonB`) stores request telemetry, authentication context, and security event details, keeping mutation diffs separate from request metadata for optimal querying.
 

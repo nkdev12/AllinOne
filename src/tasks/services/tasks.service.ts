@@ -74,7 +74,7 @@ export class TasksService {
           entityType: "task",
           entityId: task.id,
           operation: ChangeOperation.CREATE,
-          version: 1,
+          version: task.version,
           payload: {
             title: task.title,
             projectId: task.projectId,
@@ -255,6 +255,7 @@ export class TasksService {
                 ? null
                 : undefined,
           sortOrder: dto.sortOrder,
+          version: { increment: 1 },
         },
         include: {
           project: true,
@@ -270,7 +271,7 @@ export class TasksService {
           entityType: "task",
           entityId: updatedTask.id,
           operation: ChangeOperation.UPDATE,
-          version: 1,
+          version: updatedTask.version,
           payload: {
             title: updatedTask.title,
             priority: updatedTask.priority,
@@ -300,6 +301,7 @@ export class TasksService {
         data: {
           status: TaskStatus.COMPLETED,
           completedAt: new Date(),
+          version: { increment: 1 },
         },
         include: {
           project: true,
@@ -314,7 +316,7 @@ export class TasksService {
           entityType: "task",
           entityId: completedTask.id,
           operation: ChangeOperation.UPDATE,
-          version: 1,
+          version: completedTask.version,
           payload: {
             id: completedTask.id,
             isCompleted: true,
@@ -366,7 +368,7 @@ export class TasksService {
             entityType: "task",
             entityId: nextRecurringTask.id,
             operation: ChangeOperation.CREATE,
-            version: 1,
+            version: nextRecurringTask.version,
             payload: {
               title: nextRecurringTask.title,
               dueDate: nextRecurringTask.dueDate,
@@ -397,7 +399,7 @@ export class TasksService {
     return this.prisma.$transaction(async (tx) => {
       await tx.task.update({
         where: { id: taskId },
-        data: { deletedAt: new Date() },
+        data: { deletedAt: new Date(), version: { increment: 1 } },
       });
 
       await tx.change.create({
@@ -406,7 +408,7 @@ export class TasksService {
           entityType: "task",
           entityId: taskId,
           operation: ChangeOperation.DELETE,
-          version: 1,
+          version: existing.version + 1,
           payload: { id: taskId },
         },
       });

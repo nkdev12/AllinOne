@@ -1,32 +1,37 @@
 import { Processor, Process } from "@nestjs/bull";
 import { Logger } from "@nestjs/common";
 import { Job } from "bull";
+import { MailService } from "@/common/mail/mail.service";
 
-export interface SendMailJobData {
-  to: string;
-  subject: string;
-  html?: string;
-  text?: string;
+export interface SendVerificationEmailJobData {
+  email: string;
+  token: string;
+}
+
+export interface SendPasswordResetEmailJobData {
+  email: string;
+  token: string;
 }
 
 @Processor("mail")
 export class MailProcessor {
   private readonly logger = new Logger(MailProcessor.name);
 
-  @Process("send-email")
-  async handleSendEmail(job: Job<SendMailJobData>) {
-    this.logger.log(
-      `[MailProcessor] Processing email job #${job.id} to: ${job.data.to}, subject: '${job.data.subject}'`,
-    );
+  constructor(private readonly mailService: MailService) {}
 
-    // Asynchronous email delivery processing simulation / Nodemailer integration
-    // In production, uses configured SMTP transporter
-    await new Promise((resolve) => setTimeout(resolve, 100));
+  @Process("send-verification-email")
+  async handleSendVerificationEmail(job: Job<SendVerificationEmailJobData>) {
+    this.logger.log(`[MailProcessor] Processing verification email for ${job.data.email}`);
+    await this.mailService.sendVerificationEmail(job.data.email, job.data.token);
+    this.logger.log(`[MailProcessor] Verification email sent to ${job.data.email}`);
+    return { sentAt: new Date().toISOString() };
+  }
 
-    this.logger.log(
-      `[MailProcessor] Successfully dispatched email job #${job.id} to ${job.data.to}`,
-    );
-
-    return { sentAt: new Date().toISOString(), recipient: job.data.to };
+  @Process("send-password-reset-email")
+  async handleSendPasswordResetEmail(job: Job<SendPasswordResetEmailJobData>) {
+    this.logger.log(`[MailProcessor] Processing password reset email for ${job.data.email}`);
+    await this.mailService.sendPasswordResetEmail(job.data.email, job.data.token);
+    this.logger.log(`[MailProcessor] Password reset email sent to ${job.data.email}`);
+    return { sentAt: new Date().toISOString() };
   }
 }

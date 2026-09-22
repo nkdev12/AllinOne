@@ -235,6 +235,8 @@ export class AdminService {
       },
     });
 
+    const isLocked = Boolean(user.lockedUntil && user.lockedUntil > new Date());
+
     return {
       user: {
         id: user.id,
@@ -243,6 +245,9 @@ export class AdminService {
         status: user.status,
         createdAt: user.createdAt,
         lastLoginAt: user.lastLoginAt,
+        failedLoginAttempts: user.failedLoginAttempts,
+        lockedUntil: user.lockedUntil,
+        isLocked,
       },
       mfaEnabled: Boolean(user.mfaSettings?.totpEnabled),
       activeSessionsCount: user.sessions.length,
@@ -250,6 +255,53 @@ export class AdminService {
       activeSessions: user.sessions,
       activeDevices: user.devices,
       recentAuditLogs,
+    };
+  }
+
+  /**
+   * Administratively unlocks a locked user account and resets failed login counters.
+   */
+  async unlockUserAccount(
+    targetUserId: string,
+    operatorId: string,
+    reason: string = "Administrative account unlock",
+  ) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: targetUserId },
+    });
+
+    if (!user) {
+      throw new NotFoundException(`User with ID ${targetUserId} not found`);
+    }
+
+    await this.prisma.user.update({
+      where: { id: targetUserId },
+      data: {
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+      },
+    });
+
+    await this.auditLogService.recordAuditLog({
+      userId: operatorId,
+      action: AuditAction.ACCOUNT_UNLOCKED,
+      resourceType: "User",
+      resourceId: targetUserId,
+      metadata: {
+        targetUserId,
+        operatorId,
+        reason,
+      },
+    });
+
+    this.logger.log(
+      `[AdminService] Operator ${operatorId} unlocked account for user ${targetUserId}. Reason: ${reason}`,
+    );
+
+    return {
+      success: true,
+      targetUserId,
+      message: "User account unlocked successfully",
     };
   }
 }

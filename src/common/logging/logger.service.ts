@@ -1,5 +1,6 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Optional } from "@nestjs/common";
 import { ConfigurationService } from "@/config/configuration.service";
+import { TracingService } from "@/common/tracing/tracing.service";
 
 export interface LogContext {
   requestId?: string;
@@ -7,6 +8,8 @@ export interface LogContext {
   deviceId?: string;
   service?: string;
   action?: string;
+  traceId?: string;
+  spanId?: string;
   [key: string]: any;
 }
 
@@ -14,7 +17,10 @@ export interface LogContext {
 export class LoggerService {
   private logFormat: "json" | "simple";
 
-  constructor(private configService: ConfigurationService) {
+  constructor(
+    private configService: ConfigurationService,
+    @Optional() private readonly tracingService?: TracingService,
+  ) {
     this.logFormat = configService.logFormat;
   }
 
@@ -87,11 +93,17 @@ export class LoggerService {
     context?: string,
     metadata?: LogContext,
   ): void {
+    const traceId =
+      metadata?.traceId || this.tracingService?.getCurrentTraceId();
+    const spanId = metadata?.spanId || this.tracingService?.getCurrentSpanId();
+
     const logEntry: Record<string, any> = {
       timestamp: new Date().toISOString(),
       level,
       message,
       context: context || "Allinone",
+      ...(traceId ? { traceId } : {}),
+      ...(spanId ? { spanId } : {}),
       ...metadata,
     };
 

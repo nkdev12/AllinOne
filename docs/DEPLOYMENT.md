@@ -11,10 +11,13 @@ This guide walks through deploying Allinone to production.
 ### Application
 
 - [ ] All tests passing (`npm run test`)
+- [ ] Unit tests passing (`npm test`)
+- [ ] End-to-end tests passing (`npm run test:e2e`)
 - [ ] Type checking passes (`npm run typecheck`)
 - [ ] Linting passes (`npm run lint`)
 - [ ] Security audit done (`npm audit`)
 - [ ] Security audit passed (`npm run audit` or `npm audit --audit-level=high`)
+- [ ] Load & performance tests verified (`npm run test:load:sync`, `npm run test:load:auth`)
 - [ ] Dependencies updated (`npm update`)
 - [ ] Build succeeds (`npm run build`)
 - [ ] Docker images build (`docker build`)
@@ -304,6 +307,12 @@ curl https://your-domain.com/health/ready
 
 # Liveness probe
 curl https://your-domain.com/health/live
+
+# Distributed tracing & W3C TraceContext verification
+curl -i https://your-domain.com/health/live
+# Expected response headers:
+# x-trace-id: <32-hex-trace-id>
+# traceparent: 00-<32-hex-trace-id>-<16-hex-span-id>-01
 ```
 
 ### API Access
