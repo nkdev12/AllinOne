@@ -1,4 +1,13 @@
-import { Controller, Post, Get, Body, Query, UseGuards } from "@nestjs/common";
+import {
+  Controller,
+  Post,
+  Get,
+  Body,
+  Query,
+  UseGuards,
+  HttpCode,
+  HttpStatus,
+} from "@nestjs/common";
 import {
   ApiTags,
   ApiOperation,
@@ -27,6 +36,7 @@ export class SyncController {
   }
 
   @Post("pull")
+  @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: "Pull change stream from server starting after cursor",
   })

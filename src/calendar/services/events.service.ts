@@ -77,7 +77,7 @@ export class EventsService {
           entityType: "event",
           entityId: event.id,
           operation: ChangeOperation.CREATE,
-          version: 1,
+          version: event.version,
           payload: {
             title: event.title,
             calendarId: event.calendarId,
@@ -214,6 +214,7 @@ export class EventsService {
           recurrenceRule: dto.recurrenceRule,
           status: dto.status,
           color: dto.color,
+          version: { increment: 1 },
         },
         include: {
           calendar: true,
@@ -228,7 +229,7 @@ export class EventsService {
           entityType: "event",
           entityId: updatedEvent.id,
           operation: ChangeOperation.UPDATE,
-          version: 1,
+          version: updatedEvent.version,
           payload: {
             title: updatedEvent.title,
             startAt: updatedEvent.startAt,
@@ -295,7 +296,7 @@ export class EventsService {
     return this.prisma.$transaction(async (tx) => {
       await tx.event.update({
         where: { id: eventId },
-        data: { deletedAt: new Date() },
+        data: { deletedAt: new Date(), version: { increment: 1 } },
       });
 
       await tx.change.create({
@@ -304,7 +305,7 @@ export class EventsService {
           entityType: "event",
           entityId: eventId,
           operation: ChangeOperation.DELETE,
-          version: 1,
+          version: existing.version + 1,
           payload: { id: eventId },
         },
       });
