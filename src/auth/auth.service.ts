@@ -38,7 +38,7 @@ import { AuthType, Platform, AuditAction } from "@prisma/client";
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
   private readonly googleClient = new OAuth2Client();
-  private redisClient!: Redis;
+  private redisClient?: Redis;
   private appleJwksCache: { keys: any[]; fetchedAt: number } | null = null;
   private microsoftJwksCache: { keys: any[]; fetchedAt: number } | null = null;
   private readonly JWKS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
@@ -51,6 +51,18 @@ export class AuthService {
     @InjectQueue("mail") private readonly mailQueue: Queue,
     @Optional() private readonly auditLogService?: AuditLogService,
   ) {}
+
+  /** Create the OTP Redis connection only when an OTP operation needs it. */
+  private getRedisClient(): Redis {
+    if (!this.redisClient) {
+      this.redisClient = new Redis(this.configService.redisUrl);
+      this.redisClient.on("error", (error) => {
+        this.logger.error(`OTP Redis connection error: ${error.message}`);
+      });
+    }
+
+    return this.redisClient;
+  }
 
   async register(dto: RegisterDto): Promise<AuthResponseDto> {
     const existingUser = await this.usersService.findByEmail(dto.email);
@@ -96,7 +108,7 @@ export class AuthService {
         return { user, device };
       });
     } catch (error: any) {
-      if (error.code === 'P2002') {
+      if (error.code === "P2002") {
         throw new ConflictException("User with this email already exists");
       }
       throw error;
@@ -771,41 +783,47 @@ export class AuthService {
         { sub: user.id, email: user.email, purpose: "EMAIL_VERIFICATION" },
         { secret: this.configService.jwtAccessSecret, expiresIn: "24h" },
       );
-      
+
       const otp = Math.floor(100000 + Math.random() * 900000).toString();
-      
+
       // LOG OTP TO TERMINAL FOR LOCAL TESTING
       console.log("\n=======================================================");
       console.log(`🔔 OTP CODE FOR ${user.email}: ${otp}`);
       console.log("=======================================================\n");
-      await this.redisClient.set(`email_otp:${user.email}`, otp, "EX", 3600); // 1 hr expiration
+      await this.getRedisClient().set(`email_otp:${user.email}`, otp, "EX", 3600); // 1 hr expiration
 
       await this.mailQueue.add("send-verification-email", {
         email: user.email,
         token,
-        otp
+        otp,
       });
     }
 
     return {
-      message: "If the account exists, a verification link and OTP have been sent.",
+      message:
+        "If the account exists, a verification link and OTP have been sent.",
     };
   }
 
-  async confirmEmailVerification(token: string | undefined, email?: string, otp?: string): Promise<{ message: string }> {
+  async confirmEmailVerification(
+    token: string | undefined,
+    email?: string,
+    otp?: string,
+  ): Promise<{ message: string }> {
     try {
       let userId: string;
 
       if (email && otp) {
         // OTP verification
-        const storedOtp = await this.redisClient.get(`email_otp:${email}`);
+        const redisClient = this.getRedisClient();
+        const storedOtp = await redisClient.get(`email_otp:${email}`);
         if (!storedOtp || storedOtp !== otp) {
           throw new BadRequestException("Invalid or expired OTP");
         }
         const user = await this.usersService.findByEmail(email);
         if (!user) throw new BadRequestException("User not found");
         userId = user.id;
-        await this.redisClient.del(`email_otp:${email}`);
+        await redisClient.del(`email_otp:${email}`);
       } else if (token) {
         // Token verification
         const payload = this.jwtService.verify(token, {
@@ -817,7 +835,9 @@ export class AuthService {
         }
         userId = payload.sub;
       } else {
-        throw new BadRequestException("Must provide either a token or email and OTP");
+        throw new BadRequestException(
+          "Must provide either a token or email and OTP",
+        );
       }
 
       await this.prisma.user.update({
@@ -855,7 +875,9 @@ export class AuthService {
       // LOG RESET LINK TO TERMINAL FOR LOCAL TESTING
       console.log("\n=======================================================");
       console.log(`🔔 PASSWORD RESET LINK FOR ${user.email}:`);
-      console.log(`${this.configService.appUrl}/auth/reset-password?token=${token}`);
+      console.log(
+        `${this.configService.appUrl}/auth/reset-password?token=${token}`,
+      );
       console.log("=======================================================\n");
     }
 

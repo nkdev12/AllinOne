@@ -18,11 +18,9 @@ import { MaintenanceProcessor } from "./processors/maintenance.processor";
       imports: [ConfigurationModule],
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => ({
-        redis: {
-          host: configService.get<string>("REDIS_HOST") || "localhost",
-          port: Number(configService.get<number>("REDIS_PORT")) || 6379,
-          password: configService.get<string>("REDIS_PASSWORD") || undefined,
-        },
+        // Bull accepts a Redis connection URL. This also retains the TLS and
+        // credentials required by managed Redis providers such as Upstash.
+        redis: configService.getOrThrow<string>("REDIS_URL"),
       }),
     }),
     BullModule.registerQueue(

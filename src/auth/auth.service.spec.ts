@@ -118,7 +118,7 @@ describe("AuthService", () => {
       googleClientId: "google-client-id",
     };
 
-    let mailQueue = {
+    const mailQueue = {
       add: jest.fn().mockResolvedValue(true),
     };
 

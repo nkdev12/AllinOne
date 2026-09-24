@@ -22,7 +22,11 @@ export class MailService {
     });
   }
 
-  async sendVerificationEmail(email: string, token: string, otp?: string): Promise<boolean> {
+  async sendVerificationEmail(
+    email: string,
+    token: string,
+    otp?: string,
+  ): Promise<boolean> {
     const verifyUrl = `${this.configService.appUrl}/auth/verify-email?token=${token}`;
     const displayCode = otp || token;
     const mailOptions = {

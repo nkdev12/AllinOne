@@ -23,17 +23,32 @@ export class MailProcessor {
 
   @Process("send-verification-email")
   async handleSendVerificationEmail(job: Job<SendVerificationEmailJobData>) {
-    this.logger.log(`[MailProcessor] Processing verification email for ${job.data.email}`);
-    await this.mailService.sendVerificationEmail(job.data.email, job.data.token, job.data.otp);
-    this.logger.log(`[MailProcessor] Verification email sent to ${job.data.email}`);
+    this.logger.log(
+      `[MailProcessor] Processing verification email for ${job.data.email}`,
+    );
+    await this.mailService.sendVerificationEmail(
+      job.data.email,
+      job.data.token,
+      job.data.otp,
+    );
+    this.logger.log(
+      `[MailProcessor] Verification email sent to ${job.data.email}`,
+    );
     return { sentAt: new Date().toISOString() };
   }
 
   @Process("send-password-reset-email")
   async handleSendPasswordResetEmail(job: Job<SendPasswordResetEmailJobData>) {
-    this.logger.log(`[MailProcessor] Processing password reset email for ${job.data.email}`);
-    await this.mailService.sendPasswordResetEmail(job.data.email, job.data.token);
-    this.logger.log(`[MailProcessor] Password reset email sent to ${job.data.email}`);
+    this.logger.log(
+      `[MailProcessor] Processing password reset email for ${job.data.email}`,
+    );
+    await this.mailService.sendPasswordResetEmail(
+      job.data.email,
+      job.data.token,
+    );
+    this.logger.log(
+      `[MailProcessor] Password reset email sent to ${job.data.email}`,
+    );
     return { sentAt: new Date().toISOString() };
   }
 }

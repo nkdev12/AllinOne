@@ -1,6 +1,13 @@
 import { Test, TestingModule } from "@nestjs/testing";
-import { MailProcessor, SendVerificationEmailJobData, SendPasswordResetEmailJobData } from "./mail.processor";
-import { NotificationProcessor, SendNotificationJobData } from "./notification.processor";
+import {
+  MailProcessor,
+  SendVerificationEmailJobData,
+  SendPasswordResetEmailJobData,
+} from "./mail.processor";
+import {
+  NotificationProcessor,
+  SendNotificationJobData,
+} from "./notification.processor";
 import { ExportProcessor, ProcessExportJobData } from "./export.processor";
 import { MaintenanceProcessor } from "./maintenance.processor";
 import { PrismaService } from "@/common/prisma/prisma.service";
@@ -74,9 +81,13 @@ describe("Queue Processors", () => {
 
       const result = await mailProcessor.handleSendVerificationEmail(mockJob);
       expect(result).toBeDefined();
-      expect(mailService.sendVerificationEmail).toHaveBeenCalledWith("test@example.com", "12345");
+      expect(mailService.sendVerificationEmail).toHaveBeenCalledWith(
+        "test@example.com",
+        "12345",
+        undefined,
+      );
     });
-    
+
     it("should process send-password-reset-email job successfully", async () => {
       const mockJob = {
         id: 2,
@@ -88,7 +99,10 @@ describe("Queue Processors", () => {
 
       const result = await mailProcessor.handleSendPasswordResetEmail(mockJob);
       expect(result).toBeDefined();
-      expect(mailService.sendPasswordResetEmail).toHaveBeenCalledWith("test@example.com", "67890");
+      expect(mailService.sendPasswordResetEmail).toHaveBeenCalledWith(
+        "test@example.com",
+        "67890",
+      );
     });
   });
 

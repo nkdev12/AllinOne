@@ -12,7 +12,9 @@ export class VerifyEmailRequestDto {
 }
 
 export class ConfirmEmailDto {
-  @ApiPropertyOptional({ description: "Email verification token received via email (if using link)" })
+  @ApiPropertyOptional({
+    description: "Email verification token received via email (if using link)",
+  })
   @IsString()
   @IsOptional()
   token?: string;
