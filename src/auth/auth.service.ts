@@ -1,3 +1,4 @@
+import Redis from "ioredis";
 import {
   Injectable,
   UnauthorizedException,
@@ -37,6 +38,7 @@ import { AuthType, Platform, AuditAction } from "@prisma/client";
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
   private readonly googleClient = new OAuth2Client();
+  private redisClient!: Redis;
   private appleJwksCache: { keys: any[]; fetchedAt: number } | null = null;
   private microsoftJwksCache: { keys: any[]; fetchedAt: number } | null = null;
   private readonly JWKS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
@@ -58,39 +60,47 @@ export class AuthService {
 
     const hashedPassword = await argon2.hash(dto.password);
 
-    const result = await this.prisma.$transaction(async (tx) => {
-      const user = await tx.user.create({
-        data: {
-          email: dto.email.toLowerCase(),
-          displayName: dto.displayName || null,
-          locale: dto.locale || "en-US",
-          timezone: dto.timezone || "UTC",
-          status: "ACTIVE",
-        },
-      });
+    let result;
+    try {
+      result = await this.prisma.$transaction(async (tx) => {
+        const user = await tx.user.create({
+          data: {
+            email: dto.email.toLowerCase(),
+            displayName: dto.displayName || null,
+            locale: dto.locale || "en-US",
+            timezone: dto.timezone || "UTC",
+            status: "ACTIVE",
+          },
+        });
 
-      await tx.authentication.create({
-        data: {
-          userId: user.id,
-          type: "EMAIL_PASSWORD",
-          identifier: dto.email.toLowerCase(),
-          passwordHash: hashedPassword,
-          emailVerified: false,
-        },
-      });
+        await tx.authentication.create({
+          data: {
+            userId: user.id,
+            type: "EMAIL_PASSWORD",
+            identifier: dto.email.toLowerCase(),
+            passwordHash: hashedPassword,
+            emailVerified: false,
+          },
+        });
 
-      const device = await tx.device.create({
-        data: {
-          userId: user.id,
-          name: "Primary Web/Client Device",
-          platform: Platform.WEB,
-          appVersion: "1.0.0",
-          publicKey: "",
-        },
-      });
+        const device = await tx.device.create({
+          data: {
+            userId: user.id,
+            name: "Primary Web/Client Device",
+            platform: Platform.WEB,
+            appVersion: "1.0.0",
+            publicKey: "",
+          },
+        });
 
-      return { user, device };
-    });
+        return { user, device };
+      });
+    } catch (error: any) {
+      if (error.code === 'P2002') {
+        throw new ConflictException("User with this email already exists");
+      }
+      throw error;
+    }
 
     const tokens = await this.generateTokens(result.user.id, result.user.email);
     const session = await this.createSession(
@@ -761,35 +771,62 @@ export class AuthService {
         { sub: user.id, email: user.email, purpose: "EMAIL_VERIFICATION" },
         { secret: this.configService.jwtAccessSecret, expiresIn: "24h" },
       );
+      
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      
+      // LOG OTP TO TERMINAL FOR LOCAL TESTING
+      console.log("\n=======================================================");
+      console.log(`🔔 OTP CODE FOR ${user.email}: ${otp}`);
+      console.log("=======================================================\n");
+      await this.redisClient.set(`email_otp:${user.email}`, otp, "EX", 3600); // 1 hr expiration
 
       await this.mailQueue.add("send-verification-email", {
         email: user.email,
         token,
+        otp
       });
     }
 
     return {
-      message: "If the account exists, a verification link has been sent.",
+      message: "If the account exists, a verification link and OTP have been sent.",
     };
   }
 
-  async confirmEmailVerification(token: string): Promise<{ message: string }> {
+  async confirmEmailVerification(token: string | undefined, email?: string, otp?: string): Promise<{ message: string }> {
     try {
-      const payload = this.jwtService.verify(token, {
-        secret: this.configService.jwtAccessSecret,
-      });
+      let userId: string;
 
-      if (payload.purpose !== "EMAIL_VERIFICATION") {
-        throw new BadRequestException("Invalid verification token type");
+      if (email && otp) {
+        // OTP verification
+        const storedOtp = await this.redisClient.get(`email_otp:${email}`);
+        if (!storedOtp || storedOtp !== otp) {
+          throw new BadRequestException("Invalid or expired OTP");
+        }
+        const user = await this.usersService.findByEmail(email);
+        if (!user) throw new BadRequestException("User not found");
+        userId = user.id;
+        await this.redisClient.del(`email_otp:${email}`);
+      } else if (token) {
+        // Token verification
+        const payload = this.jwtService.verify(token, {
+          secret: this.configService.jwtAccessSecret,
+        });
+
+        if (payload.purpose !== "EMAIL_VERIFICATION") {
+          throw new BadRequestException("Invalid verification token type");
+        }
+        userId = payload.sub;
+      } else {
+        throw new BadRequestException("Must provide either a token or email and OTP");
       }
 
       await this.prisma.user.update({
-        where: { id: payload.sub },
+        where: { id: userId },
         data: { emailVerifiedAt: new Date() },
       });
 
       await this.prisma.authentication.updateMany({
-        where: { userId: payload.sub, type: "EMAIL_PASSWORD" },
+        where: { userId: userId, type: "EMAIL_PASSWORD" },
         data: { emailVerified: true },
       });
 
@@ -814,6 +851,12 @@ export class AuthService {
         email: user.email,
         token,
       });
+
+      // LOG RESET LINK TO TERMINAL FOR LOCAL TESTING
+      console.log("\n=======================================================");
+      console.log(`🔔 PASSWORD RESET LINK FOR ${user.email}:`);
+      console.log(`${this.configService.appUrl}/auth/reset-password?token=${token}`);
+      console.log("=======================================================\n");
     }
 
     return {

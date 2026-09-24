@@ -219,7 +219,7 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: "Confirm email verification token" })
   async confirmEmailVerification(@Body() dto: ConfirmEmailDto) {
-    return this.authService.confirmEmailVerification(dto.token);
+    return this.authService.confirmEmailVerification(dto.token, dto.email, dto.otp);
   }
 
   @Post("forgot-password")

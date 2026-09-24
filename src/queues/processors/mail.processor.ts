@@ -6,11 +6,13 @@ import { MailService } from "@/common/mail/mail.service";
 export interface SendVerificationEmailJobData {
   email: string;
   token: string;
+  otp?: string;
 }
 
 export interface SendPasswordResetEmailJobData {
   email: string;
   token: string;
+  otp?: string;
 }
 
 @Processor("mail")
@@ -22,7 +24,7 @@ export class MailProcessor {
   @Process("send-verification-email")
   async handleSendVerificationEmail(job: Job<SendVerificationEmailJobData>) {
     this.logger.log(`[MailProcessor] Processing verification email for ${job.data.email}`);
-    await this.mailService.sendVerificationEmail(job.data.email, job.data.token);
+    await this.mailService.sendVerificationEmail(job.data.email, job.data.token, job.data.otp);
     this.logger.log(`[MailProcessor] Verification email sent to ${job.data.email}`);
     return { sentAt: new Date().toISOString() };
   }

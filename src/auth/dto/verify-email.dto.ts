@@ -1,5 +1,5 @@
-import { ApiProperty } from "@nestjs/swagger";
-import { IsEmail, IsNotEmpty, IsString } from "class-validator";
+import { IsEmail, IsNotEmpty, IsString, IsOptional } from "class-validator";
+import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 
 export class VerifyEmailRequestDto {
   @ApiProperty({
@@ -12,8 +12,18 @@ export class VerifyEmailRequestDto {
 }
 
 export class ConfirmEmailDto {
-  @ApiProperty({ description: "Email verification token received via email" })
+  @ApiPropertyOptional({ description: "Email verification token received via email (if using link)" })
   @IsString()
-  @IsNotEmpty()
-  token!: string;
+  @IsOptional()
+  token?: string;
+
+  @ApiPropertyOptional({ description: "User email (if using OTP)" })
+  @IsEmail()
+  @IsOptional()
+  email?: string;
+
+  @ApiPropertyOptional({ description: "6-digit OTP code received via email" })
+  @IsString()
+  @IsOptional()
+  otp?: string;
 }
