@@ -20,7 +20,7 @@ transporter.verify(function (error, success) {
     // Optionally send a test email
     transporter.sendMail({
       from: process.env.SMTP_FROM,
-      to: process.env.SMTP_FROM,
+      to: process.env.SMTP_TO,
       subject: "Test Email from AllinOne Backend",
       text: "If you get this, SMTP is working!"
     }, (err, info) => {

@@ -103,7 +103,8 @@ async function bootstrap() {
   logger.log(`🚀 Allinone Backend started on http://localhost:${port}`);
   logger.log(`📚 API Documentation: http://localhost:${port}/api`);
   logger.log(`Environment: ${environment}`);
-  logger.log(`Database: ${configService.get("DATABASE_URL")?.split("@")[1]}`);
+  const dbUrl = configService.get<string>("DATABASE_URL", "");
+  logger.log(`Database: ${dbUrl?.split("@").pop() || "not configured"}`);
 }
 
 bootstrap().catch((error) => {

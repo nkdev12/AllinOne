@@ -84,7 +84,8 @@ export class ConfigurationService {
   }
 
   get smtpPort(): number {
-    return this.configService.get<number>("SMTP_PORT", 1025);
+    // Env vars are always strings — coerce so nodemailer gets a real number.
+    return Number(this.configService.get("SMTP_PORT", 1025));
   }
 
   get smtpUser(): string | undefined {
@@ -100,11 +101,23 @@ export class ConfigurationService {
   }
 
   get smtpTls(): boolean {
-    return this.configService.get<boolean>("SMTP_TLS", false);
+    // Env vars are always strings — the string "false" is truthy, so compare.
+    const raw = this.configService.get("SMTP_TLS", false);
+    if (typeof raw === "boolean") return raw;
+    return String(raw).toLowerCase() === "true";
   }
 
   get emailVerifyEnabled(): boolean {
-    return true;
+    const raw = this.configService.get("EMAIL_VERIFY_ENABLED", false);
+    if (typeof raw === "boolean") return raw;
+    return String(raw).toLowerCase() === "true";
+  }
+
+  get emailVerifyTokenExpiry(): string {
+    return this.configService.get<string>(
+      "EMAIL_VERIFY_TOKEN_EXPIRY",
+      "24h",
+    );
   }
 
   // ========================================================================

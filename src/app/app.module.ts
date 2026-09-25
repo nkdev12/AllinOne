@@ -54,6 +54,16 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
         // Database
         DATABASE_URL: Joi.string().required(),
 
+        // Email (SMTP — required so OTP / password-reset mails can be sent)
+        SMTP_HOST: Joi.string().required(),
+        SMTP_PORT: Joi.number().default(587),
+        SMTP_USER: Joi.string().allow("").optional(),
+        SMTP_PASSWORD: Joi.string().allow("").optional(),
+        SMTP_FROM: Joi.string().required(),
+        SMTP_TLS: Joi.boolean().default(true),
+        EMAIL_VERIFY_ENABLED: Joi.boolean().default(false),
+        EMAIL_VERIFY_TOKEN_EXPIRY: Joi.string().default("24h"),
+
         // Redis
 
         // JWT

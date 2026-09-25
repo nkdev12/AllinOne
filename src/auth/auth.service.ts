@@ -17,6 +17,7 @@ import { PrismaService } from "@/common/prisma/prisma.service";
 import { UsersService } from "@/users/users.service";
 import { ConfigurationService } from "@/config/configuration.service";
 import { AuditLogService } from "@/common/audit/audit-log.service";
+import { MailService } from "@/common/mail/mail.service";
 import { RegisterDto } from "./dto/register.dto";
 import { LoginDto } from "./dto/login.dto";
 import { RefreshTokenDto } from "./dto/refresh-token.dto";
@@ -45,6 +46,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigurationService,
     @Optional() private readonly auditLogService?: AuditLogService,
+    @Optional() private readonly mailService?: MailService,
   ) {}
 
   async register(dto: RegisterDto): Promise<AuthResponseDto> {
@@ -778,14 +780,32 @@ export class AuthService {
         ],
       });
 
-      this.logger.log(
-        `OTP CODE FOR ${user.email}: ${otp} (expires in 60 minutes)`,
-      );
+      // Dev-only console fallback so OTP is visible even if SMTP is down.
+      if (!this.configService.isProduction) {
+        this.logger.debug(
+          `OTP CODE FOR ${user.email}: ${otp} (expires in 60 minutes)`,
+        );
+      }
+
+      // Send the OTP to the candidate's email address.
+      try {
+        const sent = await this.mailService?.sendOtpEmail(user.email, otp);
+        if (!sent) {
+          this.logger.warn(
+            `OTP email could not be delivered to ${user.email}. Check SMTP configuration.`,
+          );
+        }
+      } catch (err) {
+        this.logger.error(
+          `Failed to send OTP email to ${user.email}`,
+          err,
+        );
+      }
     }
 
     return {
       message:
-        "If the account exists, an OTP has been generated. Check the API terminal.",
+        "If the account exists, a verification code has been sent to the email address.",
     };
   }
 
@@ -859,14 +879,35 @@ export class AuthService {
         { secret: this.configService.jwtAccessSecret, expiresIn: "1h" },
       );
 
-      this.logger.log(
-        `PASSWORD RESET LINK FOR ${user.email}: ${this.configService.appUrl}/auth/reset-password?token=${token}`,
-      );
+      const resetUrl = `${this.configService.appUrl}/auth/reset-password?token=${token}`;
+
+      // Dev-only console fallback so the link is visible even if SMTP is down.
+      if (!this.configService.isProduction) {
+        this.logger.debug(`PASSWORD RESET LINK FOR ${user.email}: ${resetUrl}`);
+      }
+
+      // Send the reset link to the candidate's email address.
+      try {
+        const sent = await this.mailService?.sendPasswordResetEmail(
+          user.email,
+          token,
+        );
+        if (!sent) {
+          this.logger.warn(
+            `Password reset email could not be delivered to ${user.email}. Check SMTP configuration.`,
+          );
+        }
+      } catch (err) {
+        this.logger.error(
+          `Failed to send password reset email to ${user.email}`,
+          err,
+        );
+      }
     }
 
     return {
       message:
-        "If the account exists, password reset instructions were generated. Check the API terminal.",
+        "If the account exists, password reset instructions have been sent to the email address.",
     };
   }
 

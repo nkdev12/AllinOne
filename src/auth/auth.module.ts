@@ -8,6 +8,7 @@ import { UsersModule } from "@/users/users.module";
 import { ConfigurationModule } from "@/config/configuration.module";
 import { ConfigurationService } from "@/config/configuration.service";
 import { AuditLogModule } from "@/common/audit/audit-log.module";
+import { MailModule } from "@/common/mail/mail.module";
 import { JwtStrategy } from "./strategies/jwt.strategy";
 import { JwtAuthGuard } from "./guards/jwt-auth.guard";
 
@@ -17,6 +18,7 @@ import { JwtAuthGuard } from "./guards/jwt-auth.guard";
     UsersModule,
     ConfigurationModule,
     AuditLogModule,
+    MailModule,
     PassportModule.register({ defaultStrategy: "jwt" }),
     JwtModule.registerAsync({
       imports: [ConfigurationModule],
