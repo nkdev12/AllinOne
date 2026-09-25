@@ -1,4 +1,3 @@
-import Redis from "ioredis";
 import {
   Injectable,
   UnauthorizedException,
@@ -14,8 +13,6 @@ import * as qrcode from "qrcode";
 import * as crypto from "crypto";
 import * as jwt from "jsonwebtoken";
 import { OAuth2Client } from "google-auth-library";
-import { InjectQueue } from "@nestjs/bull";
-import { Queue } from "bull";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { UsersService } from "@/users/users.service";
 import { ConfigurationService } from "@/config/configuration.service";
@@ -38,7 +35,6 @@ import { AuthType, Platform, AuditAction } from "@prisma/client";
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
   private readonly googleClient = new OAuth2Client();
-  private redisClient?: Redis;
   private appleJwksCache: { keys: any[]; fetchedAt: number } | null = null;
   private microsoftJwksCache: { keys: any[]; fetchedAt: number } | null = null;
   private readonly JWKS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
@@ -48,21 +44,8 @@ export class AuthService {
     private readonly usersService: UsersService,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigurationService,
-    @InjectQueue("mail") private readonly mailQueue: Queue,
     @Optional() private readonly auditLogService?: AuditLogService,
   ) {}
-
-  /** Create the OTP Redis connection only when an OTP operation needs it. */
-  private getRedisClient(): Redis {
-    if (!this.redisClient) {
-      this.redisClient = new Redis(this.configService.redisUrl);
-      this.redisClient.on("error", (error) => {
-        this.logger.error(`OTP Redis connection error: ${error.message}`);
-      });
-    }
-
-    return this.redisClient;
-  }
 
   async register(dto: RegisterDto): Promise<AuthResponseDto> {
     const existingUser = await this.usersService.findByEmail(dto.email);
@@ -122,14 +105,12 @@ export class AuthService {
       tokens.refreshToken,
     );
 
-    if (this.configService.emailVerifyEnabled) {
-      this.requestEmailVerification(result.user.email).catch((err) => {
-        this.logger.error(
-          `Failed to send initial verification email to ${result.user.email}`,
-          err,
-        );
-      });
-    }
+    this.requestEmailVerification(result.user.email).catch((err) => {
+      this.logger.error(
+        `Failed to generate initial verification OTP for ${result.user.email}`,
+        err,
+      );
+    });
 
     await this.auditLogService?.recordAuditLog({
       userId: result.user.id,
@@ -779,29 +760,32 @@ export class AuthService {
   async requestEmailVerification(email: string): Promise<{ message: string }> {
     const user = await this.usersService.findByEmail(email);
     if (user && !user.emailVerifiedAt) {
-      const token = this.jwtService.sign(
-        { sub: user.id, email: user.email, purpose: "EMAIL_VERIFICATION" },
-        { secret: this.configService.jwtAccessSecret, expiresIn: "24h" },
-      );
-
       const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const codeHash = crypto.createHash("sha256").update(otp).digest("hex");
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
 
-      // LOG OTP TO TERMINAL FOR LOCAL TESTING
-      console.log("\n=======================================================");
-      console.log(`🔔 OTP CODE FOR ${user.email}: ${otp}`);
-      console.log("=======================================================\n");
-      await this.getRedisClient().set(`email_otp:${user.email}`, otp, "EX", 3600); // 1 hr expiration
-
-      await this.mailQueue.add("send-verification-email", {
-        email: user.email,
-        token,
-        otp,
+      await this.prisma.$runCommandRaw({
+        update: "email_verification_otps",
+        updates: [
+          {
+            q: { userId: user.id },
+            u: {
+              $set: { codeHash, expiresAt },
+              $setOnInsert: { userId: user.id, createdAt: new Date() },
+            },
+            upsert: true,
+          },
+        ],
       });
+
+      this.logger.log(
+        `OTP CODE FOR ${user.email}: ${otp} (expires in 60 minutes)`,
+      );
     }
 
     return {
       message:
-        "If the account exists, a verification link and OTP have been sent.",
+        "If the account exists, an OTP has been generated. Check the API terminal.",
     };
   }
 
@@ -814,16 +798,24 @@ export class AuthService {
       let userId: string;
 
       if (email && otp) {
-        // OTP verification
-        const redisClient = this.getRedisClient();
-        const storedOtp = await redisClient.get(`email_otp:${email}`);
-        if (!storedOtp || storedOtp !== otp) {
-          throw new BadRequestException("Invalid or expired OTP");
-        }
+        // OTP verification from MongoDB
         const user = await this.usersService.findByEmail(email);
         if (!user) throw new BadRequestException("User not found");
+        const codeHash = crypto.createHash("sha256").update(otp).digest("hex");
+        const result = (await this.prisma.$runCommandRaw({
+          findAndModify: "email_verification_otps",
+          query: {
+            userId: user.id,
+            codeHash,
+            expiresAt: { $gt: new Date() },
+          },
+          remove: true,
+        })) as { value?: { _id: any } | null };
+        const storedOtp = result.value;
+        if (!storedOtp) {
+          throw new BadRequestException("Invalid or expired OTP");
+        }
         userId = user.id;
-        await redisClient.del(`email_otp:${email}`);
       } else if (token) {
         // Token verification
         const payload = this.jwtService.verify(token, {
@@ -867,23 +859,14 @@ export class AuthService {
         { secret: this.configService.jwtAccessSecret, expiresIn: "1h" },
       );
 
-      await this.mailQueue.add("send-password-reset-email", {
-        email: user.email,
-        token,
-      });
-
-      // LOG RESET LINK TO TERMINAL FOR LOCAL TESTING
-      console.log("\n=======================================================");
-      console.log(`🔔 PASSWORD RESET LINK FOR ${user.email}:`);
-      console.log(
-        `${this.configService.appUrl}/auth/reset-password?token=${token}`,
+      this.logger.log(
+        `PASSWORD RESET LINK FOR ${user.email}: ${this.configService.appUrl}/auth/reset-password?token=${token}`,
       );
-      console.log("=======================================================\n");
     }
 
     return {
       message:
-        "If the account exists, password reset instructions have been sent.",
+        "If the account exists, password reset instructions were generated. Check the API terminal.",
     };
   }
 

@@ -22,14 +22,12 @@ import { AdminModule } from "@/admin/admin.module";
 import { CollaborationModule } from "@/collaboration/collaboration.module";
 import { AiModule } from "@/ai/ai.module";
 import { PasskeysModule } from "@/auth/passkeys/passkeys.module";
-import { QueuesModule } from "@/queues/queues.module";
 import { ErrorHandlingModule } from "@/common/error-handling/error-handling.module";
 import { AuditLogModule } from "@/common/audit/audit-log.module";
 import { MetricsModule } from "@/common/metrics/metrics.module";
 import { MetricsInterceptor } from "@/common/metrics/metrics.interceptor";
 import { CustomThrottlerGuard } from "@/common/guards/custom-throttler.guard";
 import { IdempotencyInterceptor } from "@/common/interceptors/idempotency.interceptor";
-import { RedisThrottlerStorage } from "@/common/throttler/redis-throttler.storage";
 import { TracingModule } from "@/common/tracing/tracing.module";
 import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
 
@@ -57,7 +55,6 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
         DATABASE_URL: Joi.string().required(),
 
         // Redis
-        REDIS_URL: Joi.string().required(),
 
         // JWT
         JWT_ACCESS_SECRET: Joi.string().required(),
@@ -73,14 +70,6 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
         OBJECT_STORAGE_SECRET_KEY: Joi.string().required(),
         OBJECT_STORAGE_USE_SSL: Joi.boolean().default(false),
 
-        // SMTP
-        SMTP_HOST: Joi.string().required(),
-        SMTP_PORT: Joi.number().required(),
-        SMTP_USER: Joi.string().optional(),
-        SMTP_PASSWORD: Joi.string().optional(),
-        SMTP_FROM: Joi.string().required(),
-        SMTP_TLS: Joi.boolean().default(true),
-        EMAIL_VERIFY_ENABLED: Joi.boolean().default(true),
 
         // Encryption
         ENCRYPTION_KEY: Joi.string().min(32).required(),
@@ -119,7 +108,6 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
     PrismaModule,
     TracingModule,
     ErrorHandlingModule,
-    QueuesModule,
     AuditLogModule,
     MetricsModule,
 
@@ -136,7 +124,6 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
             limit: config.rateLimitMaxRequests,
           },
         ],
-        storage: new RedisThrottlerStorage(config),
       }),
     }),
 

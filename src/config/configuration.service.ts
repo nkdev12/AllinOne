@@ -15,16 +15,12 @@ export class ConfigurationService {
   private validateConfiguration(): void {
     const requiredVars = [
       "DATABASE_URL",
-      "REDIS_URL",
       "JWT_ACCESS_SECRET",
       "JWT_REFRESH_SECRET",
       "OBJECT_STORAGE_ENDPOINT",
       "OBJECT_STORAGE_ACCESS_KEY",
       "OBJECT_STORAGE_SECRET_KEY",
       "OBJECT_STORAGE_BUCKET",
-      "SMTP_HOST",
-      "SMTP_PORT",
-      "SMTP_FROM",
       "ENCRYPTION_KEY",
     ];
 
@@ -74,11 +70,41 @@ export class ConfigurationService {
   }
 
   // ========================================================================
-  // Redis Configuration
+  // Legacy optional infrastructure configuration
+  // These accessors remain for inactive mail/Redis helper modules. The API
+  // itself no longer initializes either service.
   // ========================================================================
 
   get redisUrl(): string {
-    return this.configService.getOrThrow<string>("REDIS_URL");
+    return this.configService.get<string>("REDIS_URL", "redis://localhost:6379");
+  }
+
+  get smtpHost(): string {
+    return this.configService.get<string>("SMTP_HOST", "localhost");
+  }
+
+  get smtpPort(): number {
+    return this.configService.get<number>("SMTP_PORT", 1025);
+  }
+
+  get smtpUser(): string | undefined {
+    return this.configService.get<string>("SMTP_USER");
+  }
+
+  get smtpPassword(): string | undefined {
+    return this.configService.get<string>("SMTP_PASSWORD");
+  }
+
+  get smtpFrom(): string {
+    return this.configService.get<string>("SMTP_FROM", "no-reply@localhost");
+  }
+
+  get smtpTls(): boolean {
+    return this.configService.get<boolean>("SMTP_TLS", false);
+  }
+
+  get emailVerifyEnabled(): boolean {
+    return true;
   }
 
   // ========================================================================
@@ -127,38 +153,6 @@ export class ConfigurationService {
 
   get objectStorageUseSsl(): boolean {
     return this.configService.get<boolean>("OBJECT_STORAGE_USE_SSL", false);
-  }
-
-  // ========================================================================
-  // SMTP Configuration
-  // ========================================================================
-
-  get smtpHost(): string {
-    return this.configService.getOrThrow<string>("SMTP_HOST");
-  }
-
-  get smtpPort(): number {
-    return this.configService.getOrThrow<number>("SMTP_PORT");
-  }
-
-  get smtpUser(): string | undefined {
-    return this.configService.get<string>("SMTP_USER");
-  }
-
-  get smtpPassword(): string | undefined {
-    return this.configService.get<string>("SMTP_PASSWORD");
-  }
-
-  get smtpFrom(): string {
-    return this.configService.getOrThrow<string>("SMTP_FROM");
-  }
-
-  get smtpTls(): boolean {
-    return this.configService.get<boolean>("SMTP_TLS", true);
-  }
-
-  get emailVerifyEnabled(): boolean {
-    return this.configService.get<boolean>("EMAIL_VERIFY_ENABLED", true);
   }
 
   // ========================================================================

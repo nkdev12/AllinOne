@@ -7,22 +7,16 @@ import { PrismaModule } from "@/common/prisma/prisma.module";
 import { UsersModule } from "@/users/users.module";
 import { ConfigurationModule } from "@/config/configuration.module";
 import { ConfigurationService } from "@/config/configuration.service";
-import { MailModule } from "@/common/mail/mail.module";
 import { AuditLogModule } from "@/common/audit/audit-log.module";
 import { JwtStrategy } from "./strategies/jwt.strategy";
 import { JwtAuthGuard } from "./guards/jwt-auth.guard";
-import { BullModule } from "@nestjs/bull";
 
 @Module({
   imports: [
     PrismaModule,
     UsersModule,
     ConfigurationModule,
-    MailModule,
     AuditLogModule,
-    BullModule.registerQueue({
-      name: "mail",
-    }),
     PassportModule.register({ defaultStrategy: "jwt" }),
     JwtModule.registerAsync({
       imports: [ConfigurationModule],

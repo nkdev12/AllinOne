@@ -46,9 +46,22 @@ model User {
   events            Event[]
   vaultSetting      VaultSetting?
   vaultItems        VaultItem[]
+  emailVerificationOtp EmailVerificationOtp?
 
   @@index([status])
   @@index([createdAt])
+}
+
+model EmailVerificationOtp {
+  id        String   @id @default(uuid()) @map("_id")
+  userId    String   @unique
+  codeHash  String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
 }
 
 enum UserStatus {

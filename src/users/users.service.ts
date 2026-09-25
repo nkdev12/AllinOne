@@ -2,11 +2,8 @@ import {
   Injectable,
   ConflictException,
   NotFoundException,
-  Optional,
   Logger,
 } from "@nestjs/common";
-import { InjectQueue } from "@nestjs/bull";
-import { Queue } from "bull";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { User, UserStatus } from "@prisma/client";
 import { UpdateUserProfileDto } from "./dto/update-user-profile.dto";
@@ -15,10 +12,7 @@ import { UpdateUserProfileDto } from "./dto/update-user-profile.dto";
 export class UsersService {
   private readonly logger = new Logger(UsersService.name);
 
-  constructor(
-    private readonly prisma: PrismaService,
-    @Optional() @InjectQueue("export") private readonly exportQueue?: Queue,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   async getUserById(userId: string): Promise<User | null> {
     return this.prisma.user.findFirst({
@@ -118,20 +112,12 @@ export class UsersService {
       throw new NotFoundException("User profile not found");
     }
 
-    if (this.exportQueue) {
-      await this.exportQueue.add("process-export", {
-        userId,
-        email: user.email,
-        requestedAt: new Date().toISOString(),
-      });
-    } else {
-      this.logger.log(`Data export requested for user ${userId}`);
-    }
+    this.logger.log(`Data export requested for user ${userId}`);
 
     return {
       status: "accepted",
       message:
-        "Data export request queued. An email with your download link will be dispatched shortly.",
+        "Data export request recorded. Background export delivery is disabled.",
     };
   }
 

@@ -4,7 +4,6 @@ import { PrismaService } from "@/common/prisma/prisma.service";
 import { UsersService } from "@/users/users.service";
 import { JwtService } from "@nestjs/jwt";
 import { ConfigurationService } from "@/config/configuration.service";
-import { getQueueToken } from "@nestjs/bull";
 import { ConflictException, UnauthorizedException } from "@nestjs/common";
 import { AuditAction } from "@prisma/client";
 import { AuditLogService } from "@/common/audit/audit-log.service";
@@ -66,6 +65,7 @@ describe("AuthService", () => {
   beforeEach(async () => {
     prismaService = {
       $transaction: jest.fn((cb) => cb(prismaService)),
+      $runCommandRaw: jest.fn(),
       user: {
         create: jest.fn().mockResolvedValue(mockUser),
         update: jest.fn().mockResolvedValue(mockUser),
@@ -91,6 +91,11 @@ describe("AuthService", () => {
         findUnique: jest.fn().mockResolvedValue(null),
         upsert: jest.fn().mockResolvedValue(mockMfaSetting),
         update: jest.fn().mockResolvedValue(mockMfaSetting),
+      },
+      emailVerificationOtp: {
+        upsert: jest.fn(),
+        findFirst: jest.fn(),
+        delete: jest.fn(),
       },
     };
 
@@ -118,10 +123,6 @@ describe("AuthService", () => {
       googleClientId: "google-client-id",
     };
 
-    const mailQueue = {
-      add: jest.fn().mockResolvedValue(true),
-    };
-
     auditLogService = {
       recordAuditLog: jest.fn().mockResolvedValue({ id: "audit-1" }),
     };
@@ -137,7 +138,6 @@ describe("AuthService", () => {
         { provide: UsersService, useValue: usersService },
         { provide: JwtService, useValue: jwtService },
         { provide: ConfigurationService, useValue: configService },
-        { provide: getQueueToken("mail"), useValue: mailQueue },
         { provide: AuditLogService, useValue: auditLogService },
       ],
     }).compile();
@@ -174,6 +174,53 @@ describe("AuthService", () => {
       expect(result.user?.email).toBe("test@example.com");
       expect(result.tokens?.accessToken).toBe("mock-jwt-token");
       expect(result.sessionId).toBe("session-uuid-789");
+    });
+  });
+
+  describe("email verification OTP", () => {
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it("stores only a hashed OTP in MongoDB", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser);
+      jest.spyOn(Math, "random").mockReturnValue(0);
+
+      await service.requestEmailVerification(mockUser.email);
+
+      expect(prismaService.$runCommandRaw).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: "email_verification_otps",
+          updates: [
+            expect.objectContaining({
+              q: { userId: mockUser.id },
+              u: expect.objectContaining({
+                $set: expect.objectContaining({
+                  codeHash: expect.not.stringMatching("100000"),
+                }),
+              }),
+            }),
+          ],
+        }),
+      );
+    });
+
+    it("accepts a valid MongoDB OTP once and removes it atomically", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser);
+      prismaService.$runCommandRaw.mockResolvedValueOnce({
+        value: { _id: "otp-id" },
+      });
+
+      await expect(
+        service.confirmEmailVerification(undefined, mockUser.email, "100000"),
+      ).resolves.toEqual({ message: "Email address successfully verified" });
+
+      expect(prismaService.$runCommandRaw).toHaveBeenCalledWith(
+        expect.objectContaining({
+          findAndModify: "email_verification_otps",
+          remove: true,
+        }),
+      );
     });
   });
 
