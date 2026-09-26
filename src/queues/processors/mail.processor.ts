@@ -11,8 +11,7 @@ export interface SendVerificationEmailJobData {
 
 export interface SendPasswordResetEmailJobData {
   email: string;
-  token: string;
-  otp?: string;
+  otp: string;
 }
 
 @Processor("mail")
@@ -42,9 +41,9 @@ export class MailProcessor {
     this.logger.log(
       `[MailProcessor] Processing password reset email for ${job.data.email}`,
     );
-    await this.mailService.sendPasswordResetEmail(
+    await this.mailService.sendPasswordResetOtpEmail(
       job.data.email,
-      job.data.token,
+      job.data.otp,
     );
     this.logger.log(
       `[MailProcessor] Password reset email sent to ${job.data.email}`,

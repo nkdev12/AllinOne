@@ -1,5 +1,12 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { IsInt, IsNotEmpty, IsOptional, IsString, Min } from "class-validator";
+import {
+  IsInt,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Min,
+  Length,
+} from "class-validator";
 
 export class SetupVaultDto {
   @ApiProperty({
@@ -32,4 +39,37 @@ export class SetupVaultDto {
   @IsInt()
   @Min(1024)
   kdfMemory?: number;
+
+  // Recovery blob: the master key wrapped so an OTP-verified reset can
+  // re-encrypt the vault instead of discarding it.
+  @ApiPropertyOptional({ description: "Key that wraps the master key" })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  recoveryKey?: string;
+
+  @ApiPropertyOptional({ description: "AES-GCM ciphertext of the master key" })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  wrappedMasterKey?: string;
+
+  @ApiPropertyOptional({ description: "IV used for the wrapped master key" })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  wrappedMasterIv?: string;
+
+  @ApiPropertyOptional({ description: "GCM tag for the wrapped master key" })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  wrappedMasterTag?: string;
+}
+
+export class VerifyVaultRecoveryDto {
+  @ApiProperty({ description: "6-digit code emailed for vault recovery" })
+  @IsString()
+  @Length(6, 6)
+  otp!: string;
 }

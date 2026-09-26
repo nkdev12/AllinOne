@@ -1,9 +1,10 @@
 import { NestFactory } from "@nestjs/core";
 import { SwaggerModule, DocumentBuilder } from "@nestjs/swagger";
-import { ValidationPipe, Logger } from "@nestjs/common";
+import { Logger } from "@nestjs/common";
 import helmet from "helmet";
 import { AppModule } from "./app/app.module";
 import { ConfigService } from "@nestjs/config";
+import { createValidationPipe } from "./common/errors/validation.pipe";
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -48,16 +49,7 @@ async function bootstrap() {
   // ========================================================================
   // Global middleware and pipes
   // ========================================================================
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      forbidNonWhitelisted: true,
-      transform: true,
-      transformOptions: {
-        enableImplicitConversion: true,
-      },
-    }),
-  );
+  app.useGlobalPipes(createValidationPipe());
 
   // ========================================================================
   // OpenAPI/Swagger Documentation

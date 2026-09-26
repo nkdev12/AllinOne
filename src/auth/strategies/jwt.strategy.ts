@@ -1,8 +1,10 @@
-import { Injectable, UnauthorizedException } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { PassportStrategy } from "@nestjs/passport";
 import { ExtractJwt, Strategy } from "passport-jwt";
 import { ConfigurationService } from "@/config/configuration.service";
 import { UsersService } from "@/users/users.service";
+import { ErrorCode } from "@/common/errors/error-code";
+import { unauthorized } from "@/common/errors/http-errors";
 
 export interface JwtPayload {
   sub: string;
@@ -42,7 +44,10 @@ export class JwtStrategy extends PassportStrategy(Strategy, "jwt") {
   async validate(payload: JwtPayload) {
     const user = await this.usersService.getUserById(payload.sub);
     if (!user || user.status !== "ACTIVE" || user.deletedAt) {
-      throw new UnauthorizedException("User account is inactive or invalid");
+      throw unauthorized(
+        ErrorCode.ACCOUNT_DISABLED,
+        "User account is inactive or invalid",
+      );
     }
 
     return {

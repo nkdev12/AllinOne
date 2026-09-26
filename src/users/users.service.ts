@@ -14,22 +14,25 @@ export class UsersService {
 
   constructor(private readonly prisma: PrismaService) {}
 
+  // Prisma on MongoDB does not match documents whose field is absent, so a
+  // `deletedAt: null` filter would hide every user created before the field
+  // existed. Filter in code instead.
+  private notDeleted(user: User | null): User | null {
+    return user && !user.deletedAt ? user : null;
+  }
+
   async getUserById(userId: string): Promise<User | null> {
-    return this.prisma.user.findFirst({
-      where: {
-        id: userId,
-        deletedAt: null,
-      },
-    });
+    return this.notDeleted(
+      await this.prisma.user.findFirst({ where: { id: userId } }),
+    );
   }
 
   async findByEmail(email: string): Promise<User | null> {
-    return this.prisma.user.findFirst({
-      where: {
-        email: email.toLowerCase(),
-        deletedAt: null,
-      },
-    });
+    return this.notDeleted(
+      await this.prisma.user.findFirst({
+        where: { email: email.toLowerCase() },
+      }),
+    );
   }
 
   async createUser(data: {

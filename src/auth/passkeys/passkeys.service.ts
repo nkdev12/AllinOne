@@ -1,16 +1,16 @@
-import {
-  Injectable,
-  BadRequestException,
-  UnauthorizedException,
-  NotFoundException,
-  Logger,
-} from "@nestjs/common";
+import { Injectable, Logger } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { JwtService } from "@nestjs/jwt";
 import { ConfigurationService } from "@/config/configuration.service";
 import { AuditLogService } from "@/common/audit/audit-log.service";
 import { AuthType, AuditAction, UserStatus, Platform } from "@prisma/client";
 import * as crypto from "crypto";
+import { ErrorCode } from "@/common/errors/error-code";
+import {
+  badRequest,
+  notFound,
+  unauthorized,
+} from "@/common/errors/http-errors";
 import {
   LoginOptionsResponse,
   RegistrationOptionsResponse,
@@ -67,7 +67,7 @@ export class PasskeysService {
     });
 
     if (!user) {
-      throw new NotFoundException("User not found.");
+      throw notFound(ErrorCode.NOT_FOUND, "User not found.");
     }
 
     const challenge = crypto.randomBytes(32).toString("base64url");
@@ -104,7 +104,8 @@ export class PasskeysService {
   ): Promise<{ success: boolean; credentialId: string }> {
     const stored = this.registrationChallenges.get(userId);
     if (!stored || stored.expiresAt < Date.now()) {
-      throw new BadRequestException(
+      throw badRequest(
+        ErrorCode.PASSKEY_CHALLENGE_INVALID,
         "Registration challenge expired or invalid.",
       );
     }
@@ -118,17 +119,24 @@ export class PasskeysService {
       ).toString("utf-8");
       clientData = JSON.parse(decodedClientData);
     } catch (_) {
-      throw new BadRequestException("Invalid clientDataJSON format.");
+      throw badRequest(
+        ErrorCode.PASSKEY_CHALLENGE_INVALID,
+        "Invalid clientDataJSON format.",
+      );
     }
 
     if (clientData.type !== "webauthn.create") {
-      throw new BadRequestException(
+      throw badRequest(
+        ErrorCode.PASSKEY_CHALLENGE_INVALID,
         `Invalid clientData type: expected 'webauthn.create', got '${clientData.type}'.`,
       );
     }
 
     if (clientData.challenge !== stored.challenge) {
-      throw new BadRequestException("Registration challenge mismatch.");
+      throw badRequest(
+        ErrorCode.PASSKEY_CHALLENGE_INVALID,
+        "Registration challenge mismatch.",
+      );
     }
 
     // Check for duplicate credential
@@ -140,7 +148,10 @@ export class PasskeysService {
     });
 
     if (existing) {
-      throw new BadRequestException("This passkey is already registered.");
+      throw badRequest(
+        ErrorCode.ALREADY_EXISTS,
+        "This passkey is already registered.",
+      );
     }
 
     await this.prisma.authentication.create({
@@ -224,6 +235,7 @@ export class PasskeysService {
     user: any;
     tokens: { accessToken: string; refreshToken: string };
     sessionId: string;
+    deviceId: string;
   }> {
     // Validate clientDataJSON
     let clientData: any;
@@ -234,11 +246,15 @@ export class PasskeysService {
       ).toString("utf-8");
       clientData = JSON.parse(decodedClientData);
     } catch (_) {
-      throw new BadRequestException("Invalid clientDataJSON format.");
+      throw badRequest(
+        ErrorCode.PASSKEY_CHALLENGE_INVALID,
+        "Invalid clientDataJSON format.",
+      );
     }
 
     if (clientData.type !== "webauthn.get") {
-      throw new BadRequestException(
+      throw badRequest(
+        ErrorCode.PASSKEY_CHALLENGE_INVALID,
         `Invalid clientData type: expected 'webauthn.get', got '${clientData.type}'.`,
       );
     }
@@ -246,7 +262,10 @@ export class PasskeysService {
     // Verify against pending challenge
     const stored = this.loginChallenges.get(clientData.challenge);
     if (!stored || stored.expiresAt < Date.now()) {
-      throw new BadRequestException("Login challenge expired or invalid.");
+      throw badRequest(
+        ErrorCode.PASSKEY_CHALLENGE_INVALID,
+        "Login challenge expired or invalid.",
+      );
     }
 
     // Find authentication credential
@@ -261,18 +280,24 @@ export class PasskeysService {
     });
 
     if (!auth || !auth.user) {
-      throw new UnauthorizedException("Invalid passkey credential.");
+      throw unauthorized(
+        ErrorCode.PASSKEY_NOT_REGISTERED,
+        "Invalid passkey credential.",
+      );
     }
 
     const user = auth.user;
 
     // Check account status and lockout
     if (user.status !== UserStatus.ACTIVE) {
-      throw new UnauthorizedException("Account is not active.");
+      throw unauthorized(ErrorCode.ACCOUNT_DISABLED, "Account is not active.");
     }
 
     if (user.lockedUntil && user.lockedUntil > new Date()) {
-      throw new UnauthorizedException("Account is temporarily locked.");
+      throw unauthorized(
+        ErrorCode.RATE_LIMITED,
+        "Account is temporarily locked.",
+      );
     }
 
     // Update credential and last login
@@ -369,6 +394,7 @@ export class PasskeysService {
       },
       tokens: { accessToken, refreshToken },
       sessionId: session.id,
+      deviceId: device.id,
     };
   }
 }

@@ -1,13 +1,18 @@
 import {
   Injectable,
   UnauthorizedException,
-  ConflictException,
   BadRequestException,
   Logger,
   Optional,
 } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
 import * as argon2 from "argon2";
+import { ErrorCode } from "@/common/errors/error-code";
+import {
+  badRequest,
+  conflict,
+  unauthorized,
+} from "@/common/errors/http-errors";
 import { generateSecret, generateURI, verify } from "otplib";
 import * as qrcode from "qrcode";
 import * as crypto from "crypto";
@@ -18,6 +23,7 @@ import { UsersService } from "@/users/users.service";
 import { ConfigurationService } from "@/config/configuration.service";
 import { AuditLogService } from "@/common/audit/audit-log.service";
 import { MailService } from "@/common/mail/mail.service";
+import { OtpService } from "@/common/otp/otp.service";
 import { RegisterDto } from "./dto/register.dto";
 import { LoginDto } from "./dto/login.dto";
 import { RefreshTokenDto } from "./dto/refresh-token.dto";
@@ -30,7 +36,7 @@ import {
   MfaSecretResponseDto,
   MfaEnableResponseDto,
 } from "./dto/mfa.dto";
-import { AuthType, Platform, AuditAction } from "@prisma/client";
+import { AuthType, Platform, AuditAction, OtpPurpose } from "@prisma/client";
 
 @Injectable()
 export class AuthService {
@@ -39,12 +45,14 @@ export class AuthService {
   private appleJwksCache: { keys: any[]; fetchedAt: number } | null = null;
   private microsoftJwksCache: { keys: any[]; fetchedAt: number } | null = null;
   private readonly JWKS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+  private readonly RESET_OTP_TTL_MINUTES = 15;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly usersService: UsersService,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigurationService,
+    private readonly otpService: OtpService,
     @Optional() private readonly auditLogService?: AuditLogService,
     @Optional() private readonly mailService?: MailService,
   ) {}
@@ -52,7 +60,10 @@ export class AuthService {
   async register(dto: RegisterDto): Promise<AuthResponseDto> {
     const existingUser = await this.usersService.findByEmail(dto.email);
     if (existingUser) {
-      throw new ConflictException("User with this email already exists");
+      throw conflict(
+        ErrorCode.EMAIL_ALREADY_REGISTERED,
+        "User with this email already exists",
+      );
     }
 
     const hashedPassword = await argon2.hash(dto.password);
@@ -94,7 +105,10 @@ export class AuthService {
       });
     } catch (error: any) {
       if (error.code === "P2002") {
-        throw new ConflictException("User with this email already exists");
+        throw conflict(
+          ErrorCode.EMAIL_ALREADY_REGISTERED,
+          "User with this email already exists",
+        );
       }
       throw error;
     }
@@ -133,6 +147,7 @@ export class AuthService {
       },
       tokens,
       sessionId: session.id,
+      deviceId: result.device.id,
     };
   }
 
@@ -164,7 +179,10 @@ export class AuthService {
           reason: "Invalid identifier or password hash",
         },
       });
-      throw new UnauthorizedException("Invalid email or password");
+      throw unauthorized(
+        ErrorCode.INVALID_CREDENTIALS,
+        "Invalid email or password",
+      );
     }
 
     const user = authRecord.user;
@@ -186,7 +204,8 @@ export class AuthService {
           lockedUntil: user.lockedUntil,
         },
       });
-      throw new UnauthorizedException(
+      throw unauthorized(
+        ErrorCode.RATE_LIMITED,
         `Account is temporarily locked due to multiple failed login attempts. Please try again in ${remainingMinutes} minute(s).`,
       );
     }
@@ -231,7 +250,8 @@ export class AuthService {
           `[AuthService] Account ${user.id} locked for 15 minutes after ${attempts} failed attempts`,
         );
 
-        throw new UnauthorizedException(
+        throw unauthorized(
+          ErrorCode.RATE_LIMITED,
           "Account has been temporarily locked for 15 minutes due to multiple failed login attempts.",
         );
       }
@@ -248,11 +268,15 @@ export class AuthService {
         },
       });
 
-      throw new UnauthorizedException("Invalid email or password");
+      throw unauthorized(
+        ErrorCode.INVALID_CREDENTIALS,
+        "Invalid email or password",
+      );
     }
 
     if (user.status !== "ACTIVE" || user.deletedAt) {
-      throw new UnauthorizedException(
+      throw unauthorized(
+        ErrorCode.ACCOUNT_DISABLED,
         "Account is disabled or pending verification",
       );
     }
@@ -268,14 +292,30 @@ export class AuthService {
       });
     }
 
-    let device = await this.prisma.device.findFirst({
-      where: {
-        userId: user.id,
-        name: dto.deviceName || "Primary Client Device",
-        platform: dto.platform || Platform.WEB,
-        revokedAt: null,
-      },
-    });
+    // A desktop app keeps the device row it was handed at sign-up and asks for
+    // it by id, so signing out and back in does not pile up devices. An id that
+    // is unknown, revoked or owned by someone else is ignored here; the lookup
+    // below still finds (or creates) a device the caller can use.
+    let device = dto.deviceId
+      ? await this.prisma.device.findFirst({
+          where: {
+            id: dto.deviceId,
+            userId: user.id,
+            revokedAt: null,
+          },
+        })
+      : undefined;
+
+    if (!device) {
+      device = await this.prisma.device.findFirst({
+        where: {
+          userId: user.id,
+          name: dto.deviceName || "Primary Client Device",
+          platform: dto.platform || Platform.WEB,
+          revokedAt: null,
+        },
+      });
+    }
 
     if (!device) {
       device = await this.prisma.device.create({
@@ -345,6 +385,7 @@ export class AuthService {
       },
       tokens,
       sessionId: session.id,
+      deviceId: device.id,
     };
   }
 
@@ -691,15 +732,19 @@ export class AuthService {
       },
       tokens,
       sessionId: session.id,
+      deviceId: device.id,
     };
   }
 
   async refreshTokens(
     dto: RefreshTokenDto,
-  ): Promise<{ tokens: AuthTokenDataDto }> {
+  ): Promise<{ tokens: AuthTokenDataDto; deviceId: string }> {
     try {
       if (!dto.refreshToken) {
-        throw new UnauthorizedException("Invalid or expired refresh token");
+        throw unauthorized(
+          ErrorCode.TOKEN_INVALID,
+          "Invalid or expired refresh token",
+        );
       }
       const payload = this.jwtService.verify(dto.refreshToken, {
         secret: this.configService.jwtRefreshSecret,
@@ -716,7 +761,10 @@ export class AuthService {
         session.refreshExpiresAt < new Date() ||
         session.userId !== payload.sub
       ) {
-        throw new UnauthorizedException("Invalid or expired refresh token");
+        throw unauthorized(
+          ErrorCode.TOKEN_INVALID,
+          "Invalid or expired refresh token",
+        );
       }
 
       const tokens = await this.generateTokens(
@@ -739,10 +787,16 @@ export class AuthService {
         },
       });
 
-      return { tokens };
+      // The session row knows which device it was opened on, so a client that
+      // lost its saved device id gets it back here instead of having to sign in
+      // again before /sync/* will accept it.
+      return { tokens, deviceId: session.deviceId };
     } catch (error) {
       this.logger.error("Failed to refresh tokens", error);
-      throw new UnauthorizedException("Invalid or expired refresh token");
+      throw unauthorized(
+        ErrorCode.TOKEN_INVALID,
+        "Invalid or expired refresh token",
+      );
     }
   }
 
@@ -796,10 +850,7 @@ export class AuthService {
           );
         }
       } catch (err) {
-        this.logger.error(
-          `Failed to send OTP email to ${user.email}`,
-          err,
-        );
+        this.logger.error(`Failed to send OTP email to ${user.email}`, err);
       }
     }
 
@@ -833,7 +884,7 @@ export class AuthService {
         })) as { value?: { _id: any } | null };
         const storedOtp = result.value;
         if (!storedOtp) {
-          throw new BadRequestException("Invalid or expired OTP");
+          throw badRequest(ErrorCode.OTP_INVALID, "Invalid or expired OTP");
         }
         userId = user.id;
       } else if (token) {
@@ -843,11 +894,15 @@ export class AuthService {
         });
 
         if (payload.purpose !== "EMAIL_VERIFICATION") {
-          throw new BadRequestException("Invalid verification token type");
+          throw badRequest(
+            ErrorCode.TOKEN_INVALID,
+            "Invalid verification token type",
+          );
         }
         userId = payload.sub;
       } else {
-        throw new BadRequestException(
+        throw badRequest(
+          ErrorCode.VALIDATION_ERROR,
           "Must provide either a token or email and OTP",
         );
       }
@@ -865,7 +920,8 @@ export class AuthService {
       return { message: "Email address successfully verified" };
     } catch (error) {
       this.logger.error("Failed to confirm email verification", error);
-      throw new BadRequestException(
+      throw badRequest(
+        ErrorCode.TOKEN_INVALID,
         "Invalid or expired email verification token",
       );
     }
@@ -874,32 +930,30 @@ export class AuthService {
   async forgotPassword(email: string): Promise<{ message: string }> {
     const user = await this.usersService.findByEmail(email);
     if (user) {
-      const token = this.jwtService.sign(
-        { sub: user.id, email: user.email, purpose: "PASSWORD_RESET" },
-        { secret: this.configService.jwtAccessSecret, expiresIn: "1h" },
+      const otp = await this.otpService.issue(
+        user.id,
+        OtpPurpose.PASSWORD_RESET,
+        this.RESET_OTP_TTL_MINUTES,
       );
 
-      const resetUrl = `${this.configService.appUrl}/auth/reset-password?token=${token}`;
-
-      // Dev-only console fallback so the link is visible even if SMTP is down.
+      // Dev-only console fallback so the code is visible even if SMTP is down.
       if (!this.configService.isProduction) {
-        this.logger.debug(`PASSWORD RESET LINK FOR ${user.email}: ${resetUrl}`);
+        this.logger.debug(`PASSWORD RESET OTP FOR ${user.email}: ${otp}`);
       }
 
-      // Send the reset link to the candidate's email address.
       try {
-        const sent = await this.mailService?.sendPasswordResetEmail(
+        const sent = await this.mailService?.sendPasswordResetOtpEmail(
           user.email,
-          token,
+          otp,
         );
         if (!sent) {
           this.logger.warn(
-            `Password reset email could not be delivered to ${user.email}. Check SMTP configuration.`,
+            `Password reset OTP could not be delivered to ${user.email}. Check SMTP configuration.`,
           );
         }
       } catch (err) {
         this.logger.error(
-          `Failed to send password reset email to ${user.email}`,
+          `Failed to send password reset OTP email to ${user.email}`,
           err,
         );
       }
@@ -912,43 +966,64 @@ export class AuthService {
   }
 
   async resetPassword(
-    token: string,
+    email: string,
+    otp: string,
     newPassword: string,
   ): Promise<{ message: string }> {
-    try {
-      const payload = this.jwtService.verify(token, {
-        secret: this.configService.jwtAccessSecret,
-      });
-
-      if (payload.purpose !== "PASSWORD_RESET") {
-        throw new BadRequestException("Invalid reset token type");
-      }
-
-      const hashedPassword = await argon2.hash(newPassword);
-
-      await this.prisma.authentication.updateMany({
-        where: { userId: payload.sub, type: "EMAIL_PASSWORD" },
-        data: { passwordHash: hashedPassword },
-      });
-
-      await this.prisma.session.updateMany({
-        where: { userId: payload.sub, revokedAt: null },
-        data: { revokedAt: new Date() },
-      });
-
-      await this.auditLogService?.recordAuditLog({
-        userId: payload.sub,
-        action: AuditAction.PASSWORD_CHANGED,
-      });
-
-      return {
-        message:
-          "Password successfully reset. Please log in with your new password.",
-      };
-    } catch (error) {
-      this.logger.error("Failed to reset password", error);
-      throw new BadRequestException("Invalid or expired password reset token");
+    const user = await this.usersService.findByEmail(email);
+    if (!user) {
+      throw badRequest(
+        ErrorCode.OTP_INVALID,
+        "Invalid or expired verification code",
+      );
     }
+
+    const verified = await this.otpService.consume(
+      user.id,
+      OtpPurpose.PASSWORD_RESET,
+      otp,
+    );
+    if (!verified) {
+      throw badRequest(
+        ErrorCode.OTP_INVALID,
+        "Invalid or expired verification code",
+      );
+    }
+
+    const hashedPassword = await argon2.hash(newPassword);
+
+    const auth = await this.prisma.authentication.updateMany({
+      where: { userId: user.id, type: "EMAIL_PASSWORD" },
+      data: { passwordHash: hashedPassword },
+    });
+    if (auth.count === 0) {
+      // An OAuth-only account can't have a password set through this flow.
+      throw new BadRequestException(
+        "This account does not use a password. Sign in with your provider instead.",
+      );
+    }
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { failedLoginAttempts: 0, lockedUntil: null },
+    });
+
+    // No token-version column, so the only way to make old access tokens
+    // unusable is to revoke the sessions that carry them.
+    await this.prisma.session.updateMany({
+      where: { userId: user.id, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+
+    await this.auditLogService?.recordAuditLog({
+      userId: user.id,
+      action: AuditAction.PASSWORD_CHANGED,
+    });
+
+    return {
+      message:
+        "Password successfully reset. Please log in with your new password.",
+    };
   }
 
   async generateMfaSecret(userId: string): Promise<MfaSecretResponseDto> {
@@ -1187,7 +1262,10 @@ export class AuthService {
       }
     } catch (error) {
       this.logger.error("Failed to verify MFA login token", error);
-      throw new UnauthorizedException("Invalid or expired MFA challenge token");
+      throw unauthorized(
+        ErrorCode.MFA_CHALLENGE_INVALID,
+        "Invalid or expired MFA challenge token",
+      );
     }
 
     const userId = payload.sub;
@@ -1222,7 +1300,8 @@ export class AuthService {
     }
 
     if (!isCodeValid) {
-      throw new UnauthorizedException(
+      throw unauthorized(
+        ErrorCode.MFA_CODE_INVALID,
         "Invalid TOTP verification code or recovery code",
       );
     }
@@ -1254,6 +1333,7 @@ export class AuthService {
       },
       tokens,
       sessionId: session.id,
+      deviceId,
     };
   }
 

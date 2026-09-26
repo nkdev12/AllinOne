@@ -1,9 +1,11 @@
-import { Injectable, NotFoundException, Optional } from "@nestjs/common";
+import { Injectable, Optional } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { PushSyncDto } from "./dto/push-sync.dto";
 import { PullSyncDto } from "./dto/pull-sync.dto";
 import { SyncGateway } from "./sync.gateway";
 import { MetricsService } from "@/common/metrics/metrics.service";
+import { ErrorCode } from "@/common/errors/error-code";
+import { notFound } from "@/common/errors/http-errors";
 
 export interface SyncConflictEntry {
   entityId: string;
@@ -31,8 +33,10 @@ export class SyncService {
       where: { id: dto.deviceId, userId, revokedAt: null },
     });
     if (!device) {
-      throw new NotFoundException(
+      throw notFound(
+        ErrorCode.DEVICE_NOT_REGISTERED,
         `Active device with ID '${dto.deviceId}' not found.`,
+        { deviceId: dto.deviceId },
       );
     }
 
@@ -141,8 +145,10 @@ export class SyncService {
       where: { id: dto.deviceId, userId, revokedAt: null },
     });
     if (!device) {
-      throw new NotFoundException(
+      throw notFound(
+        ErrorCode.DEVICE_NOT_REGISTERED,
         `Active device with ID '${dto.deviceId}' not found.`,
+        { deviceId: dto.deviceId },
       );
     }
 
@@ -206,8 +212,10 @@ export class SyncService {
       where: { id: deviceId, userId, revokedAt: null },
     });
     if (!device) {
-      throw new NotFoundException(
+      throw notFound(
+        ErrorCode.DEVICE_NOT_REGISTERED,
         `Active device with ID '${deviceId}' not found.`,
+        { deviceId },
       );
     }
 

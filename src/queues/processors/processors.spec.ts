@@ -46,7 +46,7 @@ describe("Queue Processors", () => {
 
     mailService = {
       sendVerificationEmail: jest.fn().mockResolvedValue(undefined),
-      sendPasswordResetEmail: jest.fn().mockResolvedValue(undefined),
+      sendPasswordResetOtpEmail: jest.fn().mockResolvedValue(undefined),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -93,15 +93,15 @@ describe("Queue Processors", () => {
         id: 2,
         data: {
           email: "test@example.com",
-          token: "67890",
+          otp: "678901",
         } as SendPasswordResetEmailJobData,
       } as Job<SendPasswordResetEmailJobData>;
 
       const result = await mailProcessor.handleSendPasswordResetEmail(mockJob);
       expect(result).toBeDefined();
-      expect(mailService.sendPasswordResetEmail).toHaveBeenCalledWith(
+      expect(mailService.sendPasswordResetOtpEmail).toHaveBeenCalledWith(
         "test@example.com",
-        "67890",
+        "678901",
       );
     });
   });

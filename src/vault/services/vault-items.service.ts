@@ -1,9 +1,11 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { CreateVaultItemDto } from "../dto/create-vault-item.dto";
 import { UpdateVaultItemDto } from "../dto/update-vault-item.dto";
 import { QueryVaultItemsDto } from "../dto/query-vault-items.dto";
 import { ChangeOperation } from "@prisma/client";
+import { ErrorCode } from "@/common/errors/error-code";
+import { notFound } from "@/common/errors/http-errors";
 
 @Injectable()
 export class VaultItemsService {
@@ -93,7 +95,13 @@ export class VaultItemsService {
     });
 
     if (!item) {
-      throw new NotFoundException(`Vault item with ID '${itemId}' not found.`);
+      throw notFound(
+        ErrorCode.NOT_FOUND,
+        `Vault item with ID '${itemId}' not found.`,
+        {
+          itemId,
+        },
+      );
     }
 
     return item;
@@ -105,7 +113,13 @@ export class VaultItemsService {
     });
 
     if (!existing) {
-      throw new NotFoundException(`Vault item with ID '${itemId}' not found.`);
+      throw notFound(
+        ErrorCode.NOT_FOUND,
+        `Vault item with ID '${itemId}' not found.`,
+        {
+          itemId,
+        },
+      );
     }
 
     return this.prisma.$transaction(async (tx) => {
@@ -149,7 +163,13 @@ export class VaultItemsService {
     });
 
     if (!existing) {
-      throw new NotFoundException(`Vault item with ID '${itemId}' not found.`);
+      throw notFound(
+        ErrorCode.NOT_FOUND,
+        `Vault item with ID '${itemId}' not found.`,
+        {
+          itemId,
+        },
+      );
     }
 
     return this.prisma.$transaction(async (tx) => {

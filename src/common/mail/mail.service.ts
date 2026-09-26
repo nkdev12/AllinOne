@@ -131,33 +131,78 @@ This will expire in 24 hours.`,
     }
   }
 
-  async sendPasswordResetEmail(email: string, token: string): Promise<boolean> {
-    const resetUrl = `${this.configService.appUrl}/auth/reset-password?token=${token}`;
+  /**
+   * 6-digit code for a password reset. Kept separate from sendOtpEmail so the
+   * wording cannot tell a user their account email is being verified.
+   */
+  async sendPasswordResetOtpEmail(
+    email: string,
+    otp: string,
+  ): Promise<boolean> {
     const mailOptions = {
       from: this.configService.smtpFrom,
       to: email,
-      subject: "Reset your Allinone password",
-      text: `You requested a password reset for your Allinone account. Click the link below to set a new password:\n\n${resetUrl}\n\nThis link will expire in 1 hour.`,
+      subject: "Your Allinone password reset code",
+      text: `You requested a password reset for your Allinone account. Your reset code is: ${otp}\n\nThis code expires in 15 minutes. If you did not request it, your password is unchanged — please ignore this email.`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
           <h2 style="color: #333333;">Password Reset Request</h2>
-          <p>You requested a password reset for your Allinone account. Click the button below to choose a new password.</p>
-          <div style="margin: 30px 0;">
-            <a href="${resetUrl}" style="background-color: #d9534f; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 4px; font-weight: bold;">Reset Password</a>
+          <p>Enter this code to choose a new password for your Allinone account:</p>
+          <div style="margin: 30px 0; text-align: center;">
+            <h1 style="letter-spacing: 5px; color: #d9534f;">${otp}</h1>
           </div>
-          <p style="color: #666666; font-size: 14px;">Or copy and paste this link into your browser:<br/><a href="${resetUrl}">${resetUrl}</a></p>
-          <p style="color: #999999; font-size: 12px; margin-top: 30px;">This link will expire in 1 hour. If you did not request a password reset, please ignore this email.</p>
+          <p style="color: #666666; font-size: 14px;">This code expires in 15 minutes and can be used once.</p>
+          <p style="color: #999999; font-size: 12px; margin-top: 30px;">If you did not request a password reset, your password is unchanged. Please ignore this email.</p>
         </div>
       `,
     };
 
     try {
       await this.transporter.sendMail(mailOptions);
-      this.logger.log(`Password reset email sent to ${email}`);
+      this.logger.log(`Password reset OTP email sent to ${email}`);
       return true;
     } catch (error) {
       this.logger.error(
-        `Failed to send password reset email to ${email}:`,
+        `Failed to send password reset OTP email to ${email}:`,
+        error,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Lets the account owner prove they control the email address before the
+   * server hands back the wrapped vault master key.
+   */
+  async sendVaultRecoveryOtpEmail(
+    email: string,
+    otp: string,
+  ): Promise<boolean> {
+    const mailOptions = {
+      from: this.configService.smtpFrom,
+      to: email,
+      subject: "Your Allinone vault recovery code",
+      text: `A password vault recovery was requested for your Allinone account. Your recovery code is: ${otp}\n\nThis code expires in 15 minutes and can be used once. If you did not request it, your vault is unchanged — please ignore this email.`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
+          <h2 style="color: #333333;">Password Vault Recovery</h2>
+          <p>Enter this code to recover access to your Allinone password vault:</p>
+          <div style="margin: 30px 0; text-align: center;">
+            <h1 style="letter-spacing: 5px; color: #0066cc;">${otp}</h1>
+          </div>
+          <p style="color: #666666; font-size: 14px;">This code expires in 15 minutes and can be used once.</p>
+          <p style="color: #999999; font-size: 12px; margin-top: 30px;">If you did not request a vault recovery, your vault is unchanged. Please ignore this email.</p>
+        </div>
+      `,
+    };
+
+    try {
+      await this.transporter.sendMail(mailOptions);
+      this.logger.log(`Vault recovery OTP email sent to ${email}`);
+      return true;
+    } catch (error) {
+      this.logger.error(
+        `Failed to send vault recovery OTP email to ${email}:`,
         error,
       );
       return false;

@@ -4,9 +4,15 @@ import { PrismaService } from "@/common/prisma/prisma.service";
 import { UsersService } from "@/users/users.service";
 import { JwtService } from "@nestjs/jwt";
 import { ConfigurationService } from "@/config/configuration.service";
-import { ConflictException, UnauthorizedException } from "@nestjs/common";
+import { OtpService } from "@/common/otp/otp.service";
+import {
+  ConflictException,
+  HttpException,
+  UnauthorizedException,
+} from "@nestjs/common";
 import { AuditAction } from "@prisma/client";
 import { AuditLogService } from "@/common/audit/audit-log.service";
+import { ErrorCode } from "@/common/errors/error-code";
 import * as argon2 from "argon2";
 import { generateSecret, generateURI, verify } from "otplib";
 
@@ -19,6 +25,7 @@ describe("AuthService", () => {
   let usersService: any;
   let jwtService: any;
   let configService: any;
+  let otpService: any;
   let auditLogService: any;
 
   const mockUser = {
@@ -123,6 +130,11 @@ describe("AuthService", () => {
       googleClientId: "google-client-id",
     };
 
+    otpService = {
+      issue: jest.fn().mockResolvedValue("123456"),
+      consume: jest.fn().mockResolvedValue(true),
+    };
+
     auditLogService = {
       recordAuditLog: jest.fn().mockResolvedValue({ id: "audit-1" }),
     };
@@ -138,6 +150,7 @@ describe("AuthService", () => {
         { provide: UsersService, useValue: usersService },
         { provide: JwtService, useValue: jwtService },
         { provide: ConfigurationService, useValue: configService },
+        { provide: OtpService, useValue: otpService },
         { provide: AuditLogService, useValue: auditLogService },
       ],
     }).compile();
@@ -174,6 +187,25 @@ describe("AuthService", () => {
       expect(result.user?.email).toBe("test@example.com");
       expect(result.tokens?.accessToken).toBe("mock-jwt-token");
       expect(result.sessionId).toBe("session-uuid-789");
+      expect(auditLogService.recordAuditLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: AuditAction.ACCOUNT_CREATED,
+        }),
+      );
+    });
+
+    it("names the device row the new account starts on", async () => {
+      usersService.findByEmail.mockResolvedValue(null);
+      (argon2.hash as jest.Mock).mockResolvedValue("hashed_password");
+
+      const result = await service.register({
+        email: "new@example.com",
+        password: "Password123!",
+      });
+
+      expect(prismaService.device.create).toHaveBeenCalled();
+      expect(result.user?.id).toBe(mockUser.id);
+      expect(result.deviceId).toBe(mockDevice.id);
     });
   });
 
@@ -373,6 +405,87 @@ describe("AuthService", () => {
         },
       });
     });
+
+    it("hands back the device row the saved session belongs to", async () => {
+      prismaService.authentication.findFirst.mockResolvedValue(validAuthRecord);
+      (argon2.verify as jest.Mock).mockResolvedValue(true);
+      const savedDeviceId = "0f2c1c6a-2f3e-4a5b-8c9d-0e1f2a3b4c5d";
+      prismaService.device.findFirst.mockResolvedValue({
+        ...mockDevice,
+        id: savedDeviceId,
+      });
+
+      const result = await service.login({
+        email: "test@example.com",
+        password: "CorrectPassword123!",
+        deviceId: savedDeviceId,
+      });
+
+      expect(prismaService.device.findFirst).toHaveBeenCalledTimes(1);
+      expect(prismaService.device.findFirst).toHaveBeenCalledWith({
+        where: { id: savedDeviceId, userId: "user-uuid-123", revokedAt: null },
+      });
+      expect(prismaService.device.create).not.toHaveBeenCalled();
+      expect(result.deviceId).toBe(savedDeviceId);
+    });
+
+    it("ignores a device id that does not belong to this user", async () => {
+      prismaService.authentication.findFirst.mockResolvedValue(validAuthRecord);
+      (argon2.verify as jest.Mock).mockResolvedValue(true);
+      prismaService.device.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ ...mockDevice, platform: "LINUX" });
+
+      const result = await service.login({
+        email: "test@example.com",
+        password: "CorrectPassword123!",
+        deviceId: "11111111-1111-4111-8111-111111111111",
+        deviceName: "AllInOne Desktop",
+        platform: "LINUX",
+      });
+
+      expect(prismaService.device.create).not.toHaveBeenCalled();
+      expect(result.deviceId).toBe(mockDevice.id);
+    });
+  });
+
+  describe("verifyMfaLogin", () => {
+    const challenge = {
+      sub: "user-uuid-123",
+      email: "test@example.com",
+      deviceId: "device-uuid-456",
+      purpose: "MFA_CHALLENGE",
+    };
+
+    beforeEach(() => {
+      jwtService.verify.mockReturnValue(challenge);
+      prismaService.mFASetting.findUnique.mockResolvedValue(mockMfaSetting);
+    });
+
+    it("completes the sign-in the challenge started", async () => {
+      (verify as jest.Mock).mockReturnValue(true);
+
+      const result = await service.verifyMfaLogin({
+        mfaToken: "mfa-token",
+        totpCode: "123456",
+      });
+
+      expect(result.tokens?.accessToken).toBe("mock-jwt-token");
+      expect(result.deviceId).toBe("device-uuid-456");
+    });
+
+    it("refuses a code the authenticator did not produce", async () => {
+      (verify as jest.Mock).mockReturnValue(false);
+
+      const thrown = (await service
+        .verifyMfaLogin({ mfaToken: "mfa-token", totpCode: "000000" })
+        .catch((error: unknown) => error)) as HttpException;
+
+      expect(thrown).toBeInstanceOf(UnauthorizedException);
+      expect((thrown.getResponse() as { code?: string }).code).toBe(
+        ErrorCode.MFA_CODE_INVALID,
+      );
+    });
   });
 
   describe("OAuth integration", () => {
@@ -438,6 +551,82 @@ describe("AuthService", () => {
           data: expect.objectContaining({ totpEnabled: false }),
         }),
       );
+    });
+  });
+
+  describe("password reset", () => {
+    it("issues a PASSWORD_RESET code for the account email", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser);
+
+      const result = await service.forgotPassword("test@example.com");
+
+      expect(otpService.issue).toHaveBeenCalledWith(
+        "user-uuid-123",
+        "PASSWORD_RESET",
+        expect.any(Number),
+      );
+      expect(result.message).toContain("If the account exists");
+    });
+
+    it("does not reveal whether the email is registered", async () => {
+      usersService.findByEmail.mockResolvedValue(null);
+
+      const result = await service.forgotPassword("nobody@example.com");
+
+      expect(otpService.issue).not.toHaveBeenCalled();
+      expect(result.message).toContain("If the account exists");
+    });
+
+    it("re-hashes the password, unlocks the account and revokes sessions", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser);
+      (argon2.hash as jest.Mock).mockResolvedValue("new_hashed_password");
+
+      const result = await service.resetPassword(
+        "test@example.com",
+        "123456",
+        "NewPassword123!",
+      );
+
+      expect(otpService.consume).toHaveBeenCalledWith(
+        "user-uuid-123",
+        "PASSWORD_RESET",
+        "123456",
+      );
+      expect(prismaService.authentication.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: { passwordHash: "new_hashed_password" },
+        }),
+      );
+      expect(prismaService.user.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: { failedLoginAttempts: 0, lockedUntil: null },
+        }),
+      );
+      expect(prismaService.session.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: { revokedAt: expect.any(Date) },
+        }),
+      );
+      expect(result.message).toContain("Password successfully reset");
+    });
+
+    it("refuses to set a password when the code does not verify", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser);
+      otpService.consume.mockResolvedValue(false);
+
+      await expect(
+        service.resetPassword("test@example.com", "000000", "NewPassword123!"),
+      ).rejects.toThrow("Invalid or expired verification code");
+      expect(prismaService.authentication.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("refuses to set a password on an account without a password auth", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser);
+      prismaService.authentication.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        service.resetPassword("test@example.com", "123456", "NewPassword123!"),
+      ).rejects.toThrow("does not use a password");
     });
   });
 

@@ -7,8 +7,9 @@ import {
   Res,
   HttpCode,
   HttpStatus,
-  UnauthorizedException,
 } from "@nestjs/common";
+import { ErrorCode } from "@/common/errors/error-code";
+import { unauthorized } from "@/common/errors/http-errors";
 import {
   ApiTags,
   ApiOperation,
@@ -184,7 +185,7 @@ export class AuthController {
     const refreshToken = dto.refreshToken || cookieToken;
 
     if (!refreshToken) {
-      throw new UnauthorizedException("Refresh token is required");
+      throw unauthorized(ErrorCode.TOKEN_INVALID, "Refresh token is required");
     }
 
     const result = await this.authService.refreshTokens({ refreshToken });
@@ -237,9 +238,9 @@ export class AuthController {
   @Post("reset-password")
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: "Reset password using token" })
+  @ApiOperation({ summary: "Reset password using an emailed OTP" })
   async resetPassword(@Body() dto: ResetPasswordDto) {
-    return this.authService.resetPassword(dto.token, dto.newPassword);
+    return this.authService.resetPassword(dto.email, dto.otp, dto.newPassword);
   }
 
   // ========================================================================
