@@ -1,0 +1,5 @@
+// An editor binds a file to the nearest tsconfig.json, so without this file the
+// specs under test/ get no `paths` table and every `@/...` import reads as TS2307.
+{
+  "extends": "./tsconfig.e2e.json"
+}

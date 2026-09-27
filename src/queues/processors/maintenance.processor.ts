@@ -119,7 +119,9 @@ export class MaintenanceProcessor {
 
     const floors = new Map<string, bigint>();
     for (const device of devices) {
-      const checkpoint = parseCheckpoint(device.syncStates[0]?.lastPulledCursor);
+      const checkpoint = parseCheckpoint(
+        device.syncStates[0]?.lastPulledCursor,
+      );
       const seen = floors.get(device.userId);
       if (seen === undefined || checkpoint < seen) {
         floors.set(device.userId, checkpoint);

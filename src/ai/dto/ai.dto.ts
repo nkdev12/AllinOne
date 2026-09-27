@@ -13,7 +13,8 @@ import { SummaryFormat, SummaryLength, TaskPriority } from "../ai.interface";
 export class SummarizeTextDto {
   @ApiPropertyOptional({
     example: "Meeting notes about our Q4 product roadmap...",
-    description: "Raw text to summarize",
+    description:
+      "Raw text to summarize, read in full by the heuristics. When a Gemini key is configured the prompt sent upstream is capped (MAX_GEMINI_PROMPT_CHARS) and an over-long body is truncated, not rejected.",
   })
   @IsOptional()
   @IsString()

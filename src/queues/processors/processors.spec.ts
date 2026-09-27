@@ -168,7 +168,10 @@ describe("Queue Processors", () => {
     });
 
     it("prunes the whole expired span when no live device is still reading it", async () => {
-      await maintenanceProcessor.handleCleanupExpired({ id: 5, data: {} } as Job);
+      await maintenanceProcessor.handleCleanupExpired({
+        id: 5,
+        data: {},
+      } as Job);
 
       // The old query was one global `deleteMany({createdAt})`. Per user is what
       // lets the floor below exist at all, since cursors count per user.
@@ -223,7 +226,10 @@ describe("Queue Processors", () => {
     });
 
     it("asks only about devices that can still pull", async () => {
-      await maintenanceProcessor.handleCleanupExpired({ id: 8, data: {} } as Job);
+      await maintenanceProcessor.handleCleanupExpired({
+        id: 8,
+        data: {},
+      } as Job);
 
       // A revoked device cannot pull again, so leaving it in would pin the log
       // open forever on a checkpoint nobody will ever advance.

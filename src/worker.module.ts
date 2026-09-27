@@ -40,6 +40,18 @@ import { QueuesModule } from "@/queues/queues.module";
         SMTP_PASSWORD: Joi.string().allow("").optional(),
         SMTP_FROM: Joi.string().default("noreply@localhost"),
         SMTP_TLS: Joi.boolean().default(false),
+        // Admin access keys are declared here too so `ConfigurationService`
+        // sees one schema across both processes. Optional, no default: unset
+        // means no admin admit path, and the worker serves no /admin routes.
+        ADMIN_EMAILS: Joi.string().allow("").optional(),
+        ADMIN_USER_IDS: Joi.string().allow("").optional(),
+        ADMIN_SECRET: Joi.string().allow("").optional(),
+        // Gemini settings, declared here too so this schema and AppModule's stay
+        // in step. Nothing in the worker calls the AI module today; an unset or
+        // blank key leaves it on the heuristic fallback.
+        GEMINI_API_KEY: Joi.string().allow("").optional(),
+        GEMINI_MODEL: Joi.string().default("gemini-1.5-flash"),
+        GEMINI_TIMEOUT_MS: Joi.number().default(5000),
       }),
       validationOptions: {
         allowUnknown: true,

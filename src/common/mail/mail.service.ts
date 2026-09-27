@@ -46,8 +46,8 @@ export class MailService {
   get isConfigured(): boolean {
     return Boolean(
       this.configService.smtpHost &&
-        this.configService.smtpUser &&
-        this.configService.smtpPassword,
+      this.configService.smtpUser &&
+      this.configService.smtpPassword,
     );
   }
 

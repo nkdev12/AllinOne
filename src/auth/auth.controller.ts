@@ -19,6 +19,7 @@ import {
 import { Throttle } from "@nestjs/throttler";
 import { Request, Response } from "express";
 import { AuthService } from "./auth.service";
+import { ConfigurationService } from "@/config/configuration.service";
 import { RegisterDto } from "./dto/register.dto";
 import { LoginDto } from "./dto/login.dto";
 import { RefreshTokenDto } from "./dto/refresh-token.dto";
@@ -39,7 +40,10 @@ import { GetUser } from "./decorators/get-user.decorator";
 @ApiTags("Auth")
 @Controller("auth")
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly configService: ConfigurationService,
+  ) {}
 
   private extractCookie(
     cookieHeader: string | undefined,
@@ -57,7 +61,11 @@ export class AuthController {
       secure: process.env.APP_ENV === "production",
       sameSite: "strict",
       path: "/auth/refresh",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
+      // The cookie and the token it carries expire together. A literal week
+      // here kept a browser holding a refresh token the server had already
+      // stopped accepting, which reads to a client as a session that ends
+      // silently rather than one that was configured to last seven days.
+      maxAge: this.configService.jwtRefreshExpiresInSeconds * 1000,
     });
   }
 

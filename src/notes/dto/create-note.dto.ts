@@ -40,6 +40,27 @@ export class CreateNoteDto {
   tagIds?: string[];
 
   @ApiPropertyOptional({
+    example: ["reading", "someday"],
+    description:
+      "Free-text label list, under the same key the sync payload uses. Distinct " +
+      "from `tagIds`: those name rows in the account's `Tag` collection, while " +
+      "these are the strings a device typed onto the note and no tag needs to " +
+      "exist for. Neither is derived from the other.",
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  tags?: string[];
+
+  @ApiPropertyOptional({
+    example: "#FFD54F",
+    description: "Note colour hex code",
+  })
+  @IsOptional()
+  @IsString()
+  color?: string;
+
+  @ApiPropertyOptional({
     example: false,
     description: "Pin note to top of list",
   })

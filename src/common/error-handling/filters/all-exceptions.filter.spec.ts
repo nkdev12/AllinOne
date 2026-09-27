@@ -1,8 +1,4 @@
-import {
-  BadRequestException,
-  HttpStatus,
-  ArgumentsHost,
-} from "@nestjs/common";
+import { BadRequestException, HttpStatus, ArgumentsHost } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { AllExceptionsFilter } from "./all-exceptions.filter";
 import { ErrorCode } from "../../errors/error-code";
@@ -42,9 +38,13 @@ describe("AllExceptionsFilter", () => {
 
   it("forwards the code and details a service attached", () => {
     filter.catch(
-      notFound(ErrorCode.DEVICE_NOT_REGISTERED, "Active device with ID 'x' not found.", {
-        deviceId: "x",
-      }),
+      notFound(
+        ErrorCode.DEVICE_NOT_REGISTERED,
+        "Active device with ID 'x' not found.",
+        {
+          deviceId: "x",
+        },
+      ),
       host,
     );
 
@@ -102,11 +102,14 @@ describe("AllExceptionsFilter", () => {
 
   it("maps a missing relation and a vanished record", () => {
     filter.catch(
-      new Prisma.PrismaClientKnownRequestError(" Foreign key constraint violated", {
-        code: "P2003",
-        clientVersion: "5.0.0",
-        meta: { field: "noteId" },
-      }),
+      new Prisma.PrismaClientKnownRequestError(
+        " Foreign key constraint violated",
+        {
+          code: "P2003",
+          clientVersion: "5.0.0",
+          meta: { field: "noteId" },
+        },
+      ),
       host,
     );
     expect(response.status).toHaveBeenCalledWith(409);
@@ -126,7 +129,10 @@ describe("AllExceptionsFilter", () => {
   });
 
   it("does not leak an unexpected error message", () => {
-    filter.catch(new Error("Mongoose connection lost to mongodb://user:pass@host"), host);
+    filter.catch(
+      new Error("Mongoose connection lost to mongodb://user:pass@host"),
+      host,
+    );
 
     expect(response.status).toHaveBeenCalledWith(500);
     expect(JSON.stringify(body())).not.toContain("mongodb://");

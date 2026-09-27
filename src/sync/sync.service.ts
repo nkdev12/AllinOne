@@ -2,7 +2,7 @@ import { Injectable, Optional } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { PushSyncDto } from "./dto/push-sync.dto";
 import { PullSyncDto } from "./dto/pull-sync.dto";
-import { SyncGateway } from "./sync.gateway";
+import { SyncNotificationService } from "./sync-notification.service";
 import { MetricsService } from "@/common/metrics/metrics.service";
 import { ErrorCode } from "@/common/errors/error-code";
 import { badRequest, forbidden, notFound } from "@/common/errors/http-errors";
@@ -22,7 +22,11 @@ export interface SyncConflictEntry {
 export class SyncService {
   constructor(
     private prisma: PrismaService,
-    @Optional() private syncGateway?: SyncGateway,
+    // The same wake-up the REST write paths now send, through the same choke
+    // point: a push that broadcast straight at `SyncGateway` while a REST edit
+    // broadcast at nothing is how one half of the sync traffic looked live and
+    // the other half did not.
+    @Optional() private syncNotifications?: SyncNotificationService,
     @Optional() private metricsService?: MetricsService,
   ) {}
 
@@ -147,12 +151,12 @@ export class SyncService {
       };
     });
 
-    if (this.syncGateway) {
-      this.syncGateway.notifySyncInvalidation(
+    if (this.syncNotifications) {
+      this.syncNotifications.notifyMutation({
         userId,
-        dto.deviceId,
-        result.highestCursor,
-      );
+        originDeviceId: dto.deviceId,
+        highestCursor: result.highestCursor,
+      });
     }
 
     this.metricsService?.incrementSyncPush(dto.changes.length);

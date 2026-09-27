@@ -6,6 +6,8 @@ import { ConfigurationService } from "@/config/configuration.service";
 export interface ThrottlerStorageRecord {
   totalHits: number;
   timeToExpire: number;
+  isBlocked: boolean;
+  timeToBlockExpire: number;
 }
 
 @Injectable()
@@ -36,9 +38,29 @@ export class RedisThrottlerStorage
     }
   }
 
-  async increment(key: string, ttl: number): Promise<ThrottlerStorageRecord> {
+  async increment(
+    key: string,
+    ttl: number,
+    limit: number,
+    blockDuration: number,
+  ): Promise<ThrottlerStorageRecord> {
     const prefixedKey = `throttler:${key}`;
+    const blockKey = `${prefixedKey}:block`;
     try {
+      const blockedFor = await this.redis.pttl(blockKey);
+      if (blockedFor > 0) {
+        const [hits, remainingWindow] = await Promise.all([
+          this.redis.get(prefixedKey),
+          this.redis.pttl(prefixedKey),
+        ]);
+        return {
+          totalHits: Number(hits) || limit + 1,
+          timeToExpire: this.toSeconds(remainingWindow, ttl),
+          isBlocked: true,
+          timeToBlockExpire: this.toSeconds(blockedFor, blockDuration),
+        };
+      }
+
       const pipeline = this.redis.pipeline();
       pipeline.incr(prefixedKey);
       pipeline.pttl(prefixedKey);
@@ -57,16 +79,37 @@ export class RedisThrottlerStorage
         pttl = ttl;
       }
 
+      const blockedUntil = blockDuration > 0 && totalHits > limit;
+      if (blockedUntil) {
+        await this.redis.set(blockKey, "1", "PX", blockDuration);
+      }
+
       return {
         totalHits,
-        timeToExpire: Math.max(0, Math.ceil(pttl / 1000)),
+        timeToExpire: this.toSeconds(pttl, ttl),
+        isBlocked: blockedUntil,
+        timeToBlockExpire: blockedUntil
+          ? this.toSeconds(blockDuration, blockDuration)
+          : 0,
       };
     } catch (err: any) {
       this.logger.warn(
         `Redis throttler increment failed: ${err.message}. Permitting request.`,
       );
-      return { totalHits: 1, timeToExpire: Math.ceil(ttl / 1000) };
+      return {
+        totalHits: 1,
+        timeToExpire: this.toSeconds(ttl, ttl),
+        isBlocked: false,
+        timeToBlockExpire: 0,
+      };
     }
+  }
+
+  private toSeconds(remainingMs: number, fallbackMs: number): number {
+    return Math.max(
+      0,
+      Math.ceil((remainingMs > 0 ? remainingMs : fallbackMs) / 1000),
+    );
   }
 
   async onModuleDestroy() {

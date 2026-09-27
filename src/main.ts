@@ -5,6 +5,7 @@ import helmet from "helmet";
 import { AppModule } from "./app/app.module";
 import { ConfigService } from "@nestjs/config";
 import { createValidationPipe } from "./common/errors/validation.pipe";
+import { SyncIoAdapter } from "./sync/adapters/sync-io.adapter";
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -85,8 +86,25 @@ async function bootstrap() {
   });
 
   // ========================================================================
+  // WebSocket adapter (CORS + clustering) for the /sync namespace
+  // ========================================================================
+  // Must be installed before listen(): Nest binds every gateway to the adapter
+  // that is configured at that moment, and the namespace's origin policy is
+  // decided when its Socket.IO server is built — which is why it is not a
+  // `@WebSocketGateway` option (decorator metadata cannot see injected config).
+  // One adapter does both jobs: Redis rooms when `REDIS_URL` is configured and
+  // reachable, in-memory otherwise.
+  app.useWebSocketAdapter(await SyncIoAdapter.fromConfig(app, configService));
+
+  // ========================================================================
   // Start server
   // ========================================================================
+  // Container stop sends SIGTERM; without this the Nest lifecycle never runs,
+  // so PrismaService.$disconnect() and RedisThrottlerStorage's teardown (both
+  // OnModuleDestroy) would be skipped and connections dropped mid-flight.
+  // Must be registered before listen() so the hooks exist once requests flow.
+  app.enableShutdownHooks();
+
   const port = configService.get<number>("APP_PORT", 3000);
   const environment = configService.get<string>("APP_ENV", "development");
 

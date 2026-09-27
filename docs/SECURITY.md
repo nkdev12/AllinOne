@@ -108,6 +108,7 @@ async getNoteById(userId: string, noteId: string) {
 ### Encryption at Rest
 
 **Sensitive fields:**
+
 - Passwords (hashed with Argon2id)
 - MFA secrets (encrypted)
 - Recovery codes (encrypted)
@@ -116,6 +117,7 @@ async getNoteById(userId: string, noteId: string) {
 - OAuth tokens (encrypted)
 
 **Storage:**
+
 - Database column encryption
 - Backup encryption
 - Object storage encryption
@@ -140,29 +142,44 @@ async getNoteById(userId: string, noteId: string) {
 ### Data Validation
 
 ```typescript
-// DTOs with class-validator
+// src/notes/dto/create-note.dto.ts — verbatim except the @ApiProperty blocks
 export class CreateNoteDto {
   @IsString()
-  @MinLength(1)
-  @MaxLength(500)
-  title: string;
+  @IsNotEmpty()
+  title!: string; // no length cap
 
-  @IsString()
-  @MaxLength(1000000) // Max 1MB
-  content: string;
-
-  @IsUUID()
   @IsOptional()
+  @IsString()
+  content?: string; // no length cap
+
+  @IsOptional()
+  @IsUUID()
   folderId?: string;
+
+  @IsOptional()
+  @IsArray()
+  @IsUUID("4", { each: true })
+  tagIds?: string[];
 }
 ```
 
+Every route DTO follows that pattern: type, optionality and format checks, then
+the global pipe rejects unknown properties (`src/common/errors/validation.pipe.ts:44-51`). Length caps are the exception rather than the rule — the only
+`@MaxLength` decorators in `src/` are on `UpdateUserProfileDto` (255 for
+`displayName`, 10 for `locale`, 50 for `timezone`;
+`src/users/dto/update-user-profile.dto.ts:11,25,34`), so note titles and content,
+task subjects and event titles are bounded only by the request-body parser.
+
 ### Size Limits
 
-- Request body: 50MB
-- File upload: 500MB
+- Request body: no `limit` is configured — `NestFactory.create` is called with a
+  logger option only and `src/main.ts` registers no `json`/`urlencoded` handler of
+  its own (`src/main.ts:10-12`), so body-parser's default applies (100 kB) and an
+  oversized body is rejected before any DTO runs
+- Field length: `@MaxLength` on `UpdateUserProfileDto` only, as above
+- File upload: not implemented — no `FileInterceptor`, `multer` or object-storage
+  client exists anywhere in `src/`, so there is no 500 MB path to protect
 - API response: unlimited (with pagination)
-- Database value: enforce column limits
 
 ### Type Safety
 
@@ -173,20 +190,24 @@ export class CreateNoteDto {
 
 ## Secure Coding Practices
 
-### SQL Injection Prevention
+### Injection Prevention (Query Documents)
 
-Always use parameterized queries (Prisma does this):
+Always let the driver assemble the command — Prisma's model methods do:
 
 ```typescript
 // ✅ SAFE
 await prisma.note.findMany({
-  where: { userId: userId } // Parameterized
+  where: { userId: userId }, // Parameterized
 });
 
-// ❌ DANGEROUS
-await prisma.$queryRawUnsafe(
-  `SELECT * FROM notes WHERE userId = '${userId}'` // SQL injection!
-);
+// ❌ DANGEROUS — same class of bug on this datasource: a filter document
+// assembled from request input. `$queryRaw`/`$queryRawUnsafe` are not generated
+// for the MongoDB connector; `$runCommandRaw` is, and it takes the injection
+// wherever the string goes.
+await prisma.$runCommandRaw({
+  find: "Note",
+  filter: JSON.parse(`{ "userId": "${userId}" }`), // operator injection
+});
 ```
 
 ### XSS Prevention
@@ -232,13 +253,14 @@ DATABASE_PASSWORD=${DB_PASSWORD}  # Injected from environment
 
 ```bash
 # ✅ Safe - committed to repo
-DATABASE_URL=postgresql://user:PASSWORD@localhost/db
+DATABASE_URL=mongodb://user:PASSWORD@localhost:27017/allinone_dev
 JWT_ACCESS_SECRET=CHANGE_ME_IN_PRODUCTION
 ```
 
 ### Production Secrets
 
 Use one of:
+
 - Environment variables (cloud provider)
 - Secrets manager (AWS Secrets Manager, Azure Key Vault)
 - HashiCorp Vault
@@ -247,29 +269,39 @@ Use one of:
 ## API Security
 
 ### Rate Limiting
-### Rate Limiting & Distributed Throttling
 
-Protect sensitive endpoints:
-Protect sensitive endpoints with distributed Redis-backed throttling (`RedisThrottlerStorage`):
+Rate limits are declared per route with `@Throttle` and enforced by `CustomThrottlerGuard`, registered as the app-wide `APP_GUARD` (`src/app/app.module.ts:159-162`). Underneath it sits one `default` throttler that covers every route declaring nothing of its own: `RATE_LIMIT_MAX_REQUESTS` per `RATE_LIMIT_WINDOW_MS`, i.e. 100 requests per 60 seconds unless the environment overrides it (`src/app/app.module.ts:126-137`, `src/config/configuration.service.ts:183-189`).
 
-```
-POST /auth/login     — 5 attempts per minute
-POST /auth/register  — 3 per hour per IP
-POST /auth/mfa       — 5 attempts per minute
-GET  /api/search     — 100 per minute
-GET  /api/export     — 10 per hour
-```
-- **Cluster-Wide Enforcement**: Rate limiting state is synchronized across all horizontally scaled backend instances using Redis atomic pipelines (`INCR` + `PTTL`), preventing clients from bypassing rate limits by hitting different pods.
-- **Fail-Open Resilience**: If Redis experiences transient degradation, the storage layer logs a warning and permits requests rather than failing open to DoS or terminating API operations.
-- **Protected Endpoint Budgets**:
+- **Declared budgets** — every `@Throttle` in `src/`:
+
   ```
-  POST /auth/login     — 5 attempts per minute
-  POST /auth/register  — 3 per hour per IP
-  POST /auth/mfa       — 5 attempts per minute
-  GET  /api/search     — 100 per minute
-  GET  /api/export     — 10 per hour
-  POST /vault/settings/unlock — 10 per minute, plus a per-vault cooldown
+  POST /auth/register                     — 3 per hour (limit: 3, ttl: 3600000)
+  POST /auth/login                        — 5 per minute
+  POST /auth/oauth/google                 — 10 per minute
+  POST /auth/oauth/apple                  — 10 per minute
+  POST /auth/oauth/microsoft              — 10 per minute
+  POST /auth/refresh                      — 10 per minute
+  POST /auth/verify-email/request         — 3 per minute
+  POST /auth/verify-email/confirm         — 5 per minute
+  POST /auth/forgot-password              — 3 per minute
+  POST /auth/reset-password               — 5 per minute
+  POST /auth/mfa/verify                   — 5 per minute
+  POST /vault/settings/unlock             — 10 per minute, plus a per-vault cooldown
+  POST /vault/settings/recovery/request   — 3 per minute
+  POST /vault/settings/recovery/verify    — 5 per minute
+  POST /vault/settings/recovery/complete  — 3 per minute
   ```
+
+  (`src/auth/auth.controller.ts:65-274`, `src/vault/controllers/vault-settings.controller.ts:59-115`.) The unlock cooldown is a second, independent budget: five consecutive wrong verifiers lock that vault out for 60 seconds, doubling up to an hour, and the counter lives on `VaultSetting` rather than `User` (`src/vault/services/vault-settings.service.ts:30-32,261-269`).
+
+- **Who is counted**: `getTracker` builds the key as `user:<id>` when `req.user` is already populated and `ip:<first x-forwarded-for hop>` otherwise (`src/common/guards/custom-throttler.guard.ts:54-71`). Note the ordering caveat: as an `APP_GUARD` the throttler runs before a route's `JwtAuthGuard`, so `req.user` is still empty on HTTP requests and every bucket is keyed by IP today — the per-account branch is written but unreachable, and a shared NAT still divides one user's budget across hops. Fixing it means reading the bearer token in the guard or keying off the session id.
+
+- **State lives in each process**: `ThrottlerModule.forRootAsync` passes no `storage` option (`src/app/app.module.ts:126-137`), so `@nestjs/throttler` falls back to its in-memory `ThrottlerStorageService`. Quotas are therefore per replica — three pods answer three times the declared budget. `RedisThrottlerStorage` (`src/common/throttler/redis-throttler.storage.ts`) is the distributed replacement: it keeps the counter at `throttler:<key>` via an `INCR` + `PTTL` pipeline, holds the ban at `throttler:<key>:block`, and returns the 6.x record shape `{ totalHits, timeToExpire, isBlocked, timeToBlockExpire }`; its `increment` takes four of the 6.x contract's five arguments and ignores `throttlerName`. It is unit-tested and **not registered anywhere in `src/`**, so cluster-wide enforcement is a to-do rather than a property of the deployment.
+
+- **Blocking is on**: no `@Throttle` in `src/` sets `blockDuration`, and `@nestjs/throttler` 6.x resolves it to the route's `ttl` when absent. The first request past the limit therefore comes back `429` with a `Retry-After`, and the bucket stays shut for the rest of that window instead of reopening as individual hits expire.
+
+- **Fail-open**: when Redis is unreachable the storage logs `Redis throttler increment failed: … Permitting request.` and returns a non-blocking record (`src/common/throttler/redis-throttler.storage.ts:95-105`) — a Redis outage costs enforcement, not availability. That matters only once the class is wired; the in-memory storage has no equivalent failure mode.
+
 - **When it is on**: `CustomThrottlerGuard` stands down under `APP_ENV=development`,
   `NODE_ENV=test`, `DISABLE_RATE_LIMITING=true` or `RATE_LIMIT_ENABLED=false`. Set
   `RATE_LIMIT_ENABLED=true` to run the real limits locally instead of meeting
@@ -277,18 +309,22 @@ GET  /api/export     — 10 per hour
   `x-skip-throttle` / `x-bypass-rate-limit` headers are honoured only when an
   operator sets `RATE_LIMIT_HEADER_BYPASS=true`, and never when `APP_ENV=production`.
 
-### Clustered WebSocket Gateway
+### WebSocket Gateway (`/sync`)
 
-- Horizontally distributed realtime events using `@socket.io/redis-adapter`.
-- Redis Pub/Sub channels ensure room broadcasts (e.g. `user:<userId>`) correctly cross server boundaries to all client connections regardless of which backend node terminates their WebSocket connection.
+- **Clustering is wired, and gated on Redis.** `src/main.ts:97` installs `SyncIoAdapter` (`src/sync/adapters/sync-io.adapter.ts`), which extends `RedisIoAdapter` and calls `connectToRedis()` before `listen()`. It is attempted only when `REDIS_URL` names a server and `WS_REDIS_ADAPTER` has not been set to `false`; when both hold, `user:<userId>` rooms are shared across API replicas and an invalidation emitted on one reaches a client connected to another. Until 2026-09-27 nothing constructed the adapter at all and rooms were per-process unconditionally.
+- **The residual risk is that the fallback is quiet.** A Redis that is configured but unreachable is caught, logged as a warning, and the process continues on Socket.IO's default in-memory adapter — rooms per-process again, second replicas silently missing invalidations. Nothing in `/health`, `/health/live` or `/health/ready` reports which mode the gateway came up in, so an operator cannot tell from any external signal. Confirm the `[sync-ws] … Clustering:` line in the boot log. `docker-compose.prod.yml` runs one `api` container today, so this is latent rather than live.
+- **Invalidation is a wake-up hint, not data.** The failure mode above is staleness, never disclosure: the payload carries a cursor and the pull that follows is REST-authenticated against the device's own checkpoint. Nothing is cross-delivered because two replicas share a room.
+- **The handshake revalidates the account and the session, the way REST does.** `handleConnection()` verifies the signature and then calls `revalidate()` (`src/sync/sync.gateway.ts:81`, defined `:121-162`), which requires the user to exist, `status === "ACTIVE"`, `deletedAt` null, and — when the token names a session — `UsersService.isSessionLive()`. It fails closed: with no `UsersService` in the graph it refuses the connection instead of falling back to trusting the signature, and it logs the rejection reason and never the token.
+- **What it still does not do: drop a live socket.** Revalidation happens at handshake, so a session revoked mid-connection keeps its socket until it reconnects or the access token expires (15 minutes by default). "Disconnect on revocation" remains unimplemented; the practical exposure is that a revoked device is told there is new data, and then refused when it asks.
+- **CORS is configuration, not a wildcard.** The decorator carries only `namespace` now; the old `cors: { origin: "*" }` was evaluated at import time, which is exactly why it could never have consulted `.env`. `SyncIoAdapter` resolves the `/sync` allow-list at boot from `WS_CORS_ORIGINS`, falling back to `CORS_ORIGINS`, then the HTTP app's `CORS_ORIGIN`, then `http://localhost:3000` — so tightening the HTTP list does tighten the socket by default, and a dedicated key exists for a web client served from a different origin. A configured list is never widened automatically: the only wildcard is the `*` an operator writes into it, and that is answered with `credentials: false`. `WS_CORS_ALLOW_NULL_ORIGIN` (default `false`) is the explicit, logged escape hatch for WebView clients that send no `Origin`.
 
 ### CORS Configuration
 
 ```typescript
 app.enableCors({
-  origin: ['https://app.example.com', 'https://mobile.example.com'],
+  origin: ["https://app.example.com", "https://mobile.example.com"],
   credentials: true,
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ["Content-Type", "Authorization"],
 });
 ```
 
@@ -345,18 +381,22 @@ Content-Security-Policy: default-src 'self'
 
 ### Constraints & Triggers
 
-```sql
--- Foreign keys ensure referential integrity
-ALTER TABLE notes ADD CONSTRAINT fk_user_id
-  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+The `mongodb` datasource exposes no DDL surface: `ALTER TABLE`, foreign-key
+constraints and `CHECK` expressions are unavailable, and the Prisma MongoDB
+connector enforces no relations between collections. Integrity is code-side:
 
--- Unique constraints prevent duplicates
-ALTER TABLE users ADD CONSTRAINT unique_email UNIQUE(email);
-
--- Check constraints enforce values
-ALTER TABLE users ADD CONSTRAINT check_status
-  CHECK (status IN ('ACTIVE', 'SUSPENDED', 'DELETED'));
-```
+- Structure comes from `prisma/schema.prisma`; unique and index declarations are
+  created on the MongoDB collections by `npm run db:push` (`package.json:28`)
+  rather than by a SQL migration.
+- The state transitions a `CHECK` constraint would cover — `status` moving to
+  `DELETED`, `deletedAt` / `revokedAt` being stamped — are performed by the
+  services that own the rows (`src/users/users.service.ts:81-109` soft-deletes an
+  account and revokes its sessions and devices in one transaction).
+- The only write-time hook anywhere in `src/` is a Prisma `$use` middleware that
+  materialises absent nullable columns as explicit `null` on `create`/`upsert`
+  (`src/common/prisma/prisma.service.ts:47-63`).
+- Cross-row access is guarded per request by the ownership checks described under
+  "Ownership Verification", not by a foreign key.
 
 ### Backups
 
@@ -409,14 +449,14 @@ ALTER TABLE users ADD CONSTRAINT check_status
 
 ### High-Priority Threats
 
-| Threat | Likelihood | Impact | Mitigation |
-|--------|-----------|--------|-----------|
-| Account Takeover | Medium | Critical | MFA, rate limiting, session management |
-| Data Breach | Low | Critical | Encryption, backups, access controls |
-| SQL Injection | Low | Critical | Parameterized queries, ORM |
-| Privilege Escalation | Low | High | Authorization checks, database constraints |
-| IDOR | Medium | High | Ownership verification, authorization guards |
-| Brute Force | Medium | High | Rate limiting, account lockout, MFA |
+| Threat               | Likelihood | Impact   | Mitigation                                   |
+| -------------------- | ---------- | -------- | -------------------------------------------- |
+| Account Takeover     | Medium     | Critical | MFA, rate limiting, session management       |
+| Data Breach          | Low        | Critical | Encryption, backups, access controls         |
+| SQL Injection        | Low        | Critical | Parameterized queries, ORM                   |
+| Privilege Escalation | Low        | High     | Authorization checks, database constraints   |
+| IDOR                 | Medium     | High     | Ownership verification, authorization guards |
+| Brute Force          | Medium     | High     | Rate limiting, account lockout, MFA          |
 
 ### Medium-Priority Threats
 
@@ -440,13 +480,18 @@ ALTER TABLE users ADD CONSTRAINT check_status
 - [x] Short-lived JWT access tokens (15m) and rotated refresh tokens (7d)
 - [x] Hybrid authentication model (`httpOnly` refresh cookie + `Authorization: Bearer` access header)
 - [x] TOTP MFA support with hashed recovery codes (`MFASetting`)
-- [x] Per-IP and per-user rate limiting via `CustomThrottlerGuard`
+- [x] Rate limiting via `CustomThrottlerGuard`, keyed per client IP today — the
+      per-account key it also implements is unreachable behind the global guard
+      (see "Rate Limiting")
 - [x] Ownership and IDOR authorization guards on all routes (`src/common/testing/idor.spec.ts`)
-- [x] Global input validation pipes with whitelisting and non-whitelisted property rejection
-- [x] SQL injection prevention via Prisma parameterized queries
+- [x] Global input validation pipes with whitelisting and non-whitelisted property rejection (`src/main.ts:52`, `src/common/errors/validation.pipe.ts:44-51`)
+- [x] No SQL surface: the MongoDB connector generates no `$queryRaw`, and the
+      three `$runCommandRaw` call sites build command documents as objects rather
+      than interpolated strings (`src/common/prisma/prisma.service.ts:82`,
+      `src/auth/auth.service.ts:818,871`)
 - [x] Centralized SIEM audit logging with correlation ID (`src/common/audit/audit-log.service.ts`)
 - [x] Client-side AES-256-GCM encryption for vault entries (`vault_item` rows in the sync oplog) — not zero-knowledge, see the recovery-key caveat under "Vault and Sync Trust Models"
-- [x] Automated backup and restore scripts with compression verification (`scripts/backup-database.sh`)
+- [x] Backup and restore scripts with archive integrity checking (`scripts/backup-database.sh:72-89` runs `mongodump --gzip --archive` and verifies it with `gzip -t`) — no scheduler runs them in this repo; see the pre-flight checklist below and `docs/DISASTER_RECOVERY.md`
 
 ### Pre-Deployment Operational Verification Checklist (Pre-Flight Runbook)
 
@@ -455,7 +500,7 @@ Before opening traffic to a production deployment, the systems engineer must ver
 - [ ] Production secrets injected via environment or secret manager (no secrets committed to git)
 - [ ] TLS certificate acquisition confirmed via Caddy / Let's Encrypt (HSTS enabled)
 - [ ] Production database passwords generated with sufficient entropy (`openssl rand -hex 32`)
-- [ ] Dedicated PostgreSQL user permissions verified (least privilege)
+- [ ] Dedicated MongoDB user permissions verified (least privilege, `readWrite` on the app database only)
 - [ ] Production CORS origins restricted to verified frontend domains (`CORS_ORIGIN`)
 - [ ] Daily backup cron job scheduled and verified on external storage (`backup-allinone.sh`)
 - [ ] Disaster recovery restore drill tested against isolated staging instance (`restore-database.sh`)
@@ -478,14 +523,34 @@ Before opening traffic to a production deployment, the systems engineer must ver
 ### Emergency Access Revocation
 
 ```bash
-# Revoke all sessions for a user
-UPDATE sessions SET revoked_at = NOW() WHERE user_id = ?
+# Preferred: the audited admin endpoints (JwtAuthGuard + AdminGuard, both write
+# an AuditLog row) — src/admin/admin.controller.ts:45,63
+curl -X POST "$APP_URL/admin/users/<userId>/revoke-sessions" -H "Authorization: Bearer <admin token>"
+curl -X POST "$APP_URL/admin/users/<userId>/disable-mfa"     -H "Authorization: Bearer <admin token>"
+```
 
-# Revoke specific device
-UPDATE devices SET revoked_at = NOW() WHERE id = ?
+Direct against the database when the API itself is the thing that is broken. The
+datasource is MongoDB (`prisma/schema.prisma:9`) and no model declares `@@map`,
+so the collections carry the Prisma model names and the fields are camelCase:
 
-# Disable MFA for account recovery
-UPDATE mfa_settings SET totp_enabled = false WHERE user_id = ?
+```javascript
+// Revoke all sessions for a user
+db.Session.updateMany(
+  { userId: "<userId>", revokedAt: null },
+  { $set: { revokedAt: new Date() } },
+);
+
+// Revoke a specific device
+db.Device.updateMany(
+  { userId: "<userId>", _id: "<deviceId>", revokedAt: null },
+  { $set: { revokedAt: new Date() } },
+);
+
+// Disable MFA for account recovery
+db.MFASetting.updateOne(
+  { userId: "<userId>" },
+  { $set: { totpEnabled: false } },
+);
 ```
 
 ## Compliance Considerations
@@ -511,7 +576,7 @@ UPDATE mfa_settings SET totp_enabled = false WHERE user_id = ?
 - [OWASP Top 10](https://owasp.org/www-project-top-ten/)
 - [OWASP API Security](https://owasp.org/www-project-api-security/)
 - [NestJS Security](https://docs.nestjs.com/security/)
-- [PostgreSQL Security](https://www.postgresql.org/docs/current/sql-syntax.html)
+- [MongoDB Security](https://www.mongodb.com/docs/manual/security/)
 - [Node.js Security Best Practices](https://nodejs.org/en/docs/guides/security/)
 
 ---

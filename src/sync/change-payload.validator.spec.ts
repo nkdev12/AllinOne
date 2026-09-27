@@ -251,6 +251,43 @@ describe("change-payload validator", () => {
       ).not.toThrow();
     });
 
+    it("accepts the label list and colour a desktop client sends, and the shapes that mean none", () => {
+      expect(() =>
+        assertPushableChanges([
+          note({
+            title: "Draft",
+            content: "text",
+            version: 5,
+            tags: ["reading", "someday"],
+            color: "#FFD54F",
+          }),
+          // An emptied list is a real edit, the same way a blanked body is, and
+          // null is the value a note with no colour genuinely holds.
+          note(
+            { title: "Draft", content: "text", tags: [], color: null },
+            ChangeOperation.UPDATE,
+          ),
+          // A phone still on the build that predates both columns omits them, and
+          // must not be refused for it — neither key is `required`.
+          note({ title: "Draft", content: "text" }, ChangeOperation.UPDATE),
+        ]),
+      ).not.toThrow();
+    });
+
+    it("refuses a present tags or colour that is not a value either column can hold", () => {
+      // Anything else reaches a device as a tag whose name is "42" or a colour
+      // that is a number, and a stored row cannot be unsent.
+      expect(fieldsOf({ title: "Ok", content: "x", tags: "reading" })).toEqual([
+        "changes[0].payload.tags",
+      ]);
+      expect(
+        fieldsOf({ title: "Ok", content: "x", tags: ["fine", 42] }),
+      ).toEqual(["changes[0].payload.tags"]);
+      expect(fieldsOf({ title: "Ok", content: "x", color: 0xffd54f })).toEqual([
+        "changes[0].payload.color",
+      ]);
+    });
+
     it("leaves a delete alone, and keeps the size rule on the body only", () => {
       expect(() =>
         assertPushableChanges([

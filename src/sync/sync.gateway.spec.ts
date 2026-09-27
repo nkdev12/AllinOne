@@ -1,16 +1,26 @@
 import { Test, TestingModule } from "@nestjs/testing";
+import { Logger } from "@nestjs/common";
 import { SyncGateway } from "./sync.gateway";
 import { JwtService } from "@nestjs/jwt";
 import { ConfigurationService } from "@/config/configuration.service";
+import { UsersService } from "@/users/users.service";
 
 describe("SyncGateway", () => {
   let gateway: SyncGateway;
   let jwtService: any;
   let configService: any;
+  let usersService: { getUserById: jest.Mock; isSessionLive: jest.Mock };
   let mockClient: any;
   let mockOtherClient: any;
   let broadcastEmit: jest.Mock;
   let mockServer: any;
+
+  const ACTIVE_USER = {
+    id: "user-uuid-123",
+    email: "someone@example.com",
+    status: "ACTIVE",
+    deletedAt: null,
+  };
 
   beforeEach(async () => {
     jwtService = {
@@ -22,6 +32,13 @@ describe("SyncGateway", () => {
 
     configService = {
       jwtAccessSecret: "access-secret",
+    };
+
+    // The doubles for what `JwtStrategy.validate()` does: the account row and the
+    // session behind the token. Live on both, until a test says otherwise.
+    usersService = {
+      getUserById: jest.fn().mockResolvedValue(ACTIVE_USER),
+      isSessionLive: jest.fn().mockResolvedValue(true),
     };
 
     mockClient = {
@@ -72,6 +89,7 @@ describe("SyncGateway", () => {
         SyncGateway,
         { provide: JwtService, useValue: jwtService },
         { provide: ConfigurationService, useValue: configService },
+        { provide: UsersService, useValue: usersService },
       ],
     }).compile();
 
@@ -112,6 +130,156 @@ describe("SyncGateway", () => {
       await gateway.handleConnection(mockClient);
 
       expect(mockClient.disconnect).toHaveBeenCalledWith(true);
+    });
+  });
+
+  /**
+   * A signature is not an authorization. `JwtStrategy.validate()` asks two more
+   * questions on every REST request — is this account still ACTIVE and not
+   * deleted, is the session this token names still live — and until the handshake
+   * asked them too, "log out everywhere" and an admin revocation left the socket
+   * connected and still receiving this account's invalidations for whatever
+   * minutes the access token had left.
+   */
+  describe("what the handshake asks beyond the signature", () => {
+    it("keeps a live session connected", async () => {
+      jwtService.verifyAsync.mockResolvedValue({
+        sub: "user-uuid-123",
+        sessionId: "session-1",
+      });
+
+      await gateway.handleConnection(mockClient);
+
+      expect(usersService.getUserById).toHaveBeenCalledWith("user-uuid-123");
+      expect(usersService.isSessionLive).toHaveBeenCalledWith(
+        "user-uuid-123",
+        "session-1",
+      );
+      expect(mockClient.join).toHaveBeenCalledWith("user:user-uuid-123");
+      expect(mockClient.disconnect).not.toHaveBeenCalled();
+    });
+
+    it("disconnects a revoked session", async () => {
+      jwtService.verifyAsync.mockResolvedValue({
+        sub: "user-uuid-123",
+        sessionId: "session-gone",
+      });
+      usersService.isSessionLive.mockResolvedValue(false);
+
+      await gateway.handleConnection(mockClient);
+
+      expect(mockClient.disconnect).toHaveBeenCalledWith(true);
+      expect(mockClient.join).not.toHaveBeenCalled();
+    });
+
+    it("disconnects an account that is no longer ACTIVE", async () => {
+      usersService.getUserById.mockResolvedValue({
+        ...ACTIVE_USER,
+        status: "SUSPENDED",
+      });
+
+      await gateway.handleConnection(mockClient);
+
+      expect(mockClient.disconnect).toHaveBeenCalledWith(true);
+      expect(mockClient.join).not.toHaveBeenCalled();
+    });
+
+    it("disconnects an account that is gone, however `getUserById` says so", async () => {
+      // `UsersService.getUserById()` filters soft-deleted rows to `null` because
+      // MongoDB will not match an absent `deletedAt`; the `deletedAt` branch is
+      // the same answer from a read that did not filter. Both refuse the socket.
+      usersService.getUserById.mockResolvedValueOnce(null);
+      await gateway.handleConnection(mockClient);
+      expect(mockClient.disconnect).toHaveBeenCalledWith(true);
+
+      mockClient.disconnect.mockClear();
+      usersService.getUserById.mockResolvedValueOnce({
+        ...ACTIVE_USER,
+        deletedAt: new Date(),
+      });
+      await gateway.handleConnection(mockClient);
+      expect(mockClient.disconnect).toHaveBeenCalledWith(true);
+      expect(mockClient.join).not.toHaveBeenCalled();
+    });
+
+    it("still admits a token that names no session", async () => {
+      // Tokens minted before sessions were stamped, and the paths that use them,
+      // are `JwtStrategy`'s documented pass-through. A handshake that asked the
+      // liveness question of a token with no answer would lock out devices that
+      // did nothing wrong.
+      jwtService.verifyAsync.mockResolvedValue({
+        sub: "user-uuid-123",
+        deviceId: "device-uuid-456",
+      });
+
+      await gateway.handleConnection(mockClient);
+
+      expect(usersService.getUserById).toHaveBeenCalled();
+      expect(usersService.isSessionLive).not.toHaveBeenCalled();
+      expect(mockClient.join).toHaveBeenCalledWith("user:user-uuid-123");
+      expect(mockClient.disconnect).not.toHaveBeenCalled();
+    });
+
+    it("reads the session claim from whichever name carries it", async () => {
+      jwtService.verifyAsync.mockResolvedValue({
+        sub: "user-uuid-123",
+        sid: "session-2",
+      });
+
+      await gateway.handleConnection(mockClient);
+
+      expect(usersService.isSessionLive).toHaveBeenCalledWith(
+        "user-uuid-123",
+        "session-2",
+      );
+      expect(mockClient.disconnect).not.toHaveBeenCalled();
+    });
+
+    it("refuses the socket rather than skipping a revalidation it could not run", async () => {
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          SyncGateway,
+          { provide: JwtService, useValue: jwtService },
+          { provide: ConfigurationService, useValue: configService },
+        ],
+      }).compile();
+
+      const withoutUsers = module.get<SyncGateway>(SyncGateway);
+      withoutUsers.server = mockServer;
+
+      await withoutUsers.handleConnection(mockClient);
+
+      // Failing closed is the point: a graph that lost `UsersModule` would
+      // otherwise keep the old signature-only behaviour with no symptom at all.
+      expect(mockClient.disconnect).toHaveBeenCalledWith(true);
+      expect(mockClient.join).not.toHaveBeenCalled();
+    });
+
+    it("disconnects when the account lookup itself fails", async () => {
+      usersService.getUserById.mockRejectedValue(new Error("db down"));
+
+      await gateway.handleConnection(mockClient);
+
+      expect(mockClient.disconnect).toHaveBeenCalledWith(true);
+      expect(mockClient.join).not.toHaveBeenCalled();
+    });
+
+    it("logs the reason for a refusal and never the credential", async () => {
+      const warned = jest
+        .spyOn(Logger.prototype, "warn")
+        .mockImplementation(() => undefined);
+      jwtService.verifyAsync.mockResolvedValue({
+        sub: "user-uuid-123",
+        sessionId: "session-gone",
+      });
+      usersService.isSessionLive.mockResolvedValue(false);
+
+      await gateway.handleConnection(mockClient);
+
+      const logged = warned.mock.calls.map((call) => call.join(" ")).join("\n");
+      expect(logged).toContain("Session has been revoked");
+      expect(logged).not.toContain("valid-token");
+      warned.mockRestore();
     });
   });
 
@@ -159,6 +327,17 @@ describe("SyncGateway", () => {
         }),
       );
       expect(mockClient.emit).not.toHaveBeenCalled();
+    });
+
+    it("is a no-op before the server is bound", () => {
+      const unbound = Object.assign(mockClient, {});
+      void unbound;
+      gateway.server = undefined as any;
+
+      expect(() =>
+        gateway.notifySyncInvalidation("user-uuid-123", "device-uuid-456", "7"),
+      ).not.toThrow();
+      expect(broadcastEmit).not.toHaveBeenCalled();
     });
   });
 });

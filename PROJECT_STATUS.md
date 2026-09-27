@@ -119,7 +119,7 @@ npm install
 
 # 5. Set up database
 npm run db:generate
-npm run db:migrate
+npm run db:push
 
 # 6. Start development server
 npm run start:dev
@@ -155,14 +155,12 @@ allinone-backend/
 │
 ├── prisma/
 │   ├── schema.prisma              # Database schema ✓
-│   ├── migrations/                # Database migrations
 │   └── seed.ts                    # Test data seeding
 │
 ├── infrastructure/
 │   ├── prometheus/                # Metrics config
 │   ├── grafana/                   # Dashboard config
-│   ├── caddy/                     # Reverse proxy
-│   └── postgres/                  # Database backup
+│   └── caddy/                     # Reverse proxy
 │
 ├── scripts/
 │   ├── backup-database.sh         # Automated backups
@@ -208,7 +206,7 @@ Service (Business Logic)
     ↓
 Repository/Prisma (Database)
     ↓
-PostgreSQL
+MongoDB
     ↓
 Response Mapping
     ↓
@@ -222,7 +220,7 @@ Caddy (Reverse Proxy with HTTPS)
 NestJS API (Multiple instances)
    ↓
 ┌─────────────────────────────┐
-│  PostgreSQL  Redis  MinIO   │
+│   MongoDB    Redis  MinIO   │
 └─────────────────────────────┘
    ↓
 Prometheus & Grafana (Monitoring)
@@ -270,7 +268,7 @@ Prometheus & Grafana (Monitoring)
 | **Backend** | Node.js 20 LTS | MIT |
 | **Framework** | NestJS | MIT |
 | **Language** | TypeScript 5.3 | Apache 2.0 |
-| **Database** | PostgreSQL 16 | PostgreSQL |
+| **Database** | MongoDB 7.0 | Server Side Public License |
 | **Cache** | Redis 7 | BSD |
 | **Job Queue** | BullMQ | MIT |
 | **ORM** | Prisma | Apache 2.0 |
@@ -290,7 +288,7 @@ Prometheus & Grafana (Monitoring)
 - Project structure
 - TypeScript configuration
 - NestJS setup
-- PostgreSQL & Prisma
+- MongoDB & Prisma
 - Logging & error handling
 - Health checks
 - OpenAPI documentation
@@ -383,13 +381,13 @@ Prometheus & Grafana (Monitoring)
 ### Development
 ```bash
 APP_ENV=development
-SQLITE_URL=postgresql://allinone:allinone@localhost:5432/allinone_dev
+DATABASE_URL=mongodb://localhost:27017/allinone_dev
 ```
 
 ### Production
 ```bash
 APP_ENV=production
-DATABASE_URL=postgresql://user:pass@postgres:5432/allinone_prod
+DATABASE_URL=mongodb://mongodb:27017/allinone_prod
 JWT_ACCESS_SECRET=<generate with openssl>
 JWT_REFRESH_SECRET=<generate with openssl>
 ENCRYPTION_KEY=<generate with openssl>
@@ -433,18 +431,19 @@ npm run lint && npm run typecheck && npm run test
 - OpenAPI/Swagger integration
 - Excellent for production systems
 
-### Why PostgreSQL?
-- ACID transactions
-- Full-text search support
-- JSON/JSONB columns
-- Window functions
-- Mature & battle-tested
+### Why MongoDB?
+- Document-shaped storage for notes, tasks and sync payloads
+- Self-hosted with the rest of the stack, no paid dependency
+- Multi-document `$transaction` via the `rs0` replica set both compose files start
+
+The consequences of not running SQL — no foreign keys, no autoincrement, bounded
+transaction size — are recorded in [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ### Why Prisma?
 - Type-safe queries
 - Auto-generated types
 - Visual database browser
-- Easy migrations
+- Schema changes via `prisma db push` — Migrate does not support the `mongodb` provider
 - Good relationship handling
 
 ---

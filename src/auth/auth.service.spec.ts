@@ -131,6 +131,11 @@ describe("AuthService", () => {
     configService = {
       jwtAccessSecret: "access-secret",
       jwtRefreshSecret: "refresh-secret",
+      // Not 900 / 604800, the two literals this file used to have no way to
+      // contradict: standing in for `JWT_ACCESS_EXPIRATION=1h` and
+      // `JWT_REFRESH_EXPIRATION=1d` so a leftover literal is visible.
+      jwtAccessExpiresInSeconds: 3600,
+      jwtRefreshExpiresInSeconds: 86400,
       emailVerifyEnabled: false,
       googleClientId: "google-client-id",
     };
@@ -442,6 +447,50 @@ describe("AuthService", () => {
         expect.arrayContaining([
           expect.objectContaining({ sub: mockUser.id, sessionId: stored.id }),
         ]),
+      );
+    });
+
+    it("mints, reports and stores one access lifetime rather than three", async () => {
+      prismaService.authentication.findFirst.mockResolvedValue({
+        ...validAuthRecord,
+        user: { ...mockUser, failedLoginAttempts: 0, lockedUntil: null },
+      });
+      (argon2.verify as jest.Mock).mockResolvedValue(true);
+
+      await service.login({
+        email: "test@example.com",
+        password: "CorrectPassword123!",
+      });
+
+      // The lifetime used to be stated three times over — the `sign()` option,
+      // the `expiresIn` the client counts down, and the session row's
+      // `accessExpiresAt` — all as literals, while `JWT_ACCESS_EXPIRATION`
+      // appeared in `.env.example` and in both Joi schemas and reached none of
+      // them. A deployment that set an hour went on issuing a 900-second
+      // promise for a 15-minute token, and the session row said something third.
+      const signOptions = jwtService.sign.mock.calls.map(
+        (call: any[]) => call[1],
+      );
+      expect(signOptions[0]).toEqual(
+        expect.objectContaining({ expiresIn: 3600 }),
+      );
+      expect(signOptions[1]).toEqual(
+        expect.objectContaining({ expiresIn: 86400 }),
+      );
+
+      const stored = prismaService.session.create.mock.calls.at(-1)[0].data;
+      const minute = 60 * 1000;
+      expect(stored.accessExpiresAt.getTime()).toBeGreaterThan(
+        Date.now() + 59 * minute,
+      );
+      expect(stored.accessExpiresAt.getTime()).toBeLessThan(
+        Date.now() + 61 * minute,
+      );
+      expect(stored.refreshExpiresAt.getTime()).toBeGreaterThan(
+        Date.now() + 23 * 60 * minute,
+      );
+      expect(stored.refreshExpiresAt.getTime()).toBeLessThan(
+        Date.now() + 25 * 60 * minute,
       );
     });
 

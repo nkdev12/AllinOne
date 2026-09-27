@@ -27,7 +27,11 @@ import { JwtAuthGuard } from "./guards/jwt-auth.guard";
       useFactory: async (configService: ConfigurationService) => ({
         secret: configService.jwtAccessSecret,
         signOptions: {
-          expiresIn: "15m",
+          // Every `sign()` in `AuthService` names its own lifetime, so this
+          // default governs only a call that forgets to — which is exactly the
+          // way a hardcoded "15m" here would come to disagree with
+          // `JWT_ACCESS_EXPIRATION` without anyone noticing.
+          expiresIn: configService.jwtAccessExpiresInSeconds,
         },
       }),
       inject: [ConfigurationService],

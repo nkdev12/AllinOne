@@ -72,6 +72,40 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
         JWT_REFRESH_SECRET: Joi.string().required(),
         JWT_REFRESH_EXPIRATION: Joi.string().default("7d"),
 
+        // Admin access (AdminGuard). Optional and with NO default on purpose:
+        // unset or empty means the corresponding admit path is closed, so a
+        // deployment that never provisions these simply has no admin API.
+        // ConfigurationService enforces the ADMIN_SECRET length floor.
+        ADMIN_EMAILS: Joi.string().allow("").optional(),
+        ADMIN_USER_IDS: Joi.string().allow("").optional(),
+        ADMIN_SECRET: Joi.string().allow("").optional(),
+
+        // Cross-origin policy. `CORS_ORIGIN` answers the HTTP app's
+        // `enableCors()`; the `WS_*` keys answer the `/sync` namespace, which
+        // `SyncIoAdapter` builds from configuration at boot
+        // (`src/sync/adapters/sync-io.adapter.ts`). Declared so the surface
+        // exists in the same place the other transport settings do — the real
+        // documentation is `.env.example`, since `allowUnknown` means a typo
+        // here is not what catches it.
+        //
+        // `WS_CORS_ALLOW_NULL_ORIGIN` and `WS_REDIS_ADAPTER` stay strings
+        // rather than `Joi.boolean()` because the adapter parses the truthy
+        // spellings itself (`true`/`1`/`yes`/`on`) and a boolean here would
+        // reject values the code supports.
+        CORS_ORIGIN: Joi.string().allow("").optional(),
+        WS_CORS_ORIGINS: Joi.string().allow("").optional(),
+        WS_CORS_ALLOW_NULL_ORIGIN: Joi.string().allow("").optional(),
+        WS_REDIS_ADAPTER: Joi.string().allow("").optional(),
+
+        // AI summarization (Google Gemini). Optional and opt-in like the admin
+        // keys: a missing or blank GEMINI_API_KEY leaves AiService on its
+        // deterministic heuristics and no request is ever sent. The model and
+        // timeout defaults mirror src/ai/gemini.client.ts, which still re-checks
+        // each value itself, so a blank or non-positive setting cannot break it.
+        GEMINI_API_KEY: Joi.string().allow("").optional(),
+        GEMINI_MODEL: Joi.string().default("gemini-1.5-flash"),
+        GEMINI_TIMEOUT_MS: Joi.number().default(5000),
+
         // Object Storage
         OBJECT_STORAGE_ENDPOINT: Joi.string().required(),
         OBJECT_STORAGE_REGION: Joi.string().default("us-east-1"),
@@ -79,7 +113,6 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
         OBJECT_STORAGE_ACCESS_KEY: Joi.string().required(),
         OBJECT_STORAGE_SECRET_KEY: Joi.string().required(),
         OBJECT_STORAGE_USE_SSL: Joi.boolean().default(false),
-
 
         // Encryption
         ENCRYPTION_KEY: Joi.string().min(32).required(),

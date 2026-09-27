@@ -56,7 +56,7 @@ export class ChangeItemDto {
   @ApiProperty({
     example: { title: "My Note", content: "Hello World" },
     description:
-      "Document for note, task, event, habit and habit_log. A note CREATE/UPDATE must carry {title, content} — title a string, content a string or null — and may carry createdAt as a string, because a device applies an absent key as nothing; a habit must carry all fourteen of the columns a device overwrites from it, and a habit_log {habitId, day, amount, note, completedAt}; a vault_item UPDATE/CREATE must carry {type, encryptedData, iv, authTag, isEncrypted} with the same key names the client encrypts under. A DELETE is exempt from all of them: it announces an end rather than a body.",
+      "Document for note, task, event, habit and habit_log. A note CREATE/UPDATE must carry {title, content} — title a string, content a string or null — and may carry createdAt (a string), tags (a list of strings or null) and color (a string or null), which a device that has not learned the last two simply omits; a habit must carry all fourteen of the columns a device overwrites from it, and a habit_log {habitId, day, amount, note, completedAt}; a vault_item UPDATE/CREATE must carry {type, encryptedData, iv, authTag, isEncrypted} with the same key names the client encrypts under. A DELETE is exempt from all of them: it announces an end rather than a body.",
   })
   @IsObject()
   payload!: Record<string, any>;

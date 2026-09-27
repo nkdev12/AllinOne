@@ -246,13 +246,18 @@ const HABIT_LOG_FIELDS: ReadonlyArray<DocumentField> = [
 ];
 
 /**
- * The three keys `SyncManager._apply` reads off a note change, which is the
- * whole of what a note payload means to a device.
+ * The keys `SyncManager._apply` reads off a note change.
  *
- * The client stringifies whatever it finds (`_text`, `sync_manager.dart:596`),
- * so the two ways a note payload can be wrong are *absent* and *not text*: an
- * absent `content` arrives as an emptied body on every other device, and a
- * number arrives as its digits, permanently.
+ * `title` and `content` are the whole of what a note payload used to mean to a
+ * device, and the client stringifies whatever it finds (`_text`,
+ * `sync_manager.dart:596`), so the two ways those can be wrong are *absent* and
+ * *not text*: an absent `content` arrives as an emptied body on every other
+ * device, and a number arrives as its digits, permanently.
+ *
+ * `tags` and `color` join them as keys a device may not have learned to send
+ * yet, which is why neither is `required`. A phone on the old build keeps
+ * pushing `{title, content}` and must not be refused for it, so the rule here is
+ * only that a key which *is* present has to be a value the column can hold.
  */
 const NOTE_FIELDS: ReadonlyArray<DocumentField> = [
   {
@@ -273,6 +278,26 @@ const NOTE_FIELDS: ReadonlyArray<DocumentField> = [
   {
     // Only a CREATE has a birth to announce; a later edit carries none.
     key: "createdAt",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "a string or null",
+  },
+  {
+    // A device that has not met the field sends neither form, and both a null
+    // and an empty list mean "this note carries no labels" — so only a value of
+    // the wrong kind is a violation. Anything not a list of strings would land
+    // as a tag whose name is "[object Object]" on every device, unsent-able.
+    key: "tags",
+    required: false,
+    accepts: (value) =>
+      value === null ||
+      (Array.isArray(value) && value.every((tag) => typeof tag === "string")),
+    expected: "a list of strings or null",
+  },
+  {
+    // The hex is the client's to choose; a colour is a string column or nothing,
+    // the same latitude `Folder.color` and a habit's colour are given.
+    key: "color",
     required: false,
     accepts: (value) => value === null || typeof value === "string",
     expected: "a string or null",

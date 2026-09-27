@@ -1,6 +1,19 @@
 const fs = require('fs');
 const path = require('path');
 
+// One-off PostgreSQL -> MongoDB doc sweep left over from commit 538cc50, already
+// applied. Its unconditional s/PostgreSQL/MongoDB/g would also rewrite the
+// deliberate annotations in ARCHITECTURE.md, DEPLOYMENT.md and
+// DISASTER_RECOVERY.md, turning "no PostgreSQL in this deployment" into a false
+// claim, so it now refuses to run unless forced.
+if (process.env.RUN_ONE_OFF !== '1') {
+  console.error(
+    'scripts/update_other_docs.js is a completed one-off migration and will not run.\n' +
+      'Set RUN_ONE_OFF=1 only if you mean to re-apply the blanket replacement.'
+  );
+  process.exit(1);
+}
+
 const dir = path.join(__dirname, '..');
 
 function replaceInFile(filePath) {

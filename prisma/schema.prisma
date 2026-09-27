@@ -47,6 +47,10 @@ model User {
   vaultSetting      VaultSetting?
   emailVerificationOtp EmailVerificationOtp?
   otpTokens        OtpToken[]
+  // Collaboration grants: the resources this account shares out, and the ones it
+  // was given access to. Back-relations for `ResourceShare`.
+  ownedShares       ResourceShare[] @relation("ResourceShareOwner")
+  receivedShares    ResourceShare[] @relation("ResourceShareGrantee")
 
   @@index([status])
   @@index([createdAt])
@@ -322,6 +326,12 @@ enum AuditAction {
   ACCOUNT_UNLOCKED
   OAUTH_CONNECTED
   OAUTH_REVOKED
+  // Collaboration grants. `/collaboration` used to borrow DEVICE_ADDED /
+  // DEVICE_REVOKED because this enum had no share member, which made every SIEM
+  // query for device enrolment drag in resource shares too. Additive, so rows
+  // already written keep their old values; the enum is plain strings on MongoDB.
+  RESOURCE_SHARED
+  RESOURCE_SHARE_REVOKED
 }
 
 // ============================================================================
@@ -376,6 +386,19 @@ model Note {
   isPinned    Boolean  @default(false)
   isArchived  Boolean  @default(false)
   isEncrypted Boolean  @default(false)
+  // The desktop client's own label list and highlight colour, kept under exactly
+  // the key names the client's Isar schema and `toMap()` write, because a sync
+  // payload is matched by name and renaming one loses the user's tags.
+  //
+  // `tags` is a list of bare strings rather than the normalised `NoteTag` join
+  // this row also carries: a device typing a label into the note has no tag UUID
+  // to point at, so the join cannot hold what it sends. The two are different
+  // state and neither is derived from the other.
+  //
+  // Both read back safely on rows written before they existed: a list defaults to
+  // empty, and `color` is nullable, so no document has to be rewritten.
+  tags        String[] @default([])
+  color       String?
   version     Int      @default(1)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -721,4 +744,60 @@ model VaultSetting {
 
   // Relations
   user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ============================================================================
+// Collaboration & Resource Sharing
+// ============================================================================
+
+enum ShareRole {
+  VIEWER
+  EDITOR
+  ADMIN
+}
+
+enum ShareResourceType {
+  NOTE
+  PROJECT
+  CALENDAR
+}
+
+// One role granted on one resource to one recipient.
+//
+// This row is the reason `/collaboration` can carry collaboration at all: the
+// service kept grants in `private readonly shares = new Map()` — process memory,
+// lost on every restart, invisible to other workers, and with nothing but an
+// audit-log entry as a trace. `sharedWithUserId` is required, which is the schema
+// refusing the old email-only invite: a grant with no user behind it can never be
+// matched by `checkAccess(userId, …)` and silently granted nothing.
+//
+// `resourceType`/`resourceId` is polymorphic (note, project, calendar), so the
+// resource side cannot carry a foreign key and is resolved by the service before
+// a grant is written. The two user sides can, and do.
+model ResourceShare {
+  id               String            @id @default(uuid()) @map("_id")
+  resourceType     ShareResourceType
+  resourceId       String
+  ownerId          String
+  sharedWithUserId String
+  sharedWithEmail  String
+  role             ShareRole         @default(VIEWER)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  deletedAt        DateTime?
+
+  // Relations
+  owner            User              @relation("ResourceShareOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  sharedWith       User              @relation("ResourceShareGrantee", fields: [sharedWithUserId], references: [id], onDelete: Cascade)
+
+  // The duplicate-share rule, enforced where two racing requests can both lose
+  // or both win: the service used to `find` over the map first, and nothing
+  // stopped concurrent callers from both missing. Revoked grants keep their row
+  // (`deletedAt`), so a collision on this key is read back by the service and
+  // either revived — a re-share with the same person — or answered with `409`.
+  @@unique([resourceType, resourceId, sharedWithEmail])
+  @@index([resourceType, resourceId])
+  @@index([sharedWithUserId])
+  @@index([sharedWithEmail])
+  @@index([ownerId])
 }

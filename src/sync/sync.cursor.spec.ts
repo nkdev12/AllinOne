@@ -3,6 +3,7 @@ import { BadRequestException } from "@nestjs/common";
 import { ChangeOperation } from "@prisma/client";
 import { SyncService } from "./sync.service";
 import { SyncGateway } from "./sync.gateway";
+import { SyncNotificationService } from "./sync-notification.service";
 import { appendChange } from "./change-cursor";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { ErrorCode } from "@/common/errors/error-code";
@@ -197,6 +198,10 @@ describe("SyncService change cursor", () => {
         SyncService,
         { provide: PrismaService, useValue: fake },
         { provide: SyncGateway, useValue: gateway },
+        // The real notifier around the gateway double: `SyncService` now sends
+        // its wake-up through the same choke point the REST write paths use, and
+        // the assertion below is about what reached the socket either way.
+        SyncNotificationService,
       ],
     }).compile();
 

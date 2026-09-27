@@ -768,8 +768,12 @@ export class AuthService {
         session.id,
       );
 
-      const accessExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
-      const refreshExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      const accessExpiresAt = new Date(
+        Date.now() + this.configService.jwtAccessExpiresInSeconds * 1000,
+      );
+      const refreshExpiresAt = new Date(
+        Date.now() + this.configService.jwtRefreshExpiresInSeconds * 1000,
+      );
 
       await this.prisma.session.update({
         where: { id: session.id },
@@ -1337,20 +1341,25 @@ export class AuthService {
   ): Promise<AuthTokenDataDto> {
     const payload = { sub: userId, email, ...(sessionId ? { sessionId } : {}) };
 
+    // The seconds form, not the `JWT_*_EXPIRATION` string, goes to `sign()`:
+    // then the `exp` stamped into the token and the `expiresIn` handed back for
+    // the client to count down are the same number, and the only interpretation
+    // of "15m" in the request path is the parser's. One setting, one decision,
+    // three places that read it.
     const accessToken = this.jwtService.sign(payload, {
       secret: this.configService.jwtAccessSecret,
-      expiresIn: "15m",
+      expiresIn: this.configService.jwtAccessExpiresInSeconds,
     });
 
     const refreshToken = this.jwtService.sign(payload, {
       secret: this.configService.jwtRefreshSecret,
-      expiresIn: "7d",
+      expiresIn: this.configService.jwtRefreshExpiresInSeconds,
     });
 
     return {
       accessToken,
       refreshToken,
-      expiresIn: 900,
+      expiresIn: this.configService.jwtAccessExpiresInSeconds,
     };
   }
 
@@ -1371,8 +1380,14 @@ export class AuthService {
   }): Promise<{ tokens: AuthTokenDataDto; session: Session }> {
     const id = crypto.randomUUID();
     const tokens = await this.generateTokens(data.userId, data.email, id);
-    const accessExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
-    const refreshExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    // Derived from the same settings that minted the tokens above, so the row
+    // cannot claim a lifetime the credential it stores does not have.
+    const accessExpiresAt = new Date(
+      Date.now() + this.configService.jwtAccessExpiresInSeconds * 1000,
+    );
+    const refreshExpiresAt = new Date(
+      Date.now() + this.configService.jwtRefreshExpiresInSeconds * 1000,
+    );
 
     const session = await this.prisma.session.create({
       data: {

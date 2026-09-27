@@ -29,6 +29,11 @@ describe("NotesService", () => {
     isPinned: false,
     isArchived: false,
     isEncrypted: false,
+    // The scalar label list and highlight colour, as the row holds them. Kept
+    // distinct from `noteTags` below on purpose: one is the client's strings, the
+    // other the account's `Tag` records, and the sync payload carries the first.
+    tags: ["reading", "someday"],
+    color: "#FFD54F",
     version: 1,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -281,10 +286,12 @@ describe("NotesService", () => {
         // the stored body rather than whatever the request happened to carry.
         content: "Initial Content",
         createdAt: mockNote.createdAt.toISOString(),
+        tags: ["reading", "someday"],
+        color: "#FFD54F",
       });
     });
 
-    it("says the same three things at create as the oplog path does", async () => {
+    it("says the same five things at create as the oplog path does", async () => {
       await service.createNote(userId, {
         title: "New Note",
         content: "Content",
@@ -292,8 +299,10 @@ describe("NotesService", () => {
       });
 
       expect(Object.keys(logged()).sort()).toEqual([
+        "color",
         "content",
         "createdAt",
+        "tags",
         "title",
       ]);
     });
@@ -333,8 +342,41 @@ describe("NotesService", () => {
         title: "Updated Title",
         content: "Initial Content",
         createdAt: mockNote.createdAt.toISOString(),
+        tags: ["reading", "someday"],
+        color: "#FFD54F",
         restoredFromVersion: 1,
       });
+    });
+  });
+
+  describe("the label list and colour on the row", () => {
+    /** The `data` object the last `note.update` was handed. */
+    const written = () => prismaService.note.update.mock.calls.at(-1)[0].data;
+
+    it("says nothing about either column on an edit that named neither", async () => {
+      await service.updateNote(userId, noteId, {
+        title: "Renamed",
+        content: "Only the body changed",
+      });
+
+      // `undefined` is what Prisma reads as "leave this column as it is", which
+      // is the whole rule here: a client that edits `content` knows nothing about
+      // the note's labels, and defaulting the field to `[]` would erase them.
+      expect(written().tags).toBeUndefined();
+      expect(written().color).toBeUndefined();
+    });
+
+    it("writes both when the caller names them, and clears on the empty list", async () => {
+      await service.updateNote(userId, noteId, {
+        content: "body",
+        tags: [],
+        color: "#FFD54F",
+      });
+
+      // An empty list is a value the user arrived at, not silence, so it does
+      // reach the column.
+      expect(written().tags).toEqual([]);
+      expect(written().color).toBe("#FFD54F");
     });
   });
 
