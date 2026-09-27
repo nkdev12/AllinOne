@@ -1,5 +1,6 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { NotesService } from "./notes.service";
+import { CollaborationService } from "@/collaboration/collaboration.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { NotFoundException } from "@nestjs/common";
 import { ChangeOperation } from "@prisma/client";
@@ -47,8 +48,15 @@ describe("NotesService", () => {
   };
 
   beforeEach(async () => {
+    // Stateful on purpose: `appendChange` asks the counter for a cursor before
+    // it writes, and the number only means anything if the write after it gets
+    // a different one.
+    let seq = BigInt(0);
     prismaService = {
       $transaction: jest.fn((cb) => cb(prismaService)),
+      syncCursor: {
+        upsert: jest.fn(async () => ({ seq: ++seq })),
+      },
       folder: {
         findFirst: jest.fn().mockResolvedValue(mockFolder),
       },
@@ -190,6 +198,49 @@ describe("NotesService", () => {
     });
   });
 
+  describe("what a deleted note leaves in the log", () => {
+    const loggedRow = () =>
+      prismaService.change.create.mock.calls.at(-1)[0].data;
+
+    it("moves the note's own version, not only the number written beside it", async () => {
+      // The delete used to set `deletedAt` and leave `version` where it was,
+      // then log `version + 1` — so the log asserted a state no row could ever
+      // be read back at, and nothing on the read side could tell.
+      await service.deleteNote(userId, noteId);
+
+      expect(prismaService.note.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ version: { increment: 1 } }),
+        }),
+      );
+    });
+
+    it("logs the version the row answered with", async () => {
+      // A distinctive number on purpose: the shared mock returns version 2 for a
+      // note that was at 1, which is the very coincidence that kept the old
+      // arithmetic green. What has to be pinned is that the log quotes the
+      // entity rather than computing beside it.
+      prismaService.note.update.mockResolvedValue({
+        ...mockNote,
+        deletedAt: new Date(),
+        version: 9,
+      });
+
+      await service.deleteNote(userId, noteId);
+
+      expect(loggedRow().version).toBe(9);
+    });
+
+    it("says nothing in the payload that the row already says", async () => {
+      await service.deleteNote(userId, noteId);
+
+      // `{ id: noteId }` was a third shape under one `entityType`, next to the
+      // oplog path's `{}`. `entityId` is on the Change itself, and a device
+      // writing a tombstone reads no key out of a delete's payload.
+      expect(loggedRow().payload).toEqual({});
+    });
+  });
+
   describe("restoreNoteHistory", () => {
     it("should restore note content from snapshot history", async () => {
       const result = await service.restoreNoteHistory(
@@ -205,6 +256,205 @@ describe("NotesService", () => {
           data: expect.objectContaining({ operation: ChangeOperation.RESTORE }),
         }),
       );
+    });
+  });
+
+  describe("the note payload a device reads back", () => {
+    /**
+     * The payload is the whole of what a `/sync/pull` hands a device for a
+     * `note`, and the device rebuilds its row from these keys — so asserting
+     * `operation` alone, as the four tests above do, is what let a payload with
+     * no `content` in it stay green while every other device blanked the note.
+     */
+    const logged = () =>
+      prismaService.change.create.mock.calls.at(-1)[0].data.payload;
+
+    it("carries the body, not only the title it was edited alongside", async () => {
+      await service.updateNote(userId, noteId, {
+        title: "Updated Title",
+        content: "The text the user actually typed",
+      });
+
+      expect(logged()).toEqual({
+        title: "Updated Title",
+        // `note.update` is mocked to the row Prisma would hand back, so this is
+        // the stored body rather than whatever the request happened to carry.
+        content: "Initial Content",
+        createdAt: mockNote.createdAt.toISOString(),
+      });
+    });
+
+    it("says the same three things at create as the oplog path does", async () => {
+      await service.createNote(userId, {
+        title: "New Note",
+        content: "Content",
+        folderId,
+      });
+
+      expect(Object.keys(logged()).sort()).toEqual([
+        "content",
+        "createdAt",
+        "title",
+      ]);
+    });
+
+    it("leaves the device's own arrangement of the note out of the log", async () => {
+      await service.updateNote(userId, noteId, {
+        title: "Updated Title",
+        isPinned: true,
+        isArchived: true,
+        folderId,
+      });
+
+      // Pin, archive and folder are this device's business: the Flutter client
+      // never puts them on the wire, has no column left for `isEncrypted`, and
+      // reading them off a payload that had no such key used to clear a user's
+      // pin on every remote edit. Logging them here would say the server knows
+      // something a device cannot be told.
+      expect(logged()).not.toHaveProperty("isPinned");
+      expect(logged()).not.toHaveProperty("isArchived");
+      expect(logged()).not.toHaveProperty("isEncrypted");
+      expect(logged()).not.toHaveProperty("folderId");
+      // The entity still keeps them — this is about the log, not the row.
+      expect(prismaService.note.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ isPinned: true, isArchived: true }),
+        }),
+      );
+    });
+
+    it("keeps a restore's provenance beside the shape, not instead of it", async () => {
+      await service.restoreNoteHistory(userId, noteId, "history-uuid-1");
+
+      expect(logged()).toEqual({
+        // The mocked `note.update` hands back its own row, and that row is
+        // what the log records — the same rule the create and edit paths
+        // follow.
+        title: "Updated Title",
+        content: "Initial Content",
+        createdAt: mockNote.createdAt.toISOString(),
+        restoredFromVersion: 1,
+      });
+    });
+  });
+
+  describe("the cursor a logged note change carries", () => {
+    const cursorOf = (call: number) =>
+      prismaService.change.create.mock.calls[call][0].data.cursor;
+
+    it("numbers each write above the one before it", async () => {
+      await service.createNote(userId, { title: "New Note" });
+      await service.updateNote(userId, noteId, { title: "Updated Title" });
+
+      // Not tidiness: the schema default is 0 and a pull asks for
+      // `cursor > <this device's checkpoint>`, so a change written without a
+      // number is invisible to every device that has synced once — permanently,
+      // and indistinguishably from one it has already been given.
+      expect(cursorOf(0)).toEqual(BigInt(1));
+      expect(cursorOf(1)).toEqual(BigInt(2));
+    });
+
+    it("numbers the delete as carefully as the edit", async () => {
+      // A delete behind a checkpoint is not a missed event, it is a note that
+      // comes back on the device that never heard about it.
+      await service.deleteNote(userId, noteId);
+
+      expect(cursorOf(0)).toEqual(BigInt(1));
+    });
+  });
+
+  /**
+   * The sharing fallbacks in `NotesService` are injected `@Optional()`, and a
+   * unit module has no global scope to inherit — so the collaborator is
+   * provided here by hand. In the running app it is never absent:
+   * `CollaborationModule` is `@Global()` and `AppModule` imports it, which makes
+   * its export visible to every module without one importing it. What these
+   * tests are for is that the branch had never been exercised at all, which is
+   * exactly how it came to be read as dead code.
+   */
+  describe("a note somebody else shared", () => {
+    let shared: NotesService;
+    let collaboration: { checkAccess: jest.Mock };
+
+    beforeEach(async () => {
+      collaboration = {
+        checkAccess: jest.fn().mockResolvedValue({ hasAccess: true }),
+      };
+
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          NotesService,
+          { provide: PrismaService, useValue: prismaService },
+          { provide: CollaborationService, useValue: collaboration },
+        ],
+      }).compile();
+
+      shared = module.get<NotesService>(NotesService);
+    });
+
+    it("is read as the owner's row, once the share says yes", async () => {
+      // The first read is the ordinary one and misses; the second is the
+      // fallback, and it names no owner by design — the note belongs to
+      // somebody else. Pinned both ways because an unscoped read is the one
+      // thing here that must never be reachable without the answer above it.
+      prismaService.note.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(mockNote);
+
+      const result = await shared.getNoteById(userId, noteId);
+
+      expect(result.id).toBe(noteId);
+      expect(collaboration.checkAccess).toHaveBeenCalledWith(
+        userId,
+        undefined,
+        "NOTE",
+        noteId,
+        "VIEWER",
+      );
+      expect(prismaService.note.findFirst.mock.calls[0][0].where.userId).toBe(
+        userId,
+      );
+      expect(
+        prismaService.note.findFirst.mock.calls.at(-1)[0].where,
+      ).not.toHaveProperty("userId");
+    });
+
+    it("asks for the EDITOR role before a write goes through the share", async () => {
+      prismaService.note.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(mockNote);
+
+      await shared.updateNote(userId, noteId, {
+        title: "Renamed by the editor",
+      });
+
+      // A reader's permission must not be what an edit is checked against.
+      // Which roles outrank which is `CollaborationService`'s business; that
+      // this path asks the stronger question is this one's.
+      expect(collaboration.checkAccess).toHaveBeenCalledWith(
+        userId,
+        undefined,
+        "NOTE",
+        noteId,
+        "EDITOR",
+      );
+      expect(prismaService.note.update).toHaveBeenCalled();
+    });
+
+    it("is still not found when the share says no", async () => {
+      collaboration.checkAccess.mockResolvedValue({ hasAccess: false });
+      prismaService.note.findFirst.mockResolvedValue(null);
+
+      await expect(shared.getNoteById(userId, noteId)).rejects.toThrow(
+        NotFoundException,
+      );
+      await expect(
+        shared.updateNote(userId, noteId, { title: "Not yours" }),
+      ).rejects.toThrow(NotFoundException);
+      // The 404 is the same answer a note that does not exist gives, which is
+      // the point: probing for somebody else's ids learns nothing.
+      expect(prismaService.note.update).not.toHaveBeenCalled();
+      expect(prismaService.change.create).not.toHaveBeenCalled();
     });
   });
 });

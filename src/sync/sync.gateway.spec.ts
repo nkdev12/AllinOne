@@ -8,6 +8,8 @@ describe("SyncGateway", () => {
   let jwtService: any;
   let configService: any;
   let mockClient: any;
+  let mockOtherClient: any;
+  let broadcastEmit: jest.Mock;
   let mockServer: any;
 
   beforeEach(async () => {
@@ -35,15 +37,33 @@ describe("SyncGateway", () => {
       emit: jest.fn(),
     };
 
+    // A second socket for the same account, on a different device: the case the
+    // invalidation exists for.
+    mockOtherClient = {
+      id: "socket-2",
+      handshake: { auth: {}, headers: {}, query: {} },
+      data: { userId: "user-uuid-123", deviceId: "device-uuid-777" },
+      join: jest.fn(),
+      disconnect: jest.fn(),
+      emit: jest.fn(),
+    };
+
+    broadcastEmit = jest.fn();
     mockServer = {
-      to: jest.fn().mockReturnValue({
-        emit: jest.fn(),
-      }),
+      to: jest.fn().mockReturnValue({ emit: broadcastEmit }),
       sockets: {
         adapter: {
-          rooms: new Map([["user:user-uuid-123", new Set(["socket-1"])]]),
+          rooms: new Map([
+            [
+              "user:user-uuid-123",
+              new Set([mockClient.id, mockOtherClient.id]),
+            ],
+          ]),
         },
-        sockets: new Map([["socket-1", mockClient]]),
+        sockets: new Map([
+          [mockClient.id, mockClient],
+          [mockOtherClient.id, mockOtherClient],
+        ]),
       },
     };
 
@@ -102,26 +122,43 @@ describe("SyncGateway", () => {
   });
 
   describe("notifySyncInvalidation", () => {
-    it("should broadcast sync:invalidation to user room", () => {
-      gateway.notifySyncInvalidation("user-uuid-123", undefined, "105");
+    it("sends one invalidation to the account room, payload and all", () => {
+      gateway.notifySyncInvalidation("user-uuid-123", "device-uuid-456", "105");
 
       expect(mockServer.to).toHaveBeenCalledWith("user:user-uuid-123");
-    });
-
-    it("should skip origin device when emitting invalidations", () => {
-      gateway.notifySyncInvalidation(
-        "user-uuid-123",
-        "other-device-789",
-        "105",
-      );
-
-      expect(mockClient.emit).toHaveBeenCalledWith(
+      expect(broadcastEmit).toHaveBeenCalledWith(
         "sync:invalidation",
         expect.objectContaining({
           userId: "user-uuid-123",
+          originDeviceId: "device-uuid-456",
           highestCursor: "105",
         }),
       );
+    });
+
+    it("delivers each invalidation once per device", () => {
+      // `server.to(room)` already reaches every socket of the account, origin
+      // included, so no socket may also be emitted to directly. A device that
+      // hears the event twice pulls twice, and nothing on the client can tell
+      // the second one from a change it has not seen yet.
+      gateway.notifySyncInvalidation("user-uuid-123", "device-uuid-456", "105");
+
+      expect(broadcastEmit).toHaveBeenCalledTimes(1);
+      expect(mockClient.emit).not.toHaveBeenCalled();
+      expect(mockOtherClient.emit).not.toHaveBeenCalled();
+    });
+
+    it("names the origin device in the payload rather than filtering sockets", () => {
+      gateway.notifySyncInvalidation("user-uuid-789");
+
+      expect(broadcastEmit).toHaveBeenCalledWith(
+        "sync:invalidation",
+        expect.objectContaining({
+          userId: "user-uuid-789",
+          highestCursor: "0",
+        }),
+      );
+      expect(mockClient.emit).not.toHaveBeenCalled();
     });
   });
 });

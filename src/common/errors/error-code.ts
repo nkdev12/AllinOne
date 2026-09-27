@@ -17,6 +17,7 @@ export enum ErrorCode {
   ACCOUNT_DISABLED = "ACCOUNT_DISABLED",
   TOKEN_INVALID = "TOKEN_INVALID",
   TOKEN_EXPIRED = "TOKEN_EXPIRED",
+  SESSION_REVOKED = "SESSION_REVOKED",
   OTP_INVALID = "OTP_INVALID",
   RATE_LIMITED = "RATE_LIMITED",
 
@@ -37,6 +38,11 @@ export enum ErrorCode {
 
   // Devices and sync
   DEVICE_NOT_REGISTERED = "DEVICE_NOT_REGISTERED",
+  // A device row exists, was revoked, and cannot sync again. Its own code rather
+  // than a second DEVICE_NOT_REGISTERED because a client can self-heal from one
+  // ("I have no row — get one") and must not from the other ("the row was
+  // revoked on purpose — minting a new one would undo somebody's decision").
+  DEVICE_REVOKED = "DEVICE_REVOKED",
   SYNC_PUSH_REJECTED = "SYNC_PUSH_REJECTED",
 
   // Entities

@@ -149,6 +149,23 @@ export class UsersService {
     });
   }
 
+  /**
+   * Whether the session a token names is still live.
+   *
+   * Read without a `revokedAt: null` filter on purpose: this runs on every
+   * authenticated request, and a filter that fails to match a document (which
+   * MongoDB makes possible when the field was never written) would log people
+   * out of a session that was never revoked. Absent, null and unset are all
+   * "not revoked" here; only a real timestamp means stop.
+   */
+  async isSessionLive(userId: string, sessionId: string): Promise<boolean> {
+    const session = await this.prisma.session.findFirst({
+      where: { id: sessionId, userId },
+    });
+
+    return Boolean(session && !session.revokedAt);
+  }
+
   async revokeUserSession(
     userId: string,
     sessionId: string,

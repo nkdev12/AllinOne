@@ -56,6 +56,7 @@ export class VaultSettingsController {
 
   @Post("unlock")
   @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   @ApiOperation({
     summary:
       "Verify master password authentication hash prior to client-side decryption",
@@ -64,7 +65,18 @@ export class VaultSettingsController {
     status: 200,
     description: "Master password verification succeeded",
   })
-  @ApiResponse({ status: 401, description: "Invalid verification hash" })
+  @ApiResponse({
+    status: 401,
+    description:
+      "Invalid verification hash (`VAULT_MASTER_KEY_MISMATCH`), or the vault is " +
+      "cooling down after repeated failures (`RATE_LIMITED`, with " +
+      "`details.retryInSeconds`). The cooldown refuses the right password too, " +
+      'so a client must not read this as "you mistyped it".',
+  })
+  @ApiResponse({
+    status: 404,
+    description: "The account has no vault yet (`VAULT_NOT_CONFIGURED`)",
+  })
   async unlockVault(
     @GetUser("id") userId: string,
     @Body() dto: UnlockVaultDto,
@@ -100,10 +112,25 @@ export class VaultSettingsController {
 
   @Post("recovery/complete")
   @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 3, ttl: 60000 } })
   @ApiOperation({
-    summary: "Store the re-keyed master password parameters after re-encryption",
+    summary:
+      "Store the re-keyed master password parameters after re-encryption",
   })
   @ApiResponse({ status: 200, description: "Vault master password rotated" })
+  @ApiResponse({
+    status: 401,
+    description:
+      "No recovery grant is outstanding, or it expired " +
+      "(`VAULT_RECOVERY_NOT_PENDING`). Verify a code again first.",
+  })
+  @ApiResponse({
+    status: 400,
+    description:
+      "Recovery material is incomplete (`VALIDATION_ERROR` with the missing " +
+      "fields) — a rotation that stores no new wrap would leave the previous, " +
+      "now useless one in place.",
+  })
   async completeRecovery(
     @GetUser("id") userId: string,
     @Body() dto: SetupVaultDto,

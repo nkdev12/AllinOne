@@ -27,9 +27,10 @@ This document outlines security practices and threat models for the Allinone bac
 
 - **Access Tokens**: Short-lived (15 minutes). Issued in the response body payload; retained client-side in memory (or OS Keychain/Keystore on mobile/desktop) and sent via `Authorization: Bearer <token>` on all protected API requests.
 - **Refresh Tokens**: Long-lived (7 days). Stored in a hardened, `httpOnly; Secure; SameSite=Strict` cookie scoped strictly to `/auth/refresh` (preventing JavaScript access and XSS theft). Also supplied in the JSON payload for native non-cookie mobile/desktop clients.
-- **Token Rotation**: Every call to `/auth/refresh` revokes the previous refresh token and issues a new access/refresh pair.
-- **Session Tracking**: Active sessions are persisted in PostgreSQL (`Session` model), bound to a specific `Device` and `User`.
-- **Revocation & Logout**: Immediate session invalidation via `POST /auth/logout` or `DELETE /users/me/sessions/:id` (`revokedAt = NOW()`).
+- **Token Rotation**: Every call to `/auth/refresh` re-points the session row at a new access/refresh pair, so the refresh token it consumed no longer resolves.
+- **Session Tracking**: Sessions live in MongoDB as `Session` rows, bound to a `Device` and a `User`. The id is generated in code and the tokens minted at sign-up, sign-in, OAuth sign-in and MFA completion all carry it as `sessionId` — which is only possible because the id exists before the row is written. (Passkey verification used to mint tokens here too; that endpoint is removed, see `API_REFERENCE.md` §20.)
+- **Revocation & Logout**: `POST /auth/logout` sets `revokedAt` on the session the calling token names. `JwtStrategy` then reads that row on **every** authenticated request and rejects with `401 SESSION_REVOKED` when it is missing, revoked, or owned by a different account — so logging out takes effect on the next request rather than whenever the 15-minute access token happens to expire. Tokens that carry no `sessionId` (minted before the claim existed) skip the check.
+- **Cost**: that check is one indexed `Session` lookup per authenticated request, with nothing cached in front of it. If it ever shows up in latency numbers, the answer is a short-TTL revocation cache — not dropping the check, which would put the revocation window back to the token lifetime.
 - **Idempotency & Rate Limiting**: Refresh endpoints are rate-limited (10 req/min) to prevent token brute-forcing.
 
 ### MFA Implementation
@@ -57,10 +58,13 @@ This document outlines security practices and threat models for the Allinone bac
 - **Microsoft**: ID tokens verified against Microsoft's live JWKS (`https://login.microsoftonline.com/common/discovery/v2.0/keys`) verifying RS256 signature, Microsoft issuer, and `aud: MICROSOFT_CLIENT_ID`.
 - Tokens are never accepted via unverified decoding. All signing keys are fetched via HTTPS with in-memory caching.
 
-### Vault Zero-Knowledge vs. Sync Encryption Trust Models
+### Vault and Sync Trust Models
 
-- **Password Vault Items (`VaultModule`)**: True zero-knowledge architecture. Master encryption keys are derived client-side with client-only master passwords. All vault item payloads (passwords, secure notes, credentials) are encrypted client-side using AES-256-GCM before transmission. The server stores only opaque ciphertext, IV, and auth tag; the server stores zero plaintext keys and has no ability to decrypt vault items.
-- **General Sync Payloads (`SyncModule`)**: Transport and at-rest envelope encryption. Payloads are protected in transit and at rest with field-level conflict resolution (LWW CRDT) performed across multi-device synchronizations.
+- **Password vault (`VaultModule` + the `vault_item` oplog)**: entry content is encrypted on the client with AES-256-GCM and reaches the server only as opaque `encryptedData` / `iv` / `authTag`. The master password never crosses the network; the server stores its Argon2id verifier.
+- **This is not zero-knowledge.** To make a forgotten master password recoverable, `VaultSetting.recoveryKey` is stored in plaintext next to `wrappedMasterKey`. Anyone with database read access can unwrap that user's master key and open every entry. Treat vault data as server-readable for threat modelling, access reviews and any future export or admin feature; recovery was kept deliberately, as an explicit product trade-off.
+- **Argon2id parameters are pinned client-side** at `m=65536 KiB, t=3, p=4, hashLength=32`. The client reports `t` and `m` on vault setup and on recovery, so `VaultSetting.kdfIterations` / `kdfMemory` describe the vault under them, but they are a record only: no server code reads them to configure a KDF, and a request that omits them stores the shipped client's values. Rows written before that report carries `kdfIterations: 100000`, which matched no vault. Each blob seals a `_kdf` marker with its own `format` number and its own parameters; a client that sees a higher format refuses to open it rather than reporting a wrong password.
+- **Sync payloads**: transport and at-rest protection only — the server stores plaintext JSON for `note`, `task` and `event`. Conflict handling is version-based rejection, not a merge: an inbound change with `clientVersion < serverVersion` is refused whole, reported in `conflicts` with the stored payload, and the client decides what to keep. No server-side code merges or inspects any field of a `vault_item` blob.
+- **How long that plaintext sits in the database**: a `Change` row is pruned by the hourly `cleanup-expired` maintenance job at 30 days (`CHANGE_RETENTION_DAYS`), **and not one row earlier than a live device has read past**. The prune is bounded per user by the oldest `lastPulledCursor` among that user's non-revoked devices, so a laptop that has not synced in 90 days holds the entire log open for 90 days — every title and body in it stays readable to whoever has database access, with no age at which the retention window wins. Revoking the device releases it; the next run deletes those rows. So "plaintext for 30 days" is the floor, never the ceiling, and the number that says which one you are in is `heldBackForIdleDevices` in that job's result (ARCHITECTURE.md §3 has where it is observable).
 
 ## Authorization Security
 
@@ -108,6 +112,7 @@ async getNoteById(userId: string, noteId: string) {
 - MFA secrets (encrypted)
 - Recovery codes (encrypted)
 - Vault contents (encrypted)
+- Vault recovery material (`VaultSetting.recoveryKey` + `wrappedMasterKey`) — **stored in plaintext** so recovery works; it decrypts the vault (see "Vault and Sync Trust Models")
 - OAuth tokens (encrypted)
 
 **Storage:**
@@ -263,7 +268,14 @@ GET  /api/export     — 10 per hour
   POST /auth/mfa       — 5 attempts per minute
   GET  /api/search     — 100 per minute
   GET  /api/export     — 10 per hour
+  POST /vault/settings/unlock — 10 per minute, plus a per-vault cooldown
   ```
+- **When it is on**: `CustomThrottlerGuard` stands down under `APP_ENV=development`,
+  `NODE_ENV=test`, `DISABLE_RATE_LIMITING=true` or `RATE_LIMIT_ENABLED=false`. Set
+  `RATE_LIMIT_ENABLED=true` to run the real limits locally instead of meeting
+  them first in production. A request can never opt itself out — the
+  `x-skip-throttle` / `x-bypass-rate-limit` headers are honoured only when an
+  operator sets `RATE_LIMIT_HEADER_BYPASS=true`, and never when `APP_ENV=production`.
 
 ### Clustered WebSocket Gateway
 
@@ -433,7 +445,7 @@ ALTER TABLE users ADD CONSTRAINT check_status
 - [x] Global input validation pipes with whitelisting and non-whitelisted property rejection
 - [x] SQL injection prevention via Prisma parameterized queries
 - [x] Centralized SIEM audit logging with correlation ID (`src/common/audit/audit-log.service.ts`)
-- [x] Zero-knowledge client-side encryption for vault items (`VaultItem`)
+- [x] Client-side AES-256-GCM encryption for vault entries (`vault_item` rows in the sync oplog) — not zero-knowledge, see the recovery-key caveat under "Vault and Sync Trust Models"
 - [x] Automated backup and restore scripts with compression verification (`scripts/backup-database.sh`)
 
 ### Pre-Deployment Operational Verification Checklist (Pre-Flight Runbook)

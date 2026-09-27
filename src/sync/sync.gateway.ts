@@ -80,8 +80,15 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   /**
-   * Broadcast a real-time sync invalidation notification to all active devices for a user.
-   * Optionally skips the originating device.
+   * Broadcast a real-time sync invalidation notification to all active devices
+   * for a user.
+   *
+   * `server.to(room)` is the whole delivery: it reaches every socket in the
+   * account's room on every instance, which includes the device that just
+   * pushed. `originDeviceId` travels inside the payload so a client can tell its
+   * own writes apart if it wants to; filtering sockets here would be a guess
+   * about what each device has already read, and the pull that follows is not —
+   * it asks from the device's own checkpoint and the version guard decides.
    */
   notifySyncInvalidation(
     userId: string,
@@ -104,23 +111,7 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     const userRoom = `user:${userId}`;
 
-    // Broadcast across instances to user room via Socket.IO adapter
     this.server.to(userRoom).emit("sync:invalidation", payload);
-
-    // Also dispatch directly to local non-origin sockets
-    if (originDeviceId) {
-      const roomSockets = this.server.sockets?.adapter?.rooms?.get(userRoom);
-      if (roomSockets) {
-        for (const socketId of roomSockets) {
-          const socket = this.server.sockets?.sockets?.get(
-            socketId,
-          ) as AuthenticatedSocket;
-          if (socket && socket.data?.deviceId !== originDeviceId) {
-            socket.emit("sync:invalidation", payload);
-          }
-        }
-      }
-    }
 
     this.logger.log(
       `[SyncGateway] Emitted sync:invalidation signal for User ${userId} (Origin Device: ${originDeviceId || "Server"})`,

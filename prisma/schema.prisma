@@ -45,7 +45,6 @@ model User {
   calendars         Calendar[]
   events            Event[]
   vaultSetting      VaultSetting?
-  vaultItems        VaultItem[]
   emailVerificationOtp EmailVerificationOtp?
   otpTokens        OtpToken[]
 
@@ -222,14 +221,35 @@ model Change {
   entityId          String
   operation         ChangeOperation
   version           Int
-  payload           Json     // Contains only non-sensitive metadata
+  payload           Json     // note/task/event content, or opaque vault ciphertext
   cursor            BigInt   @default(0)
   createdAt         DateTime @default(now())
+  // When the authoring device made the edit, stamped on its clock. `createdAt`
+  // is when this server heard about it, which for a device that was offline for
+  // a week is a week later — and clients sort their lists on the edit. Stored
+  // and echoed, never compared: conflict refusal is by `version` alone, so an
+  // ahead-of-clock device cannot push its way past a newer write.
+  clientTimestamp   DateTime?
 
   @@index([userId])
   @@index([deviceId])
   @@index([userId, cursor])
   @@index([createdAt])
+}
+
+// Per-user high-water mark for `Change.cursor`. MongoDB has no sequence object
+// and Prisma exposes no way to derive "one greater than anything this user has
+// ever been handed" from the Change collection itself without a max() scan that
+// races concurrent writers, so the counter lives in its own document and is
+// advanced with an atomic $inc inside the same interactive transaction that
+// writes the Change row. Two concurrent pushes therefore serialise on this
+// document instead of handing the same cursor to two rows.
+model SyncCursor {
+  id        String   @id @default(uuid()) @map("_id")
+  userId    String   @unique
+  seq       BigInt   @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 enum ChangeOperation {
@@ -241,7 +261,7 @@ enum ChangeOperation {
 
 model IdempotencyKey {
   id                String   @id @default(uuid()) @map("_id")
-  key               String   @unique
+  key               String
   userId            String
   endpoint          String
   method            String
@@ -250,6 +270,10 @@ model IdempotencyKey {
   expiresAt         DateTime
   createdAt         DateTime @default(now())
 
+  // Scoped per account: a globally unique key made one account's cached response
+  // addressable by anybody who held the string, and the write path that reuses an
+  // unknown key overwrites the row it collided with — including its userId.
+  @@unique([userId, key])
   @@index([userId])
   @@index([expiresAt])
 }
@@ -652,23 +676,24 @@ model EventReminder {
 }
 
 // ============================================================================
-// Zero-Knowledge Password Vault
+// Password Vault
 // ============================================================================
-
-enum VaultItemType {
-  LOGIN
-  SECURE_NOTE
-  CREDIT_CARD
-  IDENTITY
-  PASSWORD
-}
 
 model VaultSetting {
   id                String   @id @default(uuid()) @map("_id")
   userId            String   @unique
+  // base64(SHA-256(...)) of the verifier the client derived, wrapped in
+  // hmac-sha256 under the server-only ENCRYPTION_KEY. Stored as anything else
+  // it would be a bearer secret: holding it is holding the unlock.
   masterKeyHash     String
   keySalt           String
-  kdfIterations     Int      @default(100000)
+  // What the client derived with, recorded for diagnostics and read by nothing:
+  // the authoritative copy of these parameters is the `_kdf` marker sealed
+  // inside every vault blob. `t = 3` / `m = 65536` KiB are the values the
+  // shipped client sends; the 100000 this column defaulted to was a PBKDF2-shaped
+  // placeholder from before a client existed, so rows written before it carry
+  // that number and nothing should be read into it.
+  kdfIterations     Int      @default(3)
   kdfMemory         Int?     @default(65536)
   isVaultConfigured Boolean  @default(true)
 
@@ -683,33 +708,17 @@ model VaultSetting {
   // Set when a recovery OTP is spent; the re-encryption upload must land
   // before this deadline, otherwise the recovery grant expires.
   recoveryGrantedAt DateTime?
+  // Failed master-password verifications, counted here and never on `User`: a
+  // wrong *master password* must not lock the *account* out of its notes,
+  // tasks and calendar.
+  unlockFailedAttempts Int       @default(0)
+  // While this is in the future the unlock endpoint refuses without even
+  // comparing the verifier.
+  unlockLockedUntil    DateTime?
 
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
   // Relations
   user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-}
-
-model VaultItem {
-  id            String        @id @default(uuid()) @map("_id")
-  userId        String
-  type          VaultItemType @default(LOGIN)
-  name          String
-  category      String?
-  encryptedData String
-  iv            String
-  authTag       String
-  isFavorite    Boolean       @default(false)
-  version       Int           @default(1)
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-  deletedAt     DateTime?
-
-  // Relations
-  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-  @@index([type])
-  @@index([category])
 }

@@ -4,6 +4,7 @@ import { CollaborationService } from "@/collaboration/collaboration.service";
 import { CreateNoteDto } from "../dto/create-note.dto";
 import { UpdateNoteDto } from "../dto/update-note.dto";
 import { QueryNotesDto } from "../dto/query-notes.dto";
+import { appendChange } from "@/sync/change-cursor";
 import { ChangeOperation } from "@prisma/client";
 
 @Injectable()
@@ -50,20 +51,13 @@ export class NotesService {
         },
       });
 
-      await tx.change.create({
-        data: {
-          userId,
-          entityType: "note",
-          entityId: note.id,
-          operation: ChangeOperation.CREATE,
-          version: note.version,
-          payload: {
-            title: note.title,
-            folderId: note.folderId,
-            isPinned: note.isPinned,
-            isEncrypted: note.isEncrypted,
-          },
-        },
+      await appendChange(tx, {
+        userId,
+        entityType: "note",
+        entityId: note.id,
+        operation: ChangeOperation.CREATE,
+        version: note.version,
+        payload: noteChangePayload(note),
       });
 
       return this.formatNoteResponse(note);
@@ -246,21 +240,13 @@ export class NotesService {
       });
 
       // 4. Record sync change event
-      await tx.change.create({
-        data: {
-          userId,
-          entityType: "note",
-          entityId: updatedNote.id,
-          operation: ChangeOperation.UPDATE,
-          version: updatedNote.version,
-          payload: {
-            title: updatedNote.title,
-            folderId: updatedNote.folderId,
-            isPinned: updatedNote.isPinned,
-            isArchived: updatedNote.isArchived,
-            isEncrypted: updatedNote.isEncrypted,
-          },
-        },
+      await appendChange(tx, {
+        userId,
+        entityType: "note",
+        entityId: updatedNote.id,
+        operation: ChangeOperation.UPDATE,
+        version: updatedNote.version,
+        payload: noteChangePayload(updatedNote),
       });
 
       return this.formatNoteResponse(updatedNote);
@@ -279,18 +265,26 @@ export class NotesService {
     return this.prisma.$transaction(async (tx) => {
       const deletedNote = await tx.note.update({
         where: { id: noteId },
-        data: { deletedAt: new Date() },
+        // The version moves with the delete, the way a task's and an event's do.
+        // Not cosmetics: the log below names a version, and a version is only
+        // worth recording if some row can be read back at it.
+        data: { deletedAt: new Date(), version: { increment: 1 } },
       });
 
-      await tx.change.create({
-        data: {
-          userId,
-          entityType: "note",
-          entityId: noteId,
-          operation: ChangeOperation.DELETE,
-          version: deletedNote.version + 1,
-          payload: { id: noteId },
-        },
+      await appendChange(tx, {
+        userId,
+        entityType: "note",
+        entityId: noteId,
+        operation: ChangeOperation.DELETE,
+        // Where this used to say `deletedNote.version + 1` while the row above
+        // left the version alone — the log asserting a number the entity never
+        // reached, and no device able to tell the two apart.
+        version: deletedNote.version,
+        // Nothing, which is what the oplog path sends for a delete: `entityId`
+        // already names the note, and a device writing a tombstone reads no keys
+        // out of the payload. `{ id: noteId }` was a third shape under one
+        // `entityType`, alongside the client's `{}` and the old REST edit body.
+        payload: {},
       });
 
       return { success: true, message: "Note deleted successfully." };
@@ -349,17 +343,18 @@ export class NotesService {
         },
       });
 
-      await tx.change.create({
-        data: {
-          userId,
-          entityType: "note",
-          entityId: restoredNote.id,
-          operation: ChangeOperation.RESTORE,
-          version: restoredNote.version,
-          payload: {
-            title: restoredNote.title,
-            restoredFromVersion: snapshot.version,
-          },
+      await appendChange(tx, {
+        userId,
+        entityType: "note",
+        entityId: restoredNote.id,
+        operation: ChangeOperation.RESTORE,
+        version: restoredNote.version,
+        // The one payload that carries more than the shape: which snapshot
+        // this came from is provenance the log has nowhere else to say it. A
+        // device reads the three keys it knows and ignores this one.
+        payload: {
+          ...noteChangePayload(restoredNote),
+          restoredFromVersion: snapshot.version,
         },
       });
 
@@ -374,4 +369,36 @@ export class NotesService {
       tags: noteTags ? noteTags.map((nt: any) => nt.tag) : [],
     };
   }
+}
+
+/**
+ * The `note` payload, written once because it is read back by something that
+ * cannot say "this change forgot its body". A device rebuilds a note from
+ * `title` and `content`, so a logged change that carries one without the other
+ * is a rewrite of that note into something shorter: until now every REST edit
+ * arrived on the other devices as a note with its text gone, because REST was
+ * the one path that edited `content` and did not log it.
+ *
+ * `createdAt` belongs here for the reason item 38 of the notes audit gave it:
+ * the log's own row is stamped with when this server heard about the change,
+ * which is not when the note began, and the client keeps a note's birth from the
+ * payload rather than from its own clock.
+ *
+ * What is deliberately absent is what used to be the whole payload —
+ * `folderId`, `isPinned`, `isArchived`, `isEncrypted`. Those are a device's
+ * arrangement of a note rather than the note: the client never puts them on the
+ * wire, has no column left for `isEncrypted`, and reads them back off nothing,
+ * so logging them only made two write paths look like they disagreed about what
+ * a note *is*. The `Note` row still holds them; the log records what syncs.
+ */
+function noteChangePayload(note: {
+  title: string;
+  content: string | null;
+  createdAt: Date;
+}) {
+  return {
+    title: note.title,
+    content: note.content,
+    createdAt: note.createdAt.toISOString(),
+  };
 }

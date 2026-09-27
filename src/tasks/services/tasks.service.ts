@@ -7,6 +7,7 @@ import { PrismaService } from "@/common/prisma/prisma.service";
 import { CreateTaskDto } from "../dto/create-task.dto";
 import { UpdateTaskDto } from "../dto/update-task.dto";
 import { QueryTasksDto } from "../dto/query-tasks.dto";
+import { appendChange } from "@/sync/change-cursor";
 import { ChangeOperation, TaskStatus } from "@prisma/client";
 
 @Injectable()
@@ -68,20 +69,18 @@ export class TasksService {
         },
       });
 
-      await tx.change.create({
-        data: {
-          userId,
-          entityType: "task",
-          entityId: task.id,
-          operation: ChangeOperation.CREATE,
-          version: task.version,
-          payload: {
-            title: task.title,
-            projectId: task.projectId,
-            priority: task.priority,
-            status: task.status,
-            dueDate: task.dueDate,
-          },
+      await appendChange(tx, {
+        userId,
+        entityType: "task",
+        entityId: task.id,
+        operation: ChangeOperation.CREATE,
+        version: task.version,
+        payload: {
+          title: task.title,
+          projectId: task.projectId,
+          priority: task.priority,
+          status: task.status,
+          dueDate: task.dueDate,
         },
       });
 
@@ -265,19 +264,17 @@ export class TasksService {
         },
       });
 
-      await tx.change.create({
-        data: {
-          userId,
-          entityType: "task",
-          entityId: updatedTask.id,
-          operation: ChangeOperation.UPDATE,
-          version: updatedTask.version,
-          payload: {
-            title: updatedTask.title,
-            priority: updatedTask.priority,
-            status: updatedTask.status,
-            isCompleted: updatedTask.status === TaskStatus.COMPLETED,
-          },
+      await appendChange(tx, {
+        userId,
+        entityType: "task",
+        entityId: updatedTask.id,
+        operation: ChangeOperation.UPDATE,
+        version: updatedTask.version,
+        payload: {
+          title: updatedTask.title,
+          priority: updatedTask.priority,
+          status: updatedTask.status,
+          isCompleted: updatedTask.status === TaskStatus.COMPLETED,
         },
       });
 
@@ -310,18 +307,16 @@ export class TasksService {
         },
       });
 
-      await tx.change.create({
-        data: {
-          userId,
-          entityType: "task",
-          entityId: completedTask.id,
-          operation: ChangeOperation.UPDATE,
-          version: completedTask.version,
-          payload: {
-            id: completedTask.id,
-            isCompleted: true,
-            status: TaskStatus.COMPLETED,
-          },
+      await appendChange(tx, {
+        userId,
+        entityType: "task",
+        entityId: completedTask.id,
+        operation: ChangeOperation.UPDATE,
+        version: completedTask.version,
+        payload: {
+          id: completedTask.id,
+          isCompleted: true,
+          status: TaskStatus.COMPLETED,
         },
       });
 
@@ -362,18 +357,16 @@ export class TasksService {
           },
         });
 
-        await tx.change.create({
-          data: {
-            userId,
-            entityType: "task",
-            entityId: nextRecurringTask.id,
-            operation: ChangeOperation.CREATE,
-            version: nextRecurringTask.version,
-            payload: {
-              title: nextRecurringTask.title,
-              dueDate: nextRecurringTask.dueDate,
-              isRecurringInstance: true,
-            },
+        await appendChange(tx, {
+          userId,
+          entityType: "task",
+          entityId: nextRecurringTask.id,
+          operation: ChangeOperation.CREATE,
+          version: nextRecurringTask.version,
+          payload: {
+            title: nextRecurringTask.title,
+            dueDate: nextRecurringTask.dueDate,
+            isRecurringInstance: true,
           },
         });
       }
@@ -402,15 +395,13 @@ export class TasksService {
         data: { deletedAt: new Date(), version: { increment: 1 } },
       });
 
-      await tx.change.create({
-        data: {
-          userId,
-          entityType: "task",
-          entityId: taskId,
-          operation: ChangeOperation.DELETE,
-          version: existing.version + 1,
-          payload: { id: taskId },
-        },
+      await appendChange(tx, {
+        userId,
+        entityType: "task",
+        entityId: taskId,
+        operation: ChangeOperation.DELETE,
+        version: existing.version + 1,
+        payload: { id: taskId },
       });
 
       return { success: true, message: "Task deleted successfully." };

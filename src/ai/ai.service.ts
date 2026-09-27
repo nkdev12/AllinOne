@@ -6,6 +6,7 @@ import {
 } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { ConfigService } from "@nestjs/config";
+import { appendChange } from "@/sync/change-cursor";
 import {
   ChangeOperation,
   TaskPriority as PrismaTaskPriority,
@@ -554,18 +555,16 @@ export class AiService {
           },
         });
 
-        await tx.change.create({
-          data: {
-            userId,
-            entityType: "task",
-            entityId: task.id,
-            operation: ChangeOperation.CREATE,
-            version: 1,
-            payload: {
-              title: task.title,
-              priority: task.priority,
-              extractedFromNoteId: noteId,
-            },
+        await appendChange(tx, {
+          userId,
+          entityType: "task",
+          entityId: task.id,
+          operation: ChangeOperation.CREATE,
+          version: 1,
+          payload: {
+            title: task.title,
+            priority: task.priority,
+            extractedFromNoteId: noteId,
           },
         });
 

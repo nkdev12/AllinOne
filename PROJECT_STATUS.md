@@ -89,14 +89,15 @@
 - [x] Multi-device delta synchronization event triggering on event mutations (`CREATE`, `UPDATE`, `DELETE`)
 - [x] Unit tests for Calendar Module (`events.service.spec.ts`)
 
-### Zero-Knowledge Password Vault (Stage 7)
+### Password Vault (Stage 7)
 - [x] Vault Configuration & Key Parameters API (`VaultSettingsService`, `VaultSettingsController`) storing `keySalt`, `kdfIterations`, and `masterKeyHash`
 - [x] Master Password Unlock Verification API (`POST /vault/settings/unlock`)
-- [x] Encrypted Vault Items API (`VaultItemsService`, `VaultItemsController`) storing client-side AES-256-GCM ciphertext, IV, and AuthTag
-- [x] Categorization & Item Types (`LOGIN`, `SECURE_NOTE`, `CREDIT_CARD`, `IDENTITY`, `PASSWORD`)
-- [x] Multi-device delta synchronization event triggering on vault item mutations (`CREATE`, `UPDATE`, `DELETE`)
-- [x] Paginated item search & type/favorite filtering (`QueryVaultItemsDto`)
-- [x] Unit tests for Vault Module (`vault-items.service.spec.ts`)
+- [x] Master-password recovery (`recovery/request`, `recovery/verify`, `recovery/complete`): an OTP-verified flow re-encrypts the vault instead of discarding it. Requires `recoveryKey` to be stored in plaintext beside `wrappedMasterKey`, so the vault is **not** zero-knowledge — see `docs/SECURITY.md`.
+- [x] Vault entries travel exclusively through the sync oplog as `Change` rows with `entityType: "vault_item"`. The `/vault/items` REST API, its DTOs and the `VaultItem` model were removed: two write paths that never crossed meant entries stored through one were invisible to the other.
+- [x] Push payload validation (`src/sync/change-payload.validator.ts`) — entity-type whitelist and a required vault blob shape, enforced batch-wide before any write
+- [x] Per-user monotonic change cursors (`SyncCursor` + `src/sync/change-cursor.ts`) so `POST /sync/pull` replays in order across devices; `npm run sync:backfill:cursor` seeds rows written before cursors existed
+- [x] Multi-device delta synchronization event triggering on vault entry mutations (`CREATE`, `UPDATE`, `DELETE`)
+- [x] Unit tests for the vault and sync paths (`vault-settings.service.spec.ts`, `sync.service.spec.ts`, `sync.cursor.spec.ts`, `change-payload.validator.spec.ts`, `src/common/testing/idor.spec.ts`)
 
 ---
 

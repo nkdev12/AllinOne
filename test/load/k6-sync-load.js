@@ -121,9 +121,8 @@ export default function (data) {
         operation: "CREATE",
         version: 1,
         payload: {
-          title: `Encrypted Note ${Date.now()}`,
-          ciphertext: "U2FsdGVkX1+vupppZdmMmZe...mock-ciphertext",
-          iv: "1234567890abcdef",
+          title: `Load test note ${Date.now()}`,
+          content: "A body, because a note change must carry one",
         },
       },
       {

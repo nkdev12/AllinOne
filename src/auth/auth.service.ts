@@ -37,6 +37,7 @@ import {
   MfaEnableResponseDto,
 } from "./dto/mfa.dto";
 import { AuthType, Platform, AuditAction, OtpPurpose } from "@prisma/client";
+import { Session } from "@prisma/client";
 
 @Injectable()
 export class AuthService {
@@ -113,13 +114,11 @@ export class AuthService {
       throw error;
     }
 
-    const tokens = await this.generateTokens(result.user.id, result.user.email);
-    const session = await this.createSession(
-      result.user.id,
-      result.device.id,
-      tokens.accessToken,
-      tokens.refreshToken,
-    );
+    const { tokens, session } = await this.issueSession({
+      userId: result.user.id,
+      email: result.user.email,
+      deviceId: result.device.id,
+    });
 
     this.requestEmailVerification(result.user.email).catch((err) => {
       this.logger.error(
@@ -350,15 +349,13 @@ export class AuthService {
       };
     }
 
-    const tokens = await this.generateTokens(user.id, user.email);
-    const session = await this.createSession(
-      user.id,
-      device.id,
-      tokens.accessToken,
-      tokens.refreshToken,
+    const { tokens, session } = await this.issueSession({
+      userId: user.id,
+      email: user.email,
+      deviceId: device.id,
       ipAddress,
       userAgent,
-    );
+    });
 
     await this.prisma.user.update({
       where: { id: user.id },
@@ -697,15 +694,13 @@ export class AuthService {
       });
     }
 
-    const tokens = await this.generateTokens(user.id, user.email);
-    const session = await this.createSession(
-      user.id,
-      device.id,
-      tokens.accessToken,
-      tokens.refreshToken,
+    const { tokens, session } = await this.issueSession({
+      userId: user.id,
+      email: user.email,
+      deviceId: device.id,
       ipAddress,
       userAgent,
-    );
+    });
 
     await this.prisma.user.update({
       where: { id: user.id },
@@ -1306,15 +1301,13 @@ export class AuthService {
       );
     }
 
-    const tokens = await this.generateTokens(user.id, user.email);
-    const session = await this.createSession(
-      user.id,
+    const { tokens, session } = await this.issueSession({
+      userId: user.id,
+      email: user.email,
       deviceId,
-      tokens.accessToken,
-      tokens.refreshToken,
       ipAddress,
       userAgent,
-    );
+    });
 
     await this.prisma.user.update({
       where: { id: user.id },
@@ -1361,28 +1354,40 @@ export class AuthService {
     };
   }
 
-  private async createSession(
-    userId: string,
-    deviceId: string,
-    accessToken: string,
-    refreshToken: string,
-    ipAddress?: string,
-    userAgent?: string,
-  ) {
+  /**
+   * Open a session and mint the tokens that name it.
+   *
+   * The id is generated before the row exists so it can go inside the tokens:
+   * `JwtStrategy` compares that claim against the row on every request, which
+   * is the only thing that makes a logout land before the access token has
+   * expired on its own. Tokens minted without it are never checked.
+   */
+  private async issueSession(data: {
+    userId: string;
+    email: string;
+    deviceId: string;
+    ipAddress?: string;
+    userAgent?: string;
+  }): Promise<{ tokens: AuthTokenDataDto; session: Session }> {
+    const id = crypto.randomUUID();
+    const tokens = await this.generateTokens(data.userId, data.email, id);
     const accessExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
     const refreshExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
-    return this.prisma.session.create({
+    const session = await this.prisma.session.create({
       data: {
-        userId,
-        deviceId,
-        accessToken,
-        refreshToken,
+        id,
+        userId: data.userId,
+        deviceId: data.deviceId,
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
         accessExpiresAt,
         refreshExpiresAt,
-        ipAddress,
-        userAgent,
+        ipAddress: data.ipAddress,
+        userAgent: data.userAgent,
       },
     });
+
+    return { tokens, session };
   }
 }

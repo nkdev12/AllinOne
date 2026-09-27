@@ -28,6 +28,7 @@
     "db:push": "prisma db push",
     "db:seed": "ts-node prisma/seed.ts",
     "db:studio": "prisma studio",
+    "sync:backfill:cursor": "ts-node scripts/backfill-change-cursor.ts",
     "docker:up": "docker-compose up -d",
     "docker:down": "docker-compose down",
     "docker:logs": "docker-compose logs -f",

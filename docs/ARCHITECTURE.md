@@ -188,17 +188,23 @@ Reverse Proxy (Caddy/Nginx)
 
 ### 1. Authentication & Users
 
-```sql
+```
 User
 ├── id (UUID)
 ├── email (unique)
-├── status (enum)
+├── status (enum: ACTIVE, PENDING, SUSPENDED, DELETED)
+├── failedLoginAttempts / lockedUntil  (the account-lockout pair)
 ├── emailVerifiedAt
 └── timestamps
 
 Authentication (one per auth method)
 ├── userId (FK)
-├── type (enum: EMAIL_PASSWORD, OAUTH, etc.)
+├── type (enum AuthType: EMAIL_PASSWORD, GOOGLE, APPLE, MICROSOFT, PASSKEY —
+│        there is no OAUTH member. PASSKEY is live on the write side and dead on
+│        the read side: `POST /auth/passkeys/register-options` and
+│        `register-verify` are mounted and store a credential, while the
+│        authentication routes were taken offline, so a passkey can be registered,
+│        never used, and has no route that lists or removes it.)
 ├── identifier
 └── passwordHash (if applicable)
 
@@ -223,7 +229,7 @@ MFASetting
 
 ### 2. Core Features (Notes, Tasks, Calendar)
 
-```sql
+```
 Note
 ├── userId (FK)
 ├── folderId (FK)
@@ -258,52 +264,119 @@ Event
 
 ### 3. Synchronization
 
-```sql
-Change (event log)
-├── userId (FK)
-├── deviceId (FK)
-├── entityType
-├── entityId
+```
+Change (the event log; entityType is note | task | event | vault_item)
+├── id (UUID, @map("_id"))
+├── userId
+├── deviceId (nullable — NULL for a change the server itself appended)
+├── entityType, entityId
 ├── operation (CREATE, UPDATE, DELETE, RESTORE)
-├── version
-├── cursor (auto-increment)
-└── timestamp
+├── version            the entity's own version number, and the only thing
+│                      compared: a push is refused when it is lower than the
+│                      newest stored version for that (userId, entityType, entityId)
+├── payload (JSON)     user content, treated as such everywhere. Plaintext for
+│                      note/task/event; opaque AES-GCM blob fields for vault_item
+├── cursor (BigInt)    NOT auto-increment: see SyncCursor
+├── createdAt          when this server heard about the change
+└── clientTimestamp    when the authoring device made it, on that device's clock.
+                       Stored and echoed on pull, never compared — an
+                       ahead-of-clock device cannot push past a newer write
 
-DeviceSyncState
-├── deviceId (FK)
-├── lastPulledCursor
-├── lastPushedSequence
-└── lastSuccessfulSync
+SyncCursor (one row per user; the reason cursors exist at all)
+├── userId (unique)
+└── seq (BigInt)       $inc'd inside the same transaction that writes the Change
+
+DeviceSyncState (one row per device)
+├── deviceId (unique, FK → Device, Cascade)
+├── lastPulledCursor (String — a BigInt rendered as text, which is why the prune
+│                    parses it and treats anything non-numeric as 0)
+├── lastPushedSequence (Int)
+└── lastSuccessfulSyncAt
 
 IdempotencyKey
-├── key (unique)
-├── userId (FK)
-├── response (cached)
-└── expiresAt
+├── (userId, key) unique   ← per account, not a global unique on key alone
+├── endpoint, method, statusCode, response (cached), expiresAt
 ```
+
+Writes reach the log from two directions, and only one of them is the sync API:
+`POST /sync/push` appends `Change` rows and nothing else, while the REST modules
+(`notes`, `tasks`, `calendar`, `ai`) write their own entity row **and** append a
+`Change` through `appendChange`. Nothing replays the log into those tables, so the
+row and the log can disagree and a device only ever sees the log. `vault_item` has
+no entity row and no REST route — for the vault the log genuinely is the store.
+
+#### Retention: how far back the log stays readable
+
+`Change` rows are pruned by the `cleanup-expired` job in
+`src/queues/processors/maintenance.processor.ts`, enqueued from `src/worker.ts` once
+at startup and then every hour (`repeat: { every: 60 * 60 * 1000 }`, `attempts: 3`,
+exponential backoff).
+
+The rule is **30 days** (`CHANGE_RETENTION_DAYS`, default `30`) **unless a live
+device has not read that far back** — and the second half is the load-bearing one:
+
+1. Rows older than the cutoff are grouped per user (`groupBy` on `userId`).
+2. For each of those users, the floor is the **oldest** `lastPulledCursor` held by
+   any of its **non-revoked** devices. A device that has never pulled counts as `0`,
+   which correctly holds the whole log open; a revoked device is excluded, because
+   nothing can pull with it again.
+3. The delete is then `userId + createdAt < cutoff + cursor < floor`, one
+   `deleteMany` per user rather than the single global delete this job used to run.
+
+A change log is a queue, and a queue is only safe to compact behind its slowest
+reader. The version this file described before was the global `createdAt < cutoff`
+delete, and against a per-user cursor it is not a compaction but a hole: a phone
+that has not synced in 60 days gets a checkpoint inside the rows the job removed,
+its next pull matches nothing, and it goes on syncing from there while permanently
+missing every edit and delete in between — with no error anywhere to say so.
+
+Retention is therefore a floor, not a deadline. An idle device keeps its owner's
+plaintext note bodies in the database for as long as it stays registered and
+unread, with no age at which the 30 days wins; revoking the device is what releases
+those rows, and the next hourly run deletes them.
+
+**What the job reports.** Its return value carries `purgedSessions`,
+`purgedIdempotencyKeys`, `purgedChanges`, `heldBackForIdleDevices` (the rows the
+floor withheld — not a failure, but the difference between "compacted" and "someone
+is 40 days behind") and `executedAt`, and the log line names the same numbers. Two
+things limit how much of that you can actually see:
+
+- `removeOnComplete: true` on both `add()` calls discards the job's return value as
+  soon as it succeeds, so the only trace left of a completed run is the worker's log
+  line. Anything watching for growth has to read logs, not job state.
+- `sync_changes_compacted_total` is incremented only with `purgedChanges`, never
+  with `heldBackForIdleDevices`, and `MetricsService` holds those counters in
+  instance fields. The process that runs the job is the only one that ever adds to
+  it, and `/metrics` is served by whichever process answers the scrape — so a
+  multi-process deployment reports a number that is not the total. The rows held
+  back are not in the metric at all.
 
 ### 4. Observability & Auditing
 
-```sql
+```
 AuditLog
-├── id (UUID)
-├── userId (FK, nullable for unauthenticated events)
-├── action (enum: LOGIN_SUCCESS, LOGOUT, MFA_ENABLED, etc.)
-├── resourceType (VARCHAR 50, optional)
-├── resourceId (UUID, optional)
-├── requestId (UUID, correlation ID)
-├── changes (JSONB diff of mutated fields)
-├── ipAddress (VARCHAR 45)
-├── userAgent (TEXT)
-├── metadata (JSONB request context & telemetry)
-└── createdAt (timestamp)
+├── id (UUID, @map("_id"))
+├── userId (nullable for unauthenticated events)
+├── action (enum AuditAction: LOGIN_SUCCESS, LOGIN_FAILURE, LOGOUT, PASSWORD_CHANGED,
+│          EMAIL_CHANGED, MFA_ENABLED, MFA_DISABLED, DEVICE_ADDED, DEVICE_REVOKED,
+│          SESSION_REVOKED, ACCOUNT_CREATED, ACCOUNT_DELETED, ACCOUNT_EXPORTED,
+│          ACCOUNT_LOCKED, ACCOUNT_UNLOCKED, OAUTH_CONNECTED, OAUTH_REVOKED)
+├── resourceType (String, optional)
+├── resourceId (String, optional)
+├── requestId (String, optional correlation ID)
+├── changes (Json diff of mutated fields)
+├── ipAddress (String)
+├── userAgent (String)
+├── metadata (Json request context & telemetry)
+└── createdAt (DateTime)
 ```
 
 > [!NOTE]
 > **AuditLog Column Rationale**: `changes` and `metadata` are intentionally retained as separate columns. `changes` stores entity attribute mutations (before/after diffs), whereas `metadata` isolates request and actor context (IP location, client platform, authentication method, failure reason). This separation preserves clean SIEM audit queries without bloating entity mutation records.
 >
-> **Dynamic Health Probes**: Health monitoring does not use a persistent database table. Probes (`/health`, `/health/live`, `/health/ready`) are served dynamically in-memory by `HealthModule` via Terminus to verify live connectivity to PostgreSQL and Redis.
-```
+> **Which of those actions are ever written**: not all of them. `ACCOUNT_DELETED` and `ACCOUNT_EXPORTED` have no writer anywhere in `src/` — `softDeleteAccount` and `requestDataExport` return without logging, so an account deletion leaves no audit row. Treat a missing entry as "not recorded", not as "did not happen".
+>
+> **Dynamic Health Probes**: Health monitoring does not use a persistent database table. `GET /health` is served in-memory by `HealthService.checkTerminusHealth()`, and it checks exactly one dependency: `prisma.checkHealth()` against **MongoDB**, whose `latency` it reports. The `redis` entry in the same response is a literal `{ status: "up" }` assigned on `health.service.ts:33` and no Redis command runs before it — so `/health` cannot go red over a dead queue, and `/health/ready` is not a readiness gate for Bull. There is no Terminus `HealthIndicator` here despite the naming, and no PostgreSQL in this deployment.
 
 ## Technology Decisions
 
@@ -324,9 +397,20 @@ AuditLog
 - ✅ Migrations management
 - ✅ Visual database browser
 - ✅ Good relationship handling
-- ✅ Database-agnostic (PostgreSQL, MySQL, SQLite)
+- ✅ Database-agnostic (this deployment uses its **MongoDB** connector — `provider = "mongodb"` in `prisma/schema.prisma`. `npm run typecheck` covers the generated client, and no migration in this repo targets SQL.)
 
 ### Why PostgreSQL?
+
+**It isn't, and this heading is the oldest artefact in the file.** The datasource is
+MongoDB, and the consequences are not cosmetic: there are no foreign keys, so
+referential integrity lives in each service's `deletedAt` filters (DATABASE_SCHEMA.md
+has the matrix); there is no autoincrement, so `Change.cursor` needs the `SyncCursor`
+counter document to be monotonic at all; and `$transaction` is a multi-document
+transaction whose size is bounded by what a push batch can put in it. The bullets
+below describe a store this service does not run against. JSON/JSONB is the one that
+survives in a different form (`Json` columns), and "full-text search" does not:
+`search` is a `contains` + `mode: "insensitive"` substring match on title and body,
+which is why it is honest about being slow rather than indexed.
 
 - ✅ ACID transactions
 - ✅ JSON/JSONB support
@@ -615,16 +699,34 @@ The codebase employs a multi-tiered testing strategy spanning unit, end-to-end (
 
 ### 1. Unit Testing Suite (`npm test`)
 - Built with **Jest** testing framework (`jest.config.ts`).
-- 19 test suites covering services, controllers, guards, interceptors, and utilities.
+- **32 suites / 286 tests** as of 2026-09-26, covering services, controllers, guards, interceptors, DTOs and utilities.
 - Strict isolation using mock implementations for external dependencies (Prisma, Redis, Config, Bull).
+- Scope note that matters when reading section 2: this config has `rootDir: "src"`
+  and `testRegex: ".*\\.spec\\.ts$"`, so it **cannot see anything under `test/`**.
+  `npm test` is not "the whole suite" — it is the unit half of it.
 
 ### 2. End-to-End (E2E) Test Suite (`npm run test:e2e`)
-- Built using **Supertest** and NestJS `Test.createTestingModule` (`test/jest-e2e.json`).
+- Built using **Supertest** and NestJS `Test.createTestingModule` (`test/jest-e2e.json`, `rootDir: "."`, `testRegex: ".e2e-spec.ts$"`) — **5 suites / 53 tests**.
 - Path mapping `@/*` resolves cleanly to `src/*`.
-- Key functional flows verified end-to-end:
+- > [!WARNING]
+  > **Nothing runs this suite automatically.** There is no CI workflow in the
+  > repository (`.github/workflows` does not exist), `npm test` cannot reach these
+  > files, and `npm run typecheck` (`tsc -p tsconfig.json`) is scoped to `src/**/*`
+  > so it does not even compile them. The separate
+  > `npx tsc --noEmit -p test/tsconfig.e2e.json` gate is a manual command listed in
+  > no script. A red e2e spec is therefore invisible until somebody runs it by hand
+  > — which is why `DEPLOYMENT.md`'s "end-to-end tests passing" checkbox is a person,
+  > not a pipeline.
+- Every one of these specs runs the real controller, pipes, filters and service and
+  fakes only the database. That is deliberate and it is the difference between an
+  assertion on a wire contract and a read-back of a mock's own fixture: the sync spec
+  in this file once asserted a response shape (`appliedChanges`, `processedAt`,
+  `isHealthy`) that appears nowhere in what the service returns, and could not fail.
   - **Health & Telemetry (`test/e2e/health.e2e-spec.ts`)**: Ingress root, liveness probe, dynamic readiness, system info probe, and upstream W3C `traceparent` ingestion.
   - **Authentication & Lockout Lifecycle (`test/e2e/auth-flow.e2e-spec.ts`)**: Registration validation, user onboarding, password verification, 5-attempt brute-force lockout envelope, token refresh rotation, and logout session revocation.
-  - **Device & Delta Sync Flow (`test/e2e/sync-flow.e2e-spec.ts`)**: Device registration, device enumeration, batch delta push validation, cursor-based delta pull, and device sync status probe.
+  - **Device & Delta Sync Flow (`test/e2e/sync-flow.e2e-spec.ts`)**: The exact key set of each `/sync` response, the 401 without a token, the whitelist rejecting a `folderId` key on a change, conflict round-trips, `DEVICE_NOT_REGISTERED` / `DEVICE_REVOKED`, a revoked device's checkpoint echoed back, and `clientTimestamp` surviving the JSON round trip.
+  - **Vault Settings Lifecycle (`test/e2e/vault-settings.e2e-spec.ts`)**: The not-configured `GET` shape, setup's 201 and its 409 on a configured vault, the `kdfIterations` validation floor, that the stored verifier is the peppered HMAC rather than the value sent, unlock's 200 / 401 `VAULT_MASTER_KEY_MISMATCH` / 401 `RATE_LIMITED` cooldown / 404 `VAULT_NOT_CONFIGURED`, and recovery's 401 `VAULT_RECOVERY_NOT_PENDING` plus the material `recovery/verify` hands back. Runs the real `VaultSettingsService` behind the guard, the app's own validation pipe and the error handler, over one in-memory row — so it asserts the status a device branches on, which a service unit test cannot see.
+  - **`test/e2e/phase3.e2e-spec.ts`** exists and runs, and is not described here. It is the fifth suite the count above includes; read the file for what it covers.
 
 ### 3. Load & Performance Testing (`npm run test:load:*`)
 - Executed via **k6** load testing engine (`test/load/`):

@@ -24,14 +24,3 @@ export interface RegistrationOptionsResponse {
   timeout: number;
   attestation: "none" | "direct";
 }
-
-export interface LoginOptionsResponse {
-  challenge: string;
-  timeout: number;
-  rpId: string;
-  allowCredentials?: Array<{
-    id: string;
-    type: "public-key";
-    transports?: string[];
-  }>;
-}

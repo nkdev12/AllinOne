@@ -422,7 +422,7 @@ Contributions welcome! See [CONTRIBUTING.md](docs/CONTRIBUTING.md)
 - [x] Notes & hierarchical folders, version history (`NoteHistory`), tags
 - [x] Tasks & projects, Kanban sections, RRULE recurrence, task reminders
 - [x] Calendar & events, attendees, RSVP management, date range queries
-- [x] Zero-Knowledge password vault, master key unlock, encrypted items
+- [x] Password vault: client-side AES-256-GCM entries synced as `vault_item` oplog changes, master-key unlock, OTP-verified master-password recovery (not zero-knowledge — see `docs/SECURITY.md`)
 
 ### Stage 8 — Infrastructure & Security Hardening (Completed)
 - [x] Redis & BullMQ distributed job processing (`mail`, `notification`, `export`, `maintenance`)

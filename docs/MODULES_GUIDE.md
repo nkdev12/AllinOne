@@ -105,28 +105,29 @@ Manages multi-device registration, public key binding, and device status lifecyc
 ---
 
 ### 4. `SyncModule` (`src/sync`)
-Engine for delta synchronization, version-based concurrency conflict detection, payload encryption, and real-time WebSocket invalidation.
+Engine for delta synchronization, version-based conflict detection, and real-time WebSocket invalidation. It is also the only write path for vault entries.
 
 #### `SyncService` (`src/sync/sync.service.ts`)
 
 | Function Signature | Description & Behavior | Invocation Site |
 |-------------------|------------------------|-----------------|
-| `pushChanges(userId: string, dto: PushSyncDto): Promise<PushSyncResponseDto>` | Unconditionally scopes DB queries by `userId`. Detects `VERSION_MISMATCH` concurrency conflicts (rejecting stale changes and returning server payload/version for client resolution), accepts valid changes, creates `Change` records, updates `DeviceSyncState`, and emits WebSocket invalidations. | `SyncController.pushChanges` (`POST /sync/push`) |
-| `pullChanges(userId: string, dto: PullSyncDto): Promise<PullSyncResponseDto>` | Pulls change deltas after specified cursor position scoped strictly to `userId`, updates `lastPulledCursor`, and returns paginated result. | `SyncController.pullChanges` (`POST /sync/pull`) |
-| `getSyncStatus(userId: string, deviceId: string): Promise<SyncStatusDto>` | Fetches synchronization state, client cursor position, and highest server cursor for a device. | `SyncController.getSyncStatus` (`GET /sync/status/:deviceId`) |
+| `pushChanges(userId: string, dto: PushSyncDto): Promise<PushSyncResponseDto>` | Unconditionally scopes DB queries by `userId`. Validates the whole batch through `assertPushableChanges` before any row is written, detects `VERSION_MISMATCH` conflicts (rejecting stale changes and returning server payload/version), allocates a per-user cursor for each accepted change, updates `DeviceSyncState`, and emits WebSocket invalidations. | `SyncController.pushChanges` (`POST /sync/push`) |
+| `pullChanges(userId: string, dto: PullSyncDto): Promise<PullSyncResponseDto>` | Pulls change deltas after the specified cursor, ordered by `cursor` and scoped strictly to `userId`, updates `lastPulledCursor`, and returns `{changes, nextCursor, hasMore}`. | `SyncController.pullChanges` (`POST /sync/pull`) |
+| `getSyncStatus(userId: string, deviceId: string): Promise<SyncStatusDto>` | Fetches synchronization state, client cursor position, and highest server cursor for a device. | `SyncController.getSyncStatus` (`GET /sync/status?deviceId=`) |
+
+#### Change cursors (`src/sync/change-cursor.ts`)
+Mongo has no sequence primitive, so `SyncCursor` holds one `{userId, seq}` document per user and `allocateNextChangeCursor` `$inc`s it inside the transaction that writes the `Change` row. That is what makes pull replay changes in the order they were accepted, and why a rolled-back push cannot burn a number. `getHighestChangeCursor` takes the larger of the counter and the newest stored row, so pruning the log can never move the reported end backwards. Rows written before this existed all carry `cursor: 0`; `npm run sync:backfill:cursor` (`scripts/backfill-change-cursor.ts`) seeds them.
+
+#### Payload validation (`src/sync/change-payload.validator.ts`)
+`entityType` must be one of `SYNC_ENTITY_TYPES` (`note`, `task`, `event`, `vault_item`). A `vault_item` content change (`CREATE` / `UPDATE` / `RESTORE`) must carry non-empty string `type`, `encryptedData`, `iv`, `authTag` and boolean `isEncrypted`; `type`, `iv` and `authTag` are additionally capped at 128 characters (`MAX_VAULT_FIXED_FIELD_CHARS`), since a 96-bit nonce base64s to 16 and a GCM tag to 24 — anything longer is not a bigger secret. `encryptedData` is exempt: it scales with the entry and the limit that bounds it is the request body cap, not a per-field number. A `DELETE` is not judged on its payload at all, because a tombstone legitimately carries nothing. A batch holding a change no device could replay is refused whole with `SYNC_PUSH_REJECTED` and a per-field report, and `changes` itself is capped at `MAX_CHANGES_PER_PUSH` (500) by `@ArrayMaxSize` on `PushSyncDto`, because the whole batch is one `$transaction`.
 
 #### Conflict Resolution Model
 The synchronization engine uses a **version-based rejection model** (optimistic concurrency control):
 - The server does not silently or unpredictably merge conflicting payload fields.
-- When an inbound change has `clientVersion < serverVersion`, the mutation is omitted from `accepted` and a conflict entry is appended to the response (`reason: "VERSION_MISMATCH"`, `clientVersion`, `serverVersion`, `serverPayload`).
-- The client application is responsible for resolving the conflict (prompting user, performing a 3-way merge, or applying domain-specific heuristics), and then re-submitting with an incremented version.
-
-#### `E2eEncryptionService` (`src/sync/e2e-encryption.service.ts`)
-
-| Function Signature | Description & Behavior | Invocation Site |
-|-------------------|------------------------|-----------------|
-| `encryptPayload(payload: any, recipientPublicKey: string): Promise<EncryptedPayload>` | Encrypts entity payload using AES-GCM and wraps symmetric key with RSA public key for client E2EE. | `SyncService` & SDK clients |
-| `decryptPayload(encryptedData: EncryptedPayload, recipientPrivateKey: string): Promise<any>` | Decrypts symmetric key using recipient private key and decrypts AES-GCM payload. | `SyncService` & SDK clients |
+- When an inbound change has `clientVersion < serverVersion`, the mutation is omitted from `accepted` and a conflict entry is appended to the response (`reason: "VERSION_MISMATCH"`, `clientVersion`, `serverVersion`, `serverPayload`). That is the only conflict this path produces, and the only reason string that exists.
+- `clientVersion == serverVersion` is **accepted**. The comparison is deliberately strict-less-than: a push whose response was lost is re-sent at the number it already got, and refusing that would report a conflict over a change the log already holds. Nothing on the request distinguishes such a retry from two devices that edited from the same version, so a concurrent pair both lands and resolves by cursor order — the later row wins, and the author whose write was overwritten gets no error. They discover it on the next pull, when the winner arrives and rewrites their local copy.
+- The client application is responsible for what it does with a refusal. The shipped Flutter client keeps the queued change, says which note lost, and reloads the open editor over the winner so the discarded text cannot be typed over and re-pushed. **There is no merge on either side:** nothing in either repository performs a 3-way merge or per-field resolution, and every payload on the log is one device's whole document. (An earlier version of this section listed merging as an option; no code has ever done it, and the `ConflictResolverService` that would have was deleted rather than wired.)
+- For `vault_item` the blob is opaque, so there is nothing to merge: the losing write is reported as a conflict and the client applies remote blobs by version order.
 
 #### `SyncGateway` (`src/sync/sync.gateway.ts`)
 
@@ -222,21 +223,24 @@ Manages calendars, timed/all-day events, date-range window queries, and attendee
 ---
 
 ### 8. `VaultModule` (`src/vault`)
-Zero-Knowledge client-side encrypted password manager. Sever stores zero plaintext keys.
+Master-key *management* only. The module owns the salt, the Argon2id verifier, and the recovery material; it never sees plaintext entry content and never stores an entry.
+
+> [!IMPORTANT]
+> Not zero-knowledge. `VaultSetting.recoveryKey` is stored in plaintext beside `wrappedMasterKey` so a forgotten master password can be recovered instead of destroying the vault. Database read access therefore equals vault read access.
 
 #### `VaultSettingsService` (`src/vault/services/vault-settings.service.ts`)
-- `getSettings(userId: string): Promise<VaultSettingDto>` -> Fetches master key salt & KDF iteration configuration.
-- `upsertSettings(userId: string, dto: UpsertVaultSettingsDto): Promise<VaultSettingDto>` -> Configures salt & KDF iterations.
-
-#### `VaultItemsService` (`src/vault/services/vault-items.service.ts`)
 
 | Function Signature | Description & Behavior | Invocation Site |
 |-------------------|------------------------|-----------------|
-| `createItem(userId: string, dto: CreateVaultItemDto): Promise<VaultItemDto>` | Stores client-side encrypted item (`ciphertext`, `iv`, `authTag`) for logins, cards, notes, or identities. | `VaultItemsController.createItem` (`POST /vault/items`) |
-| `getItems(userId: string, query: QueryVaultItemsDto): Promise<VaultItemDto[]>` | Lists encrypted vault items filtered by item type (`LOGIN`, `CARD`, `SECURE_NOTE`, `IDENTITY`). | `VaultItemsController.getItems` (`GET /vault/items`) |
-| `getItemById(userId: string, itemId: string): Promise<VaultItemDto>` | Retrieves encrypted vault item by ID. | `VaultItemsController.getItemById` (`GET /vault/items/:id`) |
-| `updateItem(userId: string, itemId: string, dto: UpdateVaultItemDto): Promise<VaultItemDto>` | Updates encrypted ciphertext and authTag payload. | `VaultItemsController.updateItem` (`PUT /vault/items/:id`) |
-| `deleteItem(userId: string, itemId: string): Promise<{ success: boolean }>` | Soft-deletes vault item (`deletedAt = now()`). | `VaultItemsController.deleteItem` (`DELETE /vault/items/:id`) |
+| `setupVault(userId: string, dto: SetupVaultDto)` | Stores salt + verifier and, optionally, the recovery wrap. Refuses with `409` when a vault is already configured. | `VaultSettingsController.setupVault` (`POST /vault/settings/setup`) |
+| `getVaultSettings(userId: string)` | Returns salt and KDF fields; never the stored verifier. | `GET /vault/settings` |
+| `unlockVault(userId: string, dto: UnlockVaultDto)` | Compares the client-derived verifier against the stored one. | `POST /vault/settings/unlock` |
+| `requestRecoveryOtp(userId: string)` | Issues and emails a 6-digit `VAULT_RECOVERY` code; fails when no wrapped key exists. | `POST /vault/settings/recovery/request` |
+| `verifyRecoveryOtp(userId: string, otp: string)` | Spends the code, opens the 15-minute grant window, returns the recovery material. | `POST /vault/settings/recovery/verify` |
+| `completeRecovery(userId: string, dto: SetupVaultDto)` | Rotates salt, verifier and recovery wrap, clears the grant, audits `PASSWORD_CHANGED`. | `POST /vault/settings/recovery/complete` |
+
+#### Where the entries live
+Vault entries have no service, table, DTO or route in this module. They are `Change` rows with `entityType: "vault_item"` written by `SyncService.pushChanges` and read by `SyncService.pullChanges`; the payload contract is enforced in `src/sync/change-payload.validator.ts`. See `SyncModule` (section 5) and `docs/API_REFERENCE.md` §5 and §9.
 
 ---
 
@@ -249,7 +253,7 @@ Background job processing powered by `@nestjs/bull` and Redis queues.
 |----------------|------------------|------------------|-------------------|
 | `MailProcessor` | `handleSendEmail(job: Job<SendMailJobData>)` | `{ to, subject, template, context }` | Dispatches asynchronous emails via `Nodemailer`. |
 | `NotificationProcessor` | `handleSendNotification(job: Job<NotificationJobData>)` | `{ userId, channel, title, body }` | Dispatches push notifications / webhooks. |
-| `ExportProcessor` | `handleProcessExport(job: Job<ProcessExportJobData>)` | `{ userId, exportType }` | Generates full GDPR JSON data archive, uploads bundle, and emails download link. |
+| `ExportProcessor` | `handleProcessExport(job: Job<ProcessExportJobData>)` | `{ userId, exportType }` | **Stub.** Reads the user row and returns `{ user, exportType, exportedAt }`; it does not gather notes, tasks, events or vault entries, does not upload a bundle and does not email a link. |
 | `MaintenanceProcessor` | `handleCleanup(job: Job)` | `{}` | Periodically purges expired sessions and idempotency keys from DB. |
 
 ---
@@ -261,7 +265,7 @@ Centralized security SIEM event logging.
 
 | Function Signature | Description & Behavior | Invocation Site |
 |-------------------|------------------------|-----------------|
-| `recordEvent(userId: string \| null, action: AuditAction, req: Request, metadata?: any, resourceType?: string, resourceId?: string): Promise<AuditLog>` | Asynchronously writes security event to DB enriched with IP address, user agent, action type, resource IDs, and `requestId`. | Called across `AuthService`, `UsersService`, `DevicesService`, `VaultItemsService` |
+| `recordAuditLog(params: RecordAuditLogParams)` | Asynchronously writes security event to DB enriched with IP address, user agent, action type, resource IDs, and `requestId`. | Called across `AuthService`, `UsersService`, `DevicesService`, `VaultSettingsService` |
 | `queryLogs(dto: QueryAuditLogsDto): Promise<PaginatedAuditLogsDto>` | Queries security audit logs for administrative SIEM monitoring. | Admin security controllers |
 
 ---
@@ -326,7 +330,9 @@ Global database connection lifecycle manager.
 - `intercept(context: ExecutionContext, next: CallHandler)` -> Reads `Idempotency-Key` request header for POST requests. Returns cached response if key exists in Redis (24h TTL), otherwise executes request and caches response.
 
 #### `CustomThrottlerGuard` (`src/common/guards/custom-throttler.guard.ts`)
-- `handleRequest(context: ExecutionContext, limit: number, ttl: number)` -> Enforces rate limits per client IP address.
+- `static disabledByDefault(env): boolean` -> True when the environment means throttling should stand down: `APP_ENV=development`, `NODE_ENV=test`, `DISABLE_RATE_LIMITING=true` or `RATE_LIMIT_ENABLED=false`. Exposed as a plain function of the env so the rule is testable without an HTTP request.
+- `shouldSkip(context: ExecutionContext)` -> Returns `false` (throttle) whenever the limits are active; an explicit `RATE_LIMIT_ENABLED=true` outranks the environment default. When throttling is off, the `x-skip-throttle` / `x-bypass-rate-limit` headers are honoured only if an operator set `RATE_LIMIT_HEADER_BYPASS=true`, and never under `APP_ENV=production` — a request cannot opt itself out.
+- `getTracker(req)` -> Throttling bucket key: `user:<id>` once a JWT has been verified, otherwise `ip:<first x-forwarded-for value>`. Authenticated traffic is therefore limited per account, not per shared NAT/proxy address.
 
 #### `JwtAuthGuard` (`src/auth/guards/jwt-auth.guard.ts`)
 - `canActivate(context: ExecutionContext)` -> Validates JWT access token in `Authorization: Bearer <token>` header or `refresh_token` cookie.

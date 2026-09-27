@@ -38,6 +38,14 @@ describe("Queue Processors", () => {
       },
       change: {
         deleteMany: jest.fn().mockResolvedValue({ count: 12 }),
+        // One user with 12 rows past the retention cutoff.
+        groupBy: jest
+          .fn()
+          .mockResolvedValue([{ userId: mockUser.id, _count: { _all: 12 } }]),
+      },
+      device: {
+        // No live device asks for anything, by default.
+        findMany: jest.fn().mockResolvedValue([]),
       },
       user: {
         findUnique: jest.fn().mockResolvedValue(mockUser),
@@ -157,6 +165,76 @@ describe("Queue Processors", () => {
       expect(prismaService.session.deleteMany).toHaveBeenCalled();
       expect(prismaService.idempotencyKey.deleteMany).toHaveBeenCalled();
       expect(prismaService.change.deleteMany).toHaveBeenCalled();
+    });
+
+    it("prunes the whole expired span when no live device is still reading it", async () => {
+      await maintenanceProcessor.handleCleanupExpired({ id: 5, data: {} } as Job);
+
+      // The old query was one global `deleteMany({createdAt})`. Per user is what
+      // lets the floor below exist at all, since cursors count per user.
+      expect(prismaService.change.deleteMany).toHaveBeenCalledWith({
+        where: expect.objectContaining({ userId: mockUser.id }),
+      });
+      const where = prismaService.change.deleteMany.mock.calls[0][0].where;
+      expect(where.cursor).toBeUndefined();
+    });
+
+    it("stops the prune at the oldest cursor a live device has not pulled", async () => {
+      // 52 expired rows, of which the slow device has read up to cursor 40.
+      prismaService.change.groupBy.mockResolvedValue([
+        { userId: mockUser.id, _count: { _all: 52 } },
+      ]);
+      prismaService.device.findMany.mockResolvedValue([
+        { userId: mockUser.id, syncStates: [{ lastPulledCursor: "40" }] },
+        { userId: mockUser.id, syncStates: [{ lastPulledCursor: "900" }] },
+      ]);
+      prismaService.change.deleteMany.mockResolvedValue({ count: 40 });
+
+      const result = await maintenanceProcessor.handleCleanupExpired({
+        id: 6,
+        data: {},
+      } as Job);
+
+      const where = prismaService.change.deleteMany.mock.calls[0][0].where;
+      // The slower of the two devices holds the floor, not the newer.
+      expect(where.cursor).toEqual({ lt: BigInt(40) });
+      expect(result.purgedChanges).toBe(40);
+      expect(result.heldBackForIdleDevices).toBe(12);
+    });
+
+    it("leaves the log alone while a live device has never pulled", async () => {
+      prismaService.device.findMany.mockResolvedValue([
+        { userId: mockUser.id, syncStates: [] },
+      ]);
+      prismaService.change.deleteMany.mockResolvedValue({ count: 0 });
+
+      const result = await maintenanceProcessor.handleCleanupExpired({
+        id: 7,
+        data: {},
+      } as Job);
+
+      const where = prismaService.change.deleteMany.mock.calls[0][0].where;
+      expect(where.cursor).toEqual({ lt: BigInt(0) });
+      // The row that would have been deleted is reported rather than dropped:
+      // a log that outlives its nominal retention is the signal that somebody
+      // is far behind, not a failure of this job.
+      expect(result.purgedChanges).toBe(0);
+      expect(result.heldBackForIdleDevices).toBe(12);
+    });
+
+    it("asks only about devices that can still pull", async () => {
+      await maintenanceProcessor.handleCleanupExpired({ id: 8, data: {} } as Job);
+
+      // A revoked device cannot pull again, so leaving it in would pin the log
+      // open forever on a checkpoint nobody will ever advance.
+      expect(prismaService.device.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            revokedAt: null,
+            userId: { in: [mockUser.id] },
+          }),
+        }),
+      );
     });
   });
 });

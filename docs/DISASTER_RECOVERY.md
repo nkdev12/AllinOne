@@ -88,5 +88,6 @@ Database backups are generated daily using [backup-database.sh](file:///home/swa
 Disaster recovery drills must be executed semi-annually:
 1. Restore database backup into isolated staging environment (`allinone_test_dr`).
 2. Run database integrity validation query counts.
-3. Validate user authentication, note decryption, task retrieval, and zero-knowledge vault unlock.
+3. Validate user authentication, note and task retrieval through `POST /sync/pull`, and a vault unlock: derive the master-key verifier from a known master password and confirm `POST /vault/settings/unlock` accepts it, then open at least one `vault_item` entry client-side.
+4. Confirm the restored `VaultSetting` rows still carry `recoveryKey` and `wrappedMasterKey`. They are backed up in plaintext, so a restore that lost them leaves those vaults unrecoverable, and a backup copy is itself a copy of every vault's contents.
 

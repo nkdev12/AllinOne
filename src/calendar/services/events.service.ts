@@ -8,6 +8,7 @@ import { CreateEventDto } from "../dto/create-event.dto";
 import { UpdateEventDto } from "../dto/update-event.dto";
 import { QueryEventsDto } from "../dto/query-events.dto";
 import { CreateEventReminderDto } from "../dto/create-event-reminder.dto";
+import { appendChange } from "@/sync/change-cursor";
 import {
   AttendeeStatus,
   ChangeOperation,
@@ -71,20 +72,18 @@ export class EventsService {
         },
       });
 
-      await tx.change.create({
-        data: {
-          userId,
-          entityType: "event",
-          entityId: event.id,
-          operation: ChangeOperation.CREATE,
-          version: event.version,
-          payload: {
-            title: event.title,
-            calendarId: event.calendarId,
-            startAt: event.startAt,
-            endAt: event.endAt,
-            isAllDay: event.isAllDay,
-          },
+      await appendChange(tx, {
+        userId,
+        entityType: "event",
+        entityId: event.id,
+        operation: ChangeOperation.CREATE,
+        version: event.version,
+        payload: {
+          title: event.title,
+          calendarId: event.calendarId,
+          startAt: event.startAt,
+          endAt: event.endAt,
+          isAllDay: event.isAllDay,
         },
       });
 
@@ -223,19 +222,17 @@ export class EventsService {
         },
       });
 
-      await tx.change.create({
-        data: {
-          userId,
-          entityType: "event",
-          entityId: updatedEvent.id,
-          operation: ChangeOperation.UPDATE,
-          version: updatedEvent.version,
-          payload: {
-            title: updatedEvent.title,
-            startAt: updatedEvent.startAt,
-            endAt: updatedEvent.endAt,
-            status: updatedEvent.status,
-          },
+      await appendChange(tx, {
+        userId,
+        entityType: "event",
+        entityId: updatedEvent.id,
+        operation: ChangeOperation.UPDATE,
+        version: updatedEvent.version,
+        payload: {
+          title: updatedEvent.title,
+          startAt: updatedEvent.startAt,
+          endAt: updatedEvent.endAt,
+          status: updatedEvent.status,
         },
       });
 
@@ -299,15 +296,13 @@ export class EventsService {
         data: { deletedAt: new Date(), version: { increment: 1 } },
       });
 
-      await tx.change.create({
-        data: {
-          userId,
-          entityType: "event",
-          entityId: eventId,
-          operation: ChangeOperation.DELETE,
-          version: existing.version + 1,
-          payload: { id: eventId },
-        },
+      await appendChange(tx, {
+        userId,
+        entityType: "event",
+        entityId: eventId,
+        operation: ChangeOperation.DELETE,
+        version: existing.version + 1,
+        payload: { id: eventId },
       });
 
       return { success: true, message: "Event deleted successfully." };

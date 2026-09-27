@@ -10,6 +10,10 @@ describe("AiService", () => {
   let configServiceMock: any;
 
   beforeEach(async () => {
+    // The converter writes one log row per task it creates, and every row is
+    // numbered from this counter — so the mock has to hand out a fresh number
+    // and a row, the way the real document and collection do.
+    let seq = BigInt(0);
     prismaMock = {
       note: {
         findFirst: jest.fn(),
@@ -18,7 +22,10 @@ describe("AiService", () => {
         create: jest.fn(),
       },
       change: {
-        create: jest.fn(),
+        create: jest.fn().mockResolvedValue({ id: "change-1" }),
+      },
+      syncCursor: {
+        upsert: jest.fn(async () => ({ seq: ++seq })),
       },
       $transaction: jest.fn().mockImplementation(async (callback) => {
         return callback(prismaMock);
@@ -154,6 +161,32 @@ describe("AiService", () => {
       expect(response.createdCount).toBe(1);
       expect(prismaMock.task.create).toHaveBeenCalled();
       expect(prismaMock.change.create).toHaveBeenCalled();
+    });
+
+    it("numbers every task change it logs, not just the first", async () => {
+      prismaMock.note.findFirst.mockResolvedValue({
+        id: "note-10",
+        title: "DevOps Checklist",
+      });
+      prismaMock.task.create.mockResolvedValue({
+        id: "task-1",
+        title: "Audit IAM roles",
+        version: 1,
+        priority: "HIGH",
+      });
+
+      // One call, two tasks, two rows: this is the only module that logs inside
+      // a loop, so it is where a shared cursor could have been handed out once
+      // and reused. Two rows on one cursor are pulled as one — the second is
+      // skipped for good, and nothing on the read path says so.
+      await service.convertTasksForNote("user-1", "note-10", {
+        tasks: [{ title: "Audit IAM roles" }, { title: "Rotate the JWT keys" }],
+      });
+
+      const cursors = prismaMock.change.create.mock.calls.map(
+        ([arg]: any[]) => arg.data.cursor,
+      );
+      expect(cursors).toEqual([BigInt(1), BigInt(2)]);
     });
 
     it("should throw NotFoundException if note is not found", async () => {

@@ -89,7 +89,12 @@ describe("AuthService", () => {
         findFirst: jest.fn().mockResolvedValue(mockDevice),
       },
       session: {
-        create: jest.fn().mockResolvedValue(mockSession),
+        // Echoes the caller's `data` back, the way the real row does — the
+        // service mints the session id itself, and tests need to see the one
+        // that was stored.
+        create: jest.fn((args: any) =>
+          Promise.resolve({ ...mockSession, ...args.data }),
+        ),
         findUnique: jest.fn().mockResolvedValue(mockSession),
         update: jest.fn().mockResolvedValue(mockSession),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
@@ -186,7 +191,7 @@ describe("AuthService", () => {
       expect(result).toBeDefined();
       expect(result.user?.email).toBe("test@example.com");
       expect(result.tokens?.accessToken).toBe("mock-jwt-token");
-      expect(result.sessionId).toBe("session-uuid-789");
+      expect(result.sessionId).toEqual(expect.any(String));
       expect(auditLogService.recordAuditLog).toHaveBeenCalledWith(
         expect.objectContaining({
           action: AuditAction.ACCOUNT_CREATED,
@@ -404,6 +409,40 @@ describe("AuthService", () => {
           lockedUntil: null,
         },
       });
+    });
+
+    it("names the session row inside the tokens it mints", async () => {
+      prismaService.authentication.findFirst.mockResolvedValue({
+        ...validAuthRecord,
+        user: {
+          ...mockUser,
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+        },
+      });
+      (argon2.verify as jest.Mock).mockResolvedValue(true);
+
+      const result = await service.login({
+        email: "test@example.com",
+        password: "CorrectPassword123!",
+      });
+
+      // `JwtStrategy` only compares a token against its session row when the
+      // token says which session it is, and `POST /auth/logout` reads the id
+      // from that same claim. A login that minted tokens without one handed out
+      // a session the client could not sign out of.
+      const stored = prismaService.session.create.mock.calls.at(-1)[0].data;
+      const signed = jwtService.sign.mock.calls.map(
+        ([payload]: [Record<string, unknown>]) => payload,
+      );
+
+      expect(stored.id).toEqual(expect.any(String));
+      expect(result.sessionId).toBe(stored.id);
+      expect(signed).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ sub: mockUser.id, sessionId: stored.id }),
+        ]),
+      );
     });
 
     it("hands back the device row the saved session belongs to", async () => {
