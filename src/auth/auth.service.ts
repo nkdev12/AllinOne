@@ -339,8 +339,9 @@ export class AuthService {
           email: user.email,
           deviceId: device.id,
           purpose: "MFA_CHALLENGE",
+          type: "mfa_challenge",
         },
-        { secret: this.configService.jwtAccessSecret, expiresIn: "5m" },
+        { secret: this.configService.jwtMfaSecret, expiresIn: "5m" },
       );
 
       return {
@@ -520,13 +521,15 @@ export class AuthService {
         format: "jwk",
       });
 
+      const appleClientId = this.configService.appleClientId;
+      if (!appleClientId) {
+        throw new UnauthorizedException("Apple OAuth is not configured on this server");
+      }
       const verifyOptions: jwt.VerifyOptions = {
         algorithms: ["RS256"],
         issuer: "https://appleid.apple.com",
+        audience: appleClientId,
       };
-      if (this.configService.appleClientId) {
-        verifyOptions.audience = this.configService.appleClientId;
-      }
 
       const payload = jwt.verify(idToken, publicKey, verifyOptions) as any;
       if (!payload || !payload.sub || !payload.email) {
@@ -564,12 +567,14 @@ export class AuthService {
         format: "jwk",
       });
 
+      const microsoftClientId = this.configService.microsoftClientId;
+      if (!microsoftClientId) {
+        throw new UnauthorizedException("Microsoft OAuth is not configured on this server");
+      }
       const verifyOptions: jwt.VerifyOptions = {
         algorithms: ["RS256"],
+        audience: microsoftClientId,
       };
-      if (this.configService.microsoftClientId) {
-        verifyOptions.audience = this.configService.microsoftClientId;
-      }
 
       const payload = jwt.verify(idToken, publicKey, verifyOptions) as any;
       const email = payload?.email || payload?.preferred_username;
@@ -599,10 +604,14 @@ export class AuthService {
   }
 
   private async verifyGoogleToken(idToken: string) {
+    const googleClientId = this.configService.googleClientId;
+    if (!googleClientId) {
+      throw new UnauthorizedException("Google OAuth is not configured on this server");
+    }
     try {
       const ticket = await this.googleClient.verifyIdToken({
         idToken,
-        audience: this.configService.googleClientId,
+        audience: googleClientId,
       });
       const payload = ticket.getPayload();
       if (!payload || !payload.email) {
@@ -615,6 +624,9 @@ export class AuthService {
         picture: payload.picture,
       };
     } catch (error) {
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
       this.logger.error("Failed to verify Google ID token", error);
       throw new UnauthorizedException("Invalid or expired Google ID token");
     }
@@ -632,9 +644,18 @@ export class AuthService {
   ): Promise<AuthResponseDto> {
     const normalizedEmail = email.toLowerCase();
 
-    let user = await this.usersService.findByEmail(normalizedEmail);
+    let user = await this.prisma.user.findFirst({
+      where: { email: normalizedEmail },
+    });
 
-    if (!user) {
+    if (user) {
+      if (user.deletedAt || user.status !== "ACTIVE") {
+        throw unauthorized(
+          ErrorCode.ACCOUNT_DISABLED,
+          "User account is inactive or deleted",
+        );
+      }
+    } else {
       user = await this.prisma.user.create({
         data: {
           email: normalizedEmail,
@@ -815,7 +836,7 @@ export class AuthService {
   async requestEmailVerification(email: string): Promise<{ message: string }> {
     const user = await this.usersService.findByEmail(email);
     if (user && !user.emailVerifiedAt) {
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const otp = crypto.randomInt(100000, 1000000).toString();
       const codeHash = crypto.createHash("sha256").update(otp).digest("hex");
       const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
 
@@ -1025,6 +1046,54 @@ export class AuthService {
     };
   }
 
+  private getTotpEncryptionKey(): Buffer {
+    const rawKey =
+      this.configService.encryptionKey ||
+      "allinone-default-dev-totp-encryption-key-32b";
+    return crypto.createHash("sha256").update(rawKey).digest();
+  }
+
+  private encryptTotpSecret(secret: string): string {
+    const key = this.getTotpEncryptionKey();
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+    const encrypted = Buffer.concat([
+      cipher.update(secret, "utf8"),
+      cipher.final(),
+    ]);
+    const tag = cipher.getAuthTag();
+    return `v1:${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
+  }
+
+  private decryptTotpSecret(stored: string): string {
+    if (!stored.startsWith("v1:")) {
+      // Backward compatibility for existing plaintext / unencrypted secrets
+      return stored;
+    }
+    const parts = stored.split(":");
+    if (parts.length !== 4) {
+      return stored;
+    }
+    const [, ivHex, tagHex, dataHex] = parts;
+    try {
+      const key = this.getTotpEncryptionKey();
+      const decipher = crypto.createDecipheriv(
+        "aes-256-gcm",
+        key,
+        Buffer.from(ivHex, "hex"),
+      );
+      decipher.setAuthTag(Buffer.from(tagHex, "hex"));
+      const decrypted = Buffer.concat([
+        decipher.update(Buffer.from(dataHex, "hex")),
+        decipher.final(),
+      ]);
+      return decrypted.toString("utf8");
+    } catch (err) {
+      this.logger.error("Failed to decrypt TOTP secret", err);
+      return stored;
+    }
+  }
+
   async generateMfaSecret(userId: string): Promise<MfaSecretResponseDto> {
     const user = await this.usersService.getUserById(userId);
     if (!user) {
@@ -1043,11 +1112,11 @@ export class AuthService {
       where: { userId },
       create: {
         userId,
-        totpSecret: secret,
+        totpSecret: this.encryptTotpSecret(secret),
         totpEnabled: false,
       },
       update: {
-        totpSecret: secret,
+        totpSecret: this.encryptTotpSecret(secret),
         totpEnabled: false,
       },
     });
@@ -1075,7 +1144,7 @@ export class AuthService {
 
     const verifyRes = verify({
       token: dto.totpCode,
-      secret: mfaSetting.totpSecret,
+      secret: this.decryptTotpSecret(mfaSetting.totpSecret),
     });
     const isValid = Boolean(
       verifyRes &&
@@ -1208,7 +1277,7 @@ export class AuthService {
     if (dto.totpCode) {
       const verifyRes = verify({
         token: dto.totpCode,
-        secret: mfaSetting.totpSecret,
+        secret: this.decryptTotpSecret(mfaSetting.totpSecret),
       });
       isSecondFactorValid = Boolean(
         verifyRes &&
@@ -1253,7 +1322,7 @@ export class AuthService {
     let payload: any;
     try {
       payload = this.jwtService.verify(dto.mfaToken, {
-        secret: this.configService.jwtAccessSecret,
+        secret: this.configService.jwtMfaSecret,
       });
 
       if (payload.purpose !== "MFA_CHALLENGE") {
@@ -1275,6 +1344,26 @@ export class AuthService {
       throw new UnauthorizedException("User account is inactive or deleted");
     }
 
+    if (user.lockedUntil && new Date() < new Date(user.lockedUntil)) {
+      const remainingMs = new Date(user.lockedUntil).getTime() - Date.now();
+      const remainingMinutes = Math.max(1, Math.ceil(remainingMs / 60000));
+      await this.auditLogService?.recordAuditLog({
+        userId: user.id,
+        action: AuditAction.LOGIN_FAILURE,
+        ipAddress,
+        userAgent,
+        metadata: {
+          email: user.email,
+          reason: "Account is temporarily locked",
+          remainingMinutes,
+        },
+      });
+      throw unauthorized(
+        ErrorCode.RATE_LIMITED,
+        `Account is temporarily locked due to multiple failed login attempts. Please try again in ${remainingMinutes} minute(s).`,
+      );
+    }
+
     const mfaSetting = await this.prisma.mFASetting.findUnique({
       where: { userId },
     });
@@ -1288,7 +1377,7 @@ export class AuthService {
     if (dto.totpCode) {
       const verifyRes = verify({
         token: dto.totpCode,
-        secret: mfaSetting.totpSecret,
+        secret: this.decryptTotpSecret(mfaSetting.totpSecret),
       });
       isCodeValid = Boolean(
         verifyRes &&
@@ -1299,10 +1388,72 @@ export class AuthService {
     }
 
     if (!isCodeValid) {
+      const attempts = (user.failedLoginAttempts || 0) + 1;
+      const MAX_FAILED_ATTEMPTS = 5;
+      const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
+      const isNowLocked = attempts >= MAX_FAILED_ATTEMPTS;
+      const lockedUntil = isNowLocked
+        ? new Date(Date.now() + LOCKOUT_DURATION_MS)
+        : null;
+
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          failedLoginAttempts: attempts,
+          lockedUntil,
+        },
+      });
+
+      if (isNowLocked) {
+        await this.auditLogService?.recordAuditLog({
+          userId: user.id,
+          action: AuditAction.ACCOUNT_LOCKED,
+          ipAddress,
+          userAgent,
+          metadata: {
+            email: user.email,
+            attempts,
+            lockedUntil,
+            reason: "Maximum failed MFA attempts reached",
+          },
+        });
+
+        this.logger.warn(
+          `[AuthService] Account ${user.id} locked for 15 minutes after ${attempts} failed attempts`,
+        );
+
+        throw unauthorized(
+          ErrorCode.RATE_LIMITED,
+          "Account has been temporarily locked for 15 minutes due to multiple failed login attempts.",
+        );
+      }
+
+      await this.auditLogService?.recordAuditLog({
+        userId: user.id,
+        action: AuditAction.LOGIN_FAILURE,
+        ipAddress,
+        userAgent,
+        metadata: {
+          email: user.email,
+          failedLoginAttempts: attempts,
+          reason: "MFA verification failed",
+        },
+      });
+
       throw unauthorized(
         ErrorCode.MFA_CODE_INVALID,
         "Invalid TOTP verification code or recovery code",
       );
+    }
+
+    if (user.failedLoginAttempts > 0 || user.lockedUntil !== null) {
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+        },
+      });
     }
 
     const { tokens, session } = await this.issueSession({
@@ -1339,22 +1490,28 @@ export class AuthService {
     email: string,
     sessionId?: string,
   ): Promise<AuthTokenDataDto> {
-    const payload = { sub: userId, email, ...(sessionId ? { sessionId } : {}) };
+    const basePayload = { sub: userId, email, ...(sessionId ? { sessionId } : {}) };
 
     // The seconds form, not the `JWT_*_EXPIRATION` string, goes to `sign()`:
     // then the `exp` stamped into the token and the `expiresIn` handed back for
     // the client to count down are the same number, and the only interpretation
     // of "15m" in the request path is the parser's. One setting, one decision,
     // three places that read it.
-    const accessToken = this.jwtService.sign(payload, {
-      secret: this.configService.jwtAccessSecret,
-      expiresIn: this.configService.jwtAccessExpiresInSeconds,
-    });
+    const accessToken = this.jwtService.sign(
+      { ...basePayload, type: "access" },
+      {
+        secret: this.configService.jwtAccessSecret,
+        expiresIn: this.configService.jwtAccessExpiresInSeconds,
+      },
+    );
 
-    const refreshToken = this.jwtService.sign(payload, {
-      secret: this.configService.jwtRefreshSecret,
-      expiresIn: this.configService.jwtRefreshExpiresInSeconds,
-    });
+    const refreshToken = this.jwtService.sign(
+      { ...basePayload, type: "refresh" },
+      {
+        secret: this.configService.jwtRefreshSecret,
+        expiresIn: this.configService.jwtRefreshExpiresInSeconds,
+      },
+    );
 
     return {
       accessToken,

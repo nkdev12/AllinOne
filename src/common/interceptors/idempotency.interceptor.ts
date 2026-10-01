@@ -9,8 +9,6 @@ import { Observable, of } from "rxjs";
 import { tap } from "rxjs/operators";
 import { PrismaService } from "@/common/prisma/prisma.service";
 
-const NIL_UUID = "00000000-0000-0000-0000-000000000000";
-
 @Injectable()
 export class IdempotencyInterceptor implements NestInterceptor {
   private readonly logger = new Logger(IdempotencyInterceptor.name);
@@ -67,7 +65,13 @@ export class IdempotencyInterceptor implements NestInterceptor {
       return next.handle();
     }
 
-    const userId = request.user?.id || NIL_UUID;
+    const userId = request.user?.id;
+    if (!userId) {
+      // Unauthenticated requests (e.g. login, register, refresh) must not be
+      // pooled under a shared NIL_UUID bucket, preventing credential and token
+      // leakage across distinct callers.
+      return next.handle();
+    }
     const now = new Date();
 
     // The row is addressed by the account *and* the key. Addressing by key alone

@@ -526,20 +526,23 @@ Both are raised before any change is read, so a refused sync writes nothing.
 
 ### 5. Realtime & Delta Synchronization (`/sync`)
 
-**Two write paths, and they are not the same store.** For `vault_item`, the
+**Two write paths, and they do not carry the same weight.** For `vault_item`, the
 oplog below is the only way in: `VaultModule` exposes settings and recovery only,
 and there is no REST route that creates, edits or deletes an entry. For `note`,
 `task` and `event` there is a full REST CRUD surface, and it writes the entity row
-(`Note`, `Task`, `Event`) _and_ appends a `Change` — while `/sync/push` appends a
-`Change` and **never touches the entity table**. Nothing anywhere replays `Change`
-rows back into `Note`, so the two stores are disjoint: a note pushed through sync
-has no `Note` row, and a note created by `POST /notes` reaches a device only
-because the same request logged it. What _is_ true of both: `appendChange`
+(`Note`, `Task`, `Event`) _and_ appends a `Change`. A `/sync/push` always appends
+the `Change`, and for a **note** it now also projects the accepted change onto the
+`Note` row (`projectAcceptedChange`, `src/sync/change-projection.ts`) — see
+[What a push writes to the `Note` table](#what-a-push-writes-to-the-note-table).
+`task`, `event`, `calendar` and `habit` still append to the log and touch nothing
+else, so a task pushed from a device has no `Task` row and `GET /tasks` will not
+answer for it. What _is_ true of both paths: `appendChange`
 (`src/sync/change-cursor.ts`) is the only way to write a `Change`, and it allocates
 the cursor, so a logged change cannot be numbered 0 and become unreadable.
-`entityType` must be one of `note`, `task`, `event`, `vault_item`
-(`SYNC_ENTITY_TYPES` in `src/sync/change-payload.validator.ts`); anything else
-fails the whole batch with `SYNC_PUSH_REJECTED` before a single row is written.
+`entityType` must be one of `note`, `task`, `event`, `calendar`, `habit`,
+`habit_log`, `vault_item` (`SYNC_ENTITY_TYPES` in
+`src/sync/change-payload.validator.ts`); anything else fails the whole batch with
+`SYNC_PUSH_REJECTED` before a single row is written.
 
 #### `POST /sync/push`
 
@@ -631,6 +634,39 @@ fails the whole batch with `SYNC_PUSH_REJECTED` before a single row is written.
   A refused change is not stored: the client keeps it and must reconcile against
   `serverPayload`.
 
+##### What a push writes to the `Note` table
+
+Until now `/sync/push` appended a `Change` and stopped, which quietly made the
+`Note` row a stale echo: a note edited on a laptop had its new text on the log and
+not in the table, so `GET /notes`, the `search` filter, the AI routes and anything
+reading `prisma.note` answered from the body the note was created with — and a REST
+edit afterwards logged a payload built from that stale row, which every device then
+replayed over the newer one. An accepted note change now also writes the row, in
+the same `$transaction` as its log append, through
+`projectAcceptedChange` (`src/sync/change-projection.ts`).
+
+What that write does, and does not, say:
+
+| Rule | Behaviour |
+|---|---|
+| Only accepted changes | A `VERSION_MISMATCH` refusal writes no row. The mirror agrees with the log. |
+| Only the keys the payload spoke | `tags`, `color`, `noteType` and `structured` are optional on the wire. A phone on the build before them pushes `{title, content}` and must not clear the user's labels in the table. |
+| `version` comes from the envelope | Not from the payload, and not by incrementing: the row's version has to be the number the log accepted, or REST's `increment: 1` starts from a copy behind the log. |
+| The tie rule a device applies | `version < row.version` does nothing; against a tombstone an equal version loses to the delete, because a delete and the in-flight edit that raced it carry the same number. `RESTORE` is the one operation that always revives. |
+| `DELETE` marks, and never invents | `deletedAt` is set and the version mirrored. A delete for an id this server never saw writes nothing. |
+| Another account's note | Read unfiltered by owner and compared: a mismatch logs a warning and writes nothing. `entityId` is the one field in a push that can name something the caller does not own. |
+| A value the column cannot hold | Dropped, not coerced. `assertPushableChanges` has already refused such a batch; this is the second line, because a throw here takes the whole push down with it. |
+| `updatedAt` | Not written. Prisma stamps it, and the projection would be overriding when this server last changed the row. |
+| `folderId`, `isPinned`, `isArchived` | Untouched. A device's arrangement of a note, never on the wire. |
+
+Two consequences a caller should know before relying on the row: the projection
+does not snapshot into `NoteHistory`, so a device's edit is not a version a
+`GET /notes/:id/history` can offer back, and it does not run the `noteTags`
+normalisation the REST path performs, so the scalar `tags` column and the
+`NoteTag` join can now disagree by more than a build order. And a change that
+fails to project rolls its whole batch back — the client keeps its queue and
+retries, which is visible, rather than a log entry whose mirror silently lied.
+
 #### `POST /sync/pull`
 
 - **Access**: `JwtAuthGuard`
@@ -710,6 +746,19 @@ fails the whole batch with `SYNC_PUSH_REJECTED` before a single row is written.
   it, so the only way to set it is to call `POST /notes` by hand. `GET` echoes it
   because the response is the row spread, which makes it state a REST caller can
   write and read but no device can receive through sync.
+  `noteType` and `structured` are two more optional keys on both bodies, under the
+  same names the sync payload uses: the note's format key (`normal`, `diary`,
+  `shopping`, `bucket`, `quotes`, and an unrecognised one is accepted because the
+  client renders it as a normal note) and the table a formatted note holds in
+  place of a body, as the JSON text its author serialises. Neither is parsed
+  server-side. An omitted key means the caller is saying nothing about it, and on
+  `PATCH` that is also what reaches the change log — the row's own copy is not
+  news. `/sync/push` now projects accepted note changes onto this row, so the copy
+  tracks the log for a note that has synced, but it is one writer among several and
+  the gap that matters is still open: a device editing offline holds a newer table
+  than this server has ever heard of, and a REST edit that restated the row's copy
+  would replay it backwards onto every other device, since a device reads a present
+  key as the whole new value. `GET` returns both from the row.
 - **Response**: `201 Created` — Created note object with version `1`.
 
 #### `GET /notes`

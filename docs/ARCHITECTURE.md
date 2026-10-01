@@ -281,7 +281,7 @@ Event
 ### 3. Synchronization
 
 ```
-Change (the event log; entityType is note | task | event | vault_item)
+Change (the event log; entityType is note | task | event | calendar | vault_item)
 ├── id (UUID, @map("_id"))
 ├── userId
 ├── deviceId (nullable — NULL for a change the server itself appended)
@@ -315,11 +315,16 @@ IdempotencyKey
 ```
 
 Writes reach the log from two directions, and only one of them is the sync API:
-`POST /sync/push` appends `Change` rows and nothing else, while the REST modules
-(`notes`, `tasks`, `calendar`, `ai`) write their own entity row **and** append a
-`Change` through `appendChange`. Nothing replays the log into those tables, so the
-row and the log can disagree and a device only ever sees the log. `vault_item` has
-no entity row and no REST route — for the vault the log genuinely is the store.
+the REST modules (`notes`, `tasks`, `calendar`, `ai`) write their own entity row
+**and** append a `Change` through `appendChange`, while `POST /sync/push` appends
+the `Change` and, for a **note** only, also projects it onto the `Note` row
+(`projectAcceptedChange`, `src/sync/change-projection.ts`) in the same
+transaction. A device edit used to leave the entity tables behind entirely, which
+made a row a stale echo of its own log and let a REST edit log a payload built
+from that echo. `task`, `event`, `calendar` and `habit` still append and touch
+nothing else, so their rows and their log can disagree and a device only ever
+sees the log. `vault_item` has no entity row and no REST route — for the vault the
+log genuinely is the store.
 
 #### Retention: how far back the log stays readable
 

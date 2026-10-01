@@ -1,4 +1,4 @@
-import { Injectable, Optional } from "@nestjs/common";
+import { Injectable, Logger, Optional } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { PushSyncDto } from "./dto/push-sync.dto";
 import { PullSyncDto } from "./dto/pull-sync.dto";
@@ -8,6 +8,7 @@ import { ErrorCode } from "@/common/errors/error-code";
 import { badRequest, forbidden, notFound } from "@/common/errors/http-errors";
 import { appendChange, getHighestChangeCursor } from "./change-cursor";
 import { assertPushableChanges } from "./change-payload.validator";
+import { projectAcceptedChange } from "./change-projection";
 
 export interface SyncConflictEntry {
   entityId: string;
@@ -20,6 +21,8 @@ export interface SyncConflictEntry {
 
 @Injectable()
 export class SyncService {
+  private readonly logger = new Logger(SyncService.name);
+
   constructor(
     private prisma: PrismaService,
     // The same wake-up the REST write paths now send, through the same choke
@@ -119,6 +122,14 @@ export class SyncService {
         });
         lastAssignedCursor = createdChange.cursor;
 
+        // The row behind the log entry. Only a change that got this far is
+        // projected — a refused one is a write the log never accepted, and the
+        // mirror has to agree with the log rather than with whatever a device
+        // happened to try. Inside this transaction on purpose: a push that
+        // rolled back would otherwise leave a domain row edited by changes no
+        // device will ever be handed.
+        await projectAcceptedChange(tx, userId, change);
+
         accepted.push(createdChange.id);
       }
 
@@ -174,10 +185,33 @@ export class SyncService {
     const cursorBigInt = parsePullCursor(dto.cursor);
     const limit = dto.limit || 100;
 
+    const serverHighestCursor = await getHighestChangeCursor(
+      this.prisma,
+      userId,
+    );
+
+    // If a client's requested cursor is strictly ahead of the highest cursor recorded
+    // on the server (e.g., following a disaster recovery restore from backup),
+    // continuing to filter with `cursor > cursorBigInt` would cause silent sync loss:
+    // the client would permanently miss changes between the restored cursor and its stranded cursor.
+    // In this case, we reset the query to pull from 0 and advance the client to the server's truth.
+    const isAheadOfServer =
+      cursorBigInt !== undefined && cursorBigInt > serverHighestCursor;
+
+    if (isAheadOfServer) {
+      this.logger.warn(
+        `Device ${dto.deviceId} requested cursor ${cursorBigInt.toString()} which exceeds server highest cursor ${serverHighestCursor.toString()} (server restored or cursor drift). Resetting pull to 0 to prevent silent sync loss.`,
+      );
+    }
+
+    const effectiveCursor = isAheadOfServer ? undefined : cursorBigInt;
+
     const rows = await this.prisma.change.findMany({
       where: {
         userId,
-        ...(cursorBigInt !== undefined ? { cursor: { gt: cursorBigInt } } : {}),
+        ...(effectiveCursor !== undefined
+          ? { cursor: { gt: effectiveCursor } }
+          : {}),
       },
       // createdAt only breaks ties while legacy rows still share cursor 0, i.e.
       // until scripts/backfill-change-cursor.ts has run.
@@ -206,12 +240,15 @@ export class SyncService {
       clientTimestamp: c.clientTimestamp ?? null,
     }));
 
-    // An empty page echoes the caller's checkpoint instead of inventing one: a
-    // device that stored a real cursor must not be handed "0" and start over.
+    // An empty page echoes the caller's checkpoint only when valid; when the caller was
+    // ahead of the server, fall back to serverHighestCursor so the device's checkpoint
+    // is aligned with the restored server.
     const nextCursor =
       formattedChanges.length > 0
         ? formattedChanges[formattedChanges.length - 1].cursor
-        : dto.cursor || "0";
+        : isAheadOfServer
+          ? serverHighestCursor.toString()
+          : dto.cursor || "0";
 
     await this.prisma.deviceSyncState.upsert({
       where: { deviceId: dto.deviceId },

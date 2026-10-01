@@ -76,6 +76,7 @@ describe("AuthService", () => {
       user: {
         create: jest.fn().mockResolvedValue(mockUser),
         update: jest.fn().mockResolvedValue(mockUser),
+        findFirst: jest.fn().mockResolvedValue(mockUser),
       },
       authentication: {
         create: jest.fn().mockResolvedValue({ id: "auth-1" }),
@@ -138,6 +139,9 @@ describe("AuthService", () => {
       jwtRefreshExpiresInSeconds: 86400,
       emailVerifyEnabled: false,
       googleClientId: "google-client-id",
+      appleClientId: "apple-client-id",
+      microsoftClientId: "microsoft-client-id",
+      jwtMfaSecret: "mfa-secret",
     };
 
     otpService = {
@@ -574,6 +578,75 @@ describe("AuthService", () => {
         ErrorCode.MFA_CODE_INVALID,
       );
     });
+
+    it("locks account when 5 failed MFA attempts occur", async () => {
+      (verify as jest.Mock).mockReturnValue(false);
+      usersService.getUserById.mockResolvedValue({
+        ...mockUser,
+        failedLoginAttempts: 4,
+      });
+
+      const thrown = (await service
+        .verifyMfaLogin({ mfaToken: "mfa-token", totpCode: "000000" })
+        .catch((error: unknown) => error)) as HttpException;
+
+      expect(thrown).toBeInstanceOf(UnauthorizedException);
+      expect((thrown.getResponse() as { code?: string }).code).toBe(
+        ErrorCode.RATE_LIMITED,
+      );
+      expect(prismaService.user.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "user-uuid-123" },
+          data: expect.objectContaining({
+            failedLoginAttempts: 5,
+            lockedUntil: expect.any(Date),
+          }),
+        }),
+      );
+    });
+
+    it("refuses MFA verification when account is locked", async () => {
+      usersService.getUserById.mockResolvedValue({
+        ...mockUser,
+        lockedUntil: new Date(Date.now() + 60000),
+      });
+
+      const thrown = (await service
+        .verifyMfaLogin({ mfaToken: "mfa-token", totpCode: "123456" })
+        .catch((error: unknown) => error)) as HttpException;
+
+      expect(thrown).toBeInstanceOf(UnauthorizedException);
+      expect((thrown.getResponse() as { code?: string }).code).toBe(
+        ErrorCode.RATE_LIMITED,
+      );
+    });
+  });
+
+  describe("MFA secret encryption", () => {
+    it("stores encrypted totpSecret and verifies successfully with decrypted secret", async () => {
+      let storedSecret: string | null = null;
+      prismaService.mFASetting.upsert.mockImplementation(async ({ create }: any) => {
+        storedSecret = create.totpSecret;
+        return { ...mockMfaSetting, totpSecret: storedSecret };
+      });
+
+      const genResult = await service.generateMfaSecret("user-uuid-123");
+      expect(genResult.secret).toBe("MOCKSECRET123");
+      expect(storedSecret).toMatch(/^v1:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/);
+
+      prismaService.mFASetting.findUnique.mockResolvedValue({
+        ...mockMfaSetting,
+        totpSecret: storedSecret,
+      });
+
+      await service.enableMfa("user-uuid-123", { totpCode: "123456" });
+      expect(verify).toHaveBeenCalledWith(
+        expect.objectContaining({
+          token: "123456",
+          secret: "MOCKSECRET123",
+        }),
+      );
+    });
   });
 
   describe("OAuth integration", () => {
@@ -609,6 +682,44 @@ describe("AuthService", () => {
       expect(result).toBeDefined();
       expect(result.user?.email).toBe("test@example.com");
       expect(result.tokens?.accessToken).toBe("mock-jwt-token");
+    });
+
+    it("fails closed if Google client ID is not configured", async () => {
+      (configService as any).googleClientId = undefined;
+      await expect(
+        (service as any).verifyGoogleToken("some-id-token"),
+      ).rejects.toThrow(UnauthorizedException);
+    });
+
+    it("fails closed if Apple client ID is not configured", async () => {
+      (configService as any).appleClientId = undefined;
+      await expect(
+        service.verifyAppleToken("some-id-token"),
+      ).rejects.toThrow(UnauthorizedException);
+    });
+
+    it("fails closed if Microsoft client ID is not configured", async () => {
+      (configService as any).microsoftClientId = undefined;
+      await expect(
+        service.verifyMicrosoftToken("some-id-token"),
+      ).rejects.toThrow(UnauthorizedException);
+    });
+
+    it("rejects OAuth login if user account is deleted or inactive", async () => {
+      prismaService.user.findFirst.mockResolvedValue({
+        ...mockUser,
+        deletedAt: new Date(),
+      });
+
+      await expect(
+        (service as any).processOAuthLogin(
+          "GOOGLE",
+          "google-123",
+          "test@example.com",
+        ),
+      ).rejects.toMatchObject({
+        response: { code: ErrorCode.ACCOUNT_DISABLED },
+      });
     });
   });
 

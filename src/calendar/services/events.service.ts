@@ -18,6 +18,55 @@ import {
   ReminderChannel,
 } from "@prisma/client";
 
+export function eventChangePayload(event: any): Record<string, any> {
+  const reminderMinutes =
+    event.reminders && event.reminders.length > 0
+      ? event.reminders[0].minutesBefore
+      : (event.reminderMinutes ?? null);
+
+  const attendees = Array.isArray(event.attendees)
+    ? event.attendees.map((a: any) => ({
+        email: a.email ?? "",
+        name: a.name ?? "",
+        status: a.status ?? "NEEDS_ACTION",
+      }))
+    : [];
+
+  return {
+    calendarId: event.calendarId,
+    title: event.title ?? "",
+    description: event.description ?? null,
+    location: event.location ?? null,
+    startAt:
+      event.startAt instanceof Date
+        ? event.startAt.toISOString()
+        : event.startAt,
+    endAt:
+      event.endAt instanceof Date ? event.endAt.toISOString() : event.endAt,
+    isAllDay: Boolean(event.isAllDay),
+    recurrenceRule: event.recurrenceRule ?? null,
+    exceptions: Array.isArray(event.exceptions) ? event.exceptions : [],
+    exceptionUntil:
+      event.exceptionUntil instanceof Date
+        ? event.exceptionUntil.toISOString()
+        : (event.exceptionUntil ?? null),
+    recurrenceMasterId: event.recurrenceMasterId ?? null,
+    detachedOccurrenceAt:
+      event.detachedOccurrenceAt instanceof Date
+        ? event.detachedOccurrenceAt.toISOString()
+        : (event.detachedOccurrenceAt ?? null),
+    status: event.status ?? "CONFIRMED",
+    color: event.color ?? null,
+    attendees,
+    reminderMinutes,
+    createdAt:
+      event.createdAt instanceof Date
+        ? event.createdAt.toISOString()
+        : (event.createdAt ?? null),
+    version: event.version ?? 1,
+  };
+}
+
 @Injectable()
 export class EventsService {
   /**
@@ -93,13 +142,7 @@ export class EventsService {
         entityId: event.id,
         operation: ChangeOperation.CREATE,
         version: event.version,
-        payload: {
-          title: event.title,
-          calendarId: event.calendarId,
-          startAt: event.startAt,
-          endAt: event.endAt,
-          isAllDay: event.isAllDay,
-        },
+        payload: eventChangePayload(event),
       });
       highestCursor = logged.cursor;
 
@@ -250,12 +293,7 @@ export class EventsService {
         entityId: updatedEvent.id,
         operation: ChangeOperation.UPDATE,
         version: updatedEvent.version,
-        payload: {
-          title: updatedEvent.title,
-          startAt: updatedEvent.startAt,
-          endAt: updatedEvent.endAt,
-          status: updatedEvent.status,
-        },
+        payload: eventChangePayload(updatedEvent),
       });
       highestCursor = logged.cursor;
 
@@ -331,7 +369,7 @@ export class EventsService {
         entityId: eventId,
         operation: ChangeOperation.DELETE,
         version: existing.version + 1,
-        payload: { id: eventId },
+        payload: { version: existing.version + 1 },
       });
       highestCursor = logged.cursor;
 

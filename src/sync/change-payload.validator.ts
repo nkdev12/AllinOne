@@ -10,8 +10,21 @@ import type { FieldValidationError } from "@/common/errors/validation.pipe";
  */
 export const SYNC_ENTITY_TYPES = [
   "note",
+  // The desktop app's folder tree. A folder is a container the user arranges,
+  // and only three of its columns are the folder itself: what it is called,
+  // which note format a note created inside it inherits, and which glyph it
+  // wears. Where it sits in the tree is deliberately not on the wire, for the
+  // same reason a note's `folderId` is not — see `FOLDER_FIELDS`.
+  "folder",
   "task",
   "event",
+  // The client's calendar document, pushed whole on CREATE/UPDATE and as
+  // `{ version }` on DELETE: `{ name, color, sortOrder, isPrimary, version,
+  // createdAt }`. The calendar's identity is not in the payload — it is the uuid
+  // the client minted, carried as `entityId` and kept verbatim by the log, the
+  // same way `event` travels. Like `task` and `event` it is admitted by the type
+  // check alone and judged by no shape — see [DOCUMENT_SHAPES].
+  "calendar",
   "habit",
   "habit_log",
   "vault_item",
@@ -258,6 +271,15 @@ const HABIT_LOG_FIELDS: ReadonlyArray<DocumentField> = [
  * yet, which is why neither is `required`. A phone on the old build keeps
  * pushing `{title, content}` and must not be refused for it, so the rule here is
  * only that a key which *is* present has to be a value the column can hold.
+ *
+ * `noteType` and `structured` are the two the same rule guards, and the erasure
+ * they are worth guarding is subtler than `content`'s. The client will not store
+ * a `structured` that is not text (`sync_manager.dart:601`), so a payload
+ * carrying an object instead of the client's JSON text does not arrive as a
+ * stringified mess — it arrives as *null*, which the client reads as "this note
+ * has no table" and applies. The rows come back empty on every device that
+ * pulls the change, and the one device that still holds them is the one that
+ * sent the bad payload.
  */
 const NOTE_FIELDS: ReadonlyArray<DocumentField> = [
   {
@@ -298,6 +320,75 @@ const NOTE_FIELDS: ReadonlyArray<DocumentField> = [
     // The hex is the client's to choose; a colour is a string column or nothing,
     // the same latitude `Folder.color` and a habit's colour are given.
     key: "color",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "a string or null",
+  },
+  {
+    // Not closed to the five keys the app has today, the way `HABIT_FREQUENCIES`
+    // closes a habit's schedule to the four it has. A frequency is a rule the
+    // *server* would have to know how to draw, and a fifth is a habit nothing
+    // renders; a note format is only a name the client looks up, and
+    // `noteFormatOf` (`note_types.dart:252`) falls back to `normal` for a key it
+    // has not met. Listing the five here would mean an app build that adds a
+    // sixth cannot sync that note at all — its title and content refused with
+    // its type — so the column's own rule is the whole of it.
+    key: "noteType",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "a string or null",
+  },
+  {
+    // The client's serialised table, held as opaque text for the reason the
+    // vault holds its blob opaquely: the row shape is the app's to evolve and
+    // re-shaping it here would drop whatever this server has not been taught.
+    // Not parsed, then, but not free either — see the block above for what an
+    // object in this slot does once it is stored.
+    key: "structured",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "a string or null",
+  },
+];
+
+/**
+ * The keys `SyncManager._apply` reads off a folder change. A folder syncs as a
+ * whole document like a note, so the same erasure applies: an absent key arrives
+ * everywhere as an empty column.
+ *
+ * `name` is the only required one, because a folder with no name is no folder.
+ * `type` and `icon` are optional the way `color` is: a device on a build that
+ * never learned them keeps pushing `{name}` alone, and the folder's own default
+ * is the app's to supply, not this server's to invent.
+ *
+ * There is no `parentId`. Where a folder sits is a device's arrangement, filed
+ * under the same decision that keeps `folderId`, `isPinned` and `isArchived` off
+ * a note's payload — and it is the safer half of that call here, because a
+ * folder and its parent sync as two independent changes and a child that arrives
+ * before its parent would name something the log has not delivered yet.
+ */
+const FOLDER_FIELDS: ReadonlyArray<DocumentField> = [
+  {
+    key: "name",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "type",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "a string or null",
+  },
+  {
+    key: "icon",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "a string or null",
+  },
+  {
+    // Only a CREATE has a birth to announce, exactly as on a note.
+    key: "createdAt",
     required: false,
     accepts: (value) => value === null || typeof value === "string",
     expected: "a string or null",
@@ -399,19 +490,229 @@ function documentViolations(
   return violations;
 }
 
+const TASK_FIELDS: ReadonlyArray<DocumentField> = [
+  {
+    key: "title",
+    required: false,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "priority",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "status",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "description",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "dueDate",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "dueTime",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "recurrenceRule",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "completedAt",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "sectionId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "parentId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "projectId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "sortOrder",
+    required: false,
+    accepts: (value) => value === null || Number.isInteger(value),
+    expected: "null or an integer",
+  },
+  {
+    key: "timeSpentSeconds",
+    required: false,
+    accepts: (value) =>
+      value === null || (typeof value === "number" && value >= 0),
+    expected: "null or a positive number",
+  },
+];
+
+const EVENT_FIELDS: ReadonlyArray<DocumentField> = [
+  {
+    key: "title",
+    required: false,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "startAt",
+    required: false,
+    accepts: (value) => typeof value === "string",
+    expected: "an ISO date string",
+  },
+  {
+    key: "endAt",
+    required: false,
+    accepts: (value) => typeof value === "string",
+    expected: "an ISO date string",
+  },
+  {
+    key: "calendarId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "isAllDay",
+    required: false,
+    accepts: (value) => typeof value === "boolean",
+    expected: "a boolean",
+  },
+  {
+    key: "description",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "location",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "recurrenceRule",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "exceptions",
+    required: false,
+    accepts: (value) => value === null || Array.isArray(value),
+    expected: "null or an array",
+  },
+  {
+    key: "exceptionUntil",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "recurrenceMasterId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "detachedOccurrenceAt",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "status",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "color",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "attendees",
+    required: false,
+    accepts: (value) => value === null || Array.isArray(value),
+    expected: "null or an array",
+  },
+  {
+    key: "reminderMinutes",
+    required: false,
+    accepts: (value) => value === null || Number.isInteger(value),
+    expected: "null or an integer",
+  },
+];
+
+const CALENDAR_FIELDS: ReadonlyArray<DocumentField> = [
+  {
+    key: "name",
+    required: false,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "color",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "sortOrder",
+    required: false,
+    accepts: (value) => value === null || Number.isInteger(value),
+    expected: "null or an integer",
+  },
+  {
+    key: "isPrimary",
+    required: false,
+    accepts: (value) => value === null || typeof value === "boolean",
+    expected: "null or a boolean",
+  },
+];
+
 /**
  * The columns a device reads off one plaintext type, and the ceiling that type's
- * payload has. `task` and `event` are absent on purpose: their partial shape
- * legitimately varies per client, and judging them here would reject edits the
- * sync log is meant to carry untouched.
+ * payload has.
  */
 const DOCUMENT_SHAPES: Record<
   string,
   { fields: ReadonlyArray<DocumentField>; maxBytes: number }
 > = {
   note: { fields: NOTE_FIELDS, maxBytes: MAX_NOTE_PAYLOAD_BYTES },
+  folder: { fields: FOLDER_FIELDS, maxBytes: MAX_HABIT_PAYLOAD_BYTES },
   habit: { fields: HABIT_FIELDS, maxBytes: MAX_HABIT_PAYLOAD_BYTES },
   habit_log: { fields: HABIT_LOG_FIELDS, maxBytes: MAX_HABIT_PAYLOAD_BYTES },
+  task: { fields: TASK_FIELDS, maxBytes: MAX_NOTE_PAYLOAD_BYTES },
+  event: { fields: EVENT_FIELDS, maxBytes: MAX_NOTE_PAYLOAD_BYTES },
+  calendar: { fields: CALENDAR_FIELDS, maxBytes: MAX_HABIT_PAYLOAD_BYTES },
 };
 
 function violationsForChange(
@@ -447,8 +748,8 @@ function violationsForChange(
   }
 
   if (change.entityType !== "vault_item") {
-    // task / event, and anything the allow-list gains without a shape, are
-    // judged only by the entity-type check above.
+    // task / event / calendar, and anything the allow-list gains without a
+    // shape, are judged only by the entity-type check above.
     return violations;
   }
 

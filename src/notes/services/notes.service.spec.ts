@@ -34,6 +34,12 @@ describe("NotesService", () => {
     // other the account's `Tag` records, and the sync payload carries the first.
     tags: ["reading", "someday"],
     color: "#FFD54F",
+    // The format and its table, as the row holds them. On the fixture rather
+    // than left out, because the interesting rule is which changes copy them
+    // onto the wire and which leave them off — and a row that had neither would
+    // pass a test that was meant to catch one being restated.
+    noteType: "shopping",
+    structured: '{"rows":[{"id":"r1","item":"Bread"}]}',
     version: 1,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -289,9 +295,31 @@ describe("NotesService", () => {
         tags: ["reading", "someday"],
         color: "#FFD54F",
       });
+      // And the row's own format is *not* in it, though the fixture has one.
+      // `/sync/push` never writes the `Note` row, so that copy can be several
+      // versions behind the table already on the log — and a device reads a
+      // present key as the whole new value. Restating it would turn this rename
+      // into a note whose shopping list is the one from before.
+      expect(logged()).not.toHaveProperty("noteType");
+      expect(logged()).not.toHaveProperty("structured");
     });
 
-    it("says the same five things at create as the oplog path does", async () => {
+    it("says what the change only has to say, and nothing about the rest", async () => {
+      await service.updateNote(userId, noteId, {
+        title: "Renamed",
+        noteType: "quotes",
+      });
+
+      // Which keys are *spoken* is the rule here, not what is behind them: the
+      // mocked `note.update` hands back the fixture row whatever was written, so
+      // the value on the wire is the row's. The named key is on it and the one
+      // the caller left out is not, which is what lets a device holding a newer
+      // table keep it through somebody else's rename.
+      expect(logged().noteType).toBe(mockNote.noteType);
+      expect(logged()).not.toHaveProperty("structured");
+    });
+
+    it("says the same seven things at create as the oplog path does", async () => {
       await service.createNote(userId, {
         title: "New Note",
         content: "Content",
@@ -302,6 +330,8 @@ describe("NotesService", () => {
         "color",
         "content",
         "createdAt",
+        "noteType",
+        "structured",
         "tags",
         "title",
       ]);
@@ -346,10 +376,15 @@ describe("NotesService", () => {
         color: "#FFD54F",
         restoredFromVersion: 1,
       });
+      // A snapshot is a title and a body and nothing else, so a restore has
+      // nothing true to say about the note's table — and the row's copy of it
+      // is not the log's newest.
+      expect(logged()).not.toHaveProperty("noteType");
+      expect(logged()).not.toHaveProperty("structured");
     });
   });
 
-  describe("the label list and colour on the row", () => {
+  describe("the four columns the desktop client owns", () => {
     /** The `data` object the last `note.update` was handed. */
     const written = () => prismaService.note.update.mock.calls.at(-1)[0].data;
 
@@ -366,6 +401,17 @@ describe("NotesService", () => {
       expect(written().color).toBeUndefined();
     });
 
+    it("says nothing about the format or its table on the same edit", async () => {
+      await service.updateNote(userId, noteId, { content: "body" });
+
+      // The same rule, and the same cost for breaking it: a REST rename that
+      // defaulted `structured` to `null` would reach every device as a shopping
+      // list that has become empty, because the device reads a present key as the
+      // note's new whole table.
+      expect(written().noteType).toBeUndefined();
+      expect(written().structured).toBeUndefined();
+    });
+
     it("writes both when the caller names them, and clears on the empty list", async () => {
       await service.updateNote(userId, noteId, {
         content: "body",
@@ -377,6 +423,30 @@ describe("NotesService", () => {
       // reach the column.
       expect(written().tags).toEqual([]);
       expect(written().color).toBe("#FFD54F");
+    });
+
+    it("writes a format and a table the caller names, empty included", async () => {
+      await service.updateNote(userId, noteId, {
+        title: "Renamed",
+        noteType: "quotes",
+        // What the app serialises for a table the user has emptied — distinct,
+        // in the column and on the wire, from the `null` that means no table.
+        structured: '{"rows":[]}',
+      });
+
+      expect(written().noteType).toBe("quotes");
+      expect(written().structured).toBe('{"rows":[]}');
+    });
+
+    it("creates with neither rather than inventing either", async () => {
+      await service.createNote(userId, { title: "Plain", content: "body" });
+
+      // The row is what the log records, and a note this server makes has no
+      // format to claim and no table to describe — `normal` and `{}` would both
+      // be this endpoint deciding something about the app's own vocabulary.
+      expect(prismaService.note.create.mock.calls.at(-1)[0].data).toEqual(
+        expect.objectContaining({ noteType: null, structured: null }),
+      );
     });
   });
 

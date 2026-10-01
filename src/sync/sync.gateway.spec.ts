@@ -27,6 +27,7 @@ describe("SyncGateway", () => {
       verifyAsync: jest.fn().mockResolvedValue({
         sub: "user-uuid-123",
         deviceId: "device-uuid-456",
+        type: "access",
       }),
     };
 
@@ -146,6 +147,7 @@ describe("SyncGateway", () => {
       jwtService.verifyAsync.mockResolvedValue({
         sub: "user-uuid-123",
         sessionId: "session-1",
+        type: "access",
       });
 
       await gateway.handleConnection(mockClient);
@@ -159,10 +161,36 @@ describe("SyncGateway", () => {
       expect(mockClient.disconnect).not.toHaveBeenCalled();
     });
 
+    it("disconnects a token with purpose (e.g. MFA_CHALLENGE)", async () => {
+      jwtService.verifyAsync.mockResolvedValue({
+        sub: "user-uuid-123",
+        type: "access",
+        purpose: "MFA_CHALLENGE",
+      });
+
+      await gateway.handleConnection(mockClient);
+
+      expect(mockClient.disconnect).toHaveBeenCalledWith(true);
+      expect(mockClient.join).not.toHaveBeenCalled();
+    });
+
+    it("disconnects a token whose type is not access", async () => {
+      jwtService.verifyAsync.mockResolvedValue({
+        sub: "user-uuid-123",
+        type: "mfa_challenge",
+      });
+
+      await gateway.handleConnection(mockClient);
+
+      expect(mockClient.disconnect).toHaveBeenCalledWith(true);
+      expect(mockClient.join).not.toHaveBeenCalled();
+    });
+
     it("disconnects a revoked session", async () => {
       jwtService.verifyAsync.mockResolvedValue({
         sub: "user-uuid-123",
         sessionId: "session-gone",
+        type: "access",
       });
       usersService.isSessionLive.mockResolvedValue(false);
 
@@ -210,6 +238,7 @@ describe("SyncGateway", () => {
       jwtService.verifyAsync.mockResolvedValue({
         sub: "user-uuid-123",
         deviceId: "device-uuid-456",
+        type: "access",
       });
 
       await gateway.handleConnection(mockClient);
@@ -224,6 +253,7 @@ describe("SyncGateway", () => {
       jwtService.verifyAsync.mockResolvedValue({
         sub: "user-uuid-123",
         sid: "session-2",
+        type: "access",
       });
 
       await gateway.handleConnection(mockClient);
@@ -271,6 +301,7 @@ describe("SyncGateway", () => {
       jwtService.verifyAsync.mockResolvedValue({
         sub: "user-uuid-123",
         sessionId: "session-gone",
+        type: "access",
       });
       usersService.isSessionLive.mockResolvedValue(false);
 

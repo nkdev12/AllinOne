@@ -294,7 +294,12 @@ export class CollaborationService {
       orderBy: { createdAt: "asc" },
     });
 
-    return rows.map((row) => this.toResourceShare(row));
+    const isOwnerOrAdmin = access.isOwner || access.role === "ADMIN";
+    const visibleRows = isOwnerOrAdmin
+      ? rows
+      : rows.filter((row) => row.sharedWithUserId === userId);
+
+    return visibleRows.map((row) => this.toResourceShare(row));
   }
 
   async updateShareRole(

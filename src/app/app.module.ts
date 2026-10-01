@@ -71,6 +71,15 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
         JWT_ACCESS_EXPIRATION: Joi.string().default("15m"),
         JWT_REFRESH_SECRET: Joi.string().required(),
         JWT_REFRESH_EXPIRATION: Joi.string().default("7d"),
+        JWT_MFA_SECRET: Joi.string().allow("").optional(),
+
+        // OAuth Providers
+        OAUTH_GOOGLE_CLIENT_ID: Joi.string().allow("").optional(),
+        OAUTH_APPLE_CLIENT_ID: Joi.string().allow("").optional(),
+        OAUTH_MICROSOFT_CLIENT_ID: Joi.string().allow("").optional(),
+        GOOGLE_CLIENT_ID: Joi.string().allow("").optional(),
+        APPLE_CLIENT_ID: Joi.string().allow("").optional(),
+        MICROSOFT_CLIENT_ID: Joi.string().allow("").optional(),
 
         // Admin access (AdminGuard). Optional and with NO default on purpose:
         // unset or empty means the corresponding admit path is closed, so a

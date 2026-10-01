@@ -30,8 +30,10 @@ describe("change-payload validator", () => {
       expect(SYNC_ENTITY_TYPES).toEqual(
         expect.arrayContaining([
           "note",
+          "folder",
           "task",
           "event",
+          "calendar",
           "habit",
           "habit_log",
           "vault_item",
@@ -46,6 +48,33 @@ describe("change-payload validator", () => {
             payload: {},
           })),
         ),
+      ).not.toThrow();
+    });
+
+    it("accepts the calendar document the client queues", () => {
+      // The whole document on a CREATE, under the uuid the client minted for it,
+      // and just the superseding version on a DELETE. Nothing judges its shape:
+      // `calendar` has no entry in DOCUMENT_SHAPES, exactly like task and event.
+      expect(() =>
+        assertPushableChanges([
+          {
+            entityType: "calendar",
+            operation: ChangeOperation.CREATE,
+            payload: {
+              calendarId: "123e4567-e89b-12d3-a456-426614174000",
+              name: "Work",
+              color: "#0B57D0",
+              isPrimary: true,
+              sortOrder: 1,
+              version: 1,
+            },
+          },
+          {
+            entityType: "calendar",
+            operation: ChangeOperation.DELETE,
+            payload: { version: 2 },
+          },
+        ]),
       ).not.toThrow();
     });
 
@@ -69,6 +98,19 @@ describe("change-payload validator", () => {
           },
         ])[0].field,
       ).toBe("changes[0].entityType");
+
+      // The near-miss plural is still refused, and the answer still names the
+      // type just admitted: registering `calendar` widened nothing.
+      const nearMiss = collectChangeViolations([
+        {
+          entityType: "calendars",
+          operation: ChangeOperation.CREATE,
+          payload: { name: "Work" },
+        },
+      ])[0];
+
+      expect(nearMiss.field).toBe("changes[0].entityType");
+      expect(nearMiss.messages[0]).toContain("event, calendar, habit");
     });
   });
 
@@ -288,6 +330,72 @@ describe("change-payload validator", () => {
       ]);
     });
 
+    it("accepts the format and table a desktop client sends, and the shapes that mean none", () => {
+      expect(() =>
+        assertPushableChanges([
+          note({
+            title: "Weekly shop",
+            content: null,
+            version: 5,
+            noteType: "shopping",
+            structured: '{"rows":[{"id":"r1","item":"Bread"}]}',
+          }),
+          // `null` on both is a note with no format and a note with no table,
+          // which is a real edit: the app serialises a table the user cleared as
+          // `{"rows":[]}`, so the two states have to stay apart on the wire.
+          note(
+            {
+              title: "Plain",
+              content: "text",
+              noteType: null,
+              structured: null,
+            },
+            ChangeOperation.UPDATE,
+          ),
+          note({ title: "Draft", content: "text" }, ChangeOperation.UPDATE),
+        ]),
+      ).not.toThrow();
+    });
+
+    it("refuses a format key or a table that is not text", () => {
+      // An object in `structured` is the one that matters: the client will not
+      // store a value that is not text, so it applies the null it is left with
+      // and the note's rows come back empty on every device that pulls the
+      // change. Refusing it here keeps it off the log, where it would be replayed
+      // for the life of the account.
+      expect(
+        fieldsOf({
+          title: "Ok",
+          content: "x",
+          structured: { rows: [{ id: "r1", item: "Bread" }] },
+        }),
+      ).toEqual(["changes[0].payload.structured"]);
+      expect(fieldsOf({ title: "Ok", content: "x", structured: 42 })).toEqual([
+        "changes[0].payload.structured",
+      ]);
+      expect(fieldsOf({ title: "Ok", content: "x", noteType: 7 })).toEqual([
+        "changes[0].payload.noteType",
+      ]);
+      expect(
+        fieldsOf({ title: "Ok", content: "x", noteType: [], structured: {} }),
+      ).toEqual([
+        "changes[0].payload.noteType",
+        "changes[0].payload.structured",
+      ]);
+    });
+
+    it("lets an unrecognised format key through", () => {
+      // Unlike a habit's schedule, which is closed to the four the server can
+      // draw, a format is only a name the client looks up — and it falls back to
+      // a normal note for one it has not met. Listing the five here would stop a
+      // newer app syncing a new format's title and body with its type.
+      expect(() =>
+        assertPushableChanges([
+          note({ title: "Later", content: "text", noteType: "recipes" }),
+        ]),
+      ).not.toThrow();
+    });
+
     it("leaves a delete alone, and keeps the size rule on the body only", () => {
       expect(() =>
         assertPushableChanges([
@@ -327,6 +435,59 @@ describe("change-payload validator", () => {
       const over = { title: "Note", content: "é".repeat(40 * 1024) };
       expect(over.content.length).toBeLessThan(64 * 1024);
       expect(fieldsOf(over)).toEqual(["changes[0].payload"]);
+    });
+  });
+
+  describe("folder payloads", () => {
+    const folder = (
+      payload: unknown,
+      operation: ChangeOperation = ChangeOperation.CREATE,
+    ) => ({
+      entityType: "folder",
+      operation,
+      payload: payload as ChangeEnvelope["payload"],
+    });
+
+    const fieldsOf = (payload: unknown, operation?: ChangeOperation) =>
+      collectChangeViolations([folder(payload, operation)]).map(
+        (violation) => violation.field,
+      );
+
+    it("accepts the three columns a folder is, and the nulls that mean none", () => {
+      expect(() =>
+        assertPushableChanges([
+          folder({
+            name: "Shopping",
+            type: "shopping",
+            icon: "cart",
+            createdAt: "2026-09-21T09:15:00.000Z",
+            version: 1,
+          }),
+          folder({ name: "Ideas", type: null, icon: null, version: 2 }),
+          // A device from before the format picker exists pushes a name alone,
+          // and must not be refused for it.
+          folder({ name: "Old build", version: 3 }),
+        ]),
+      ).not.toThrow();
+    });
+
+    it("refuses the rename that arrives as a folder with no name", () => {
+      expect(fieldsOf({ type: "shopping" })).toEqual([
+        "changes[0].payload.name",
+      ]);
+      expect(fieldsOf({ name: 7 })).toEqual(["changes[0].payload.name"]);
+      expect(fieldsOf({ name: "Groceries", icon: { key: "cart" } })).toEqual([
+        "changes[0].payload.icon",
+      ]);
+      expect(fieldsOf({ name: "Groceries", type: 7 })).toEqual([
+        "changes[0].payload.type",
+      ]);
+    });
+
+    it("leaves a delete alone, like every other type", () => {
+      expect(() =>
+        assertPushableChanges([folder({ version: 4 }, ChangeOperation.DELETE)]),
+      ).not.toThrow();
     });
   });
 

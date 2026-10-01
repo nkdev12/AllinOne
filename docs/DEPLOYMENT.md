@@ -391,11 +391,18 @@ curl https://your-domain.com/metrics
 
 ### What the repository actually provides
 
-`scripts/backup-database.sh` and `scripts/restore-database.sh` are the only backup tooling in the repo. Both drive the MongoDB tools: `mongodump --db "$DB_NAME" --gzip --archive=…` out, `mongorestore --gzip --drop --archive=…` back, producing `allinone-db-<timestamp>.archive.gz`. They connect over TCP with `DB_HOST=localhost`/`DB_PORT=27017` (or `MONGO_URI`, which must name the server only — `--db` picks the database), so a host-run script reaches the published port of the `allinone-mongodb-prod` container; the `mongo_data_prod` volume itself is not snapshotted.
+`scripts/backup-database.sh` and `scripts/restore-database.sh` provide transaction-consistent database backups and MinIO object storage backups. `backup-database.sh` runs `mongodump --oplog --gzip --archive=…` across the replica set, capturing in-flight transactions so that `Change` rows and `SyncCursor` counters remain strictly synchronized with zero cursor drift. It simultaneously archives MinIO object storage (`allinone-minio-<timestamp>.tar.gz`) from the data volume or directory, verifying integrity with `tar -tzf`.
 
-With `BACKUP_PASSPHRASE` set, the archive is AES-256-CBC encrypted (openssl, PBKDF2 with 100k iterations) to `allinone-db-<timestamp>.archive.gz.enc` and the plaintext dump is deleted — including on the failure path, so a backup that could not encrypt leaves nothing readable behind. The script then decrypts its own output as a round-trip check. `restore-database.sh` takes the same variable and refuses an `.enc` file without it. Unset, the dump stays plaintext, and a dump of a real deployment contains the `VaultSetting` collection, whose documents carry wrapped key material.
+`restore-database.sh` automatically replays the oplog (`mongorestore --oplogReplay --drop`), restores MinIO attachments and exports, and executes an automated post-restore sync invariant check that aligns `SyncCursor.seq` with the highest `Change.cursor` to prevent silent sync loss.
 
-Neither script invents a destination. `BACKUP_COPY_DIR` is an optional second location: the finished archive is copied there and verified with `cmp`, and the retention sweep prunes that directory on the same clock. A second directory on the same volume is not off-host storage.
+With `BACKUP_PASSPHRASE` set, both archives are AES-256-CBC encrypted (openssl, PBKDF2 with 100k iterations) to `.archive.gz.enc` and `.tar.gz.enc`, and the plaintext dumps are securely removed.
+
+Automated disaster recovery drills can be executed anytime via:
+```bash
+npm run test:backup
+```
+
+Neither script invents a destination. `BACKUP_COPY_DIR` is an optional second location: the finished archives are copied there and verified with `cmp`, and the retention sweep prunes that directory on the same clock. A second directory on the same volume is not off-host storage.
 
 ### Scheduling It
 

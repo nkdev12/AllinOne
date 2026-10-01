@@ -12,6 +12,35 @@ import { QueryTasksDto } from "../dto/query-tasks.dto";
 import { appendChange } from "@/sync/change-cursor";
 import { ChangeOperation, TaskStatus } from "@prisma/client";
 
+export function taskChangePayload(task: any): Record<string, any> {
+  return {
+    title: task.title ?? "",
+    description: task.description ?? null,
+    priority: task.priority ?? "P4_LOW",
+    status: task.status ?? "TODO",
+    dueDate:
+      task.dueDate instanceof Date
+        ? task.dueDate.toISOString()
+        : (task.dueDate ?? null),
+    dueTime: task.dueTime ?? null,
+    recurrenceRule: task.recurrenceRule ?? null,
+    completedAt:
+      task.completedAt instanceof Date
+        ? task.completedAt.toISOString()
+        : (task.completedAt ?? null),
+    sectionId: task.sectionId ?? null,
+    parentId: task.parentId ?? null,
+    projectId: task.projectId ?? null,
+    sortOrder: task.sortOrder ?? 0,
+    timeSpentSeconds: task.timeSpentSeconds ?? 0,
+    createdAt:
+      task.createdAt instanceof Date
+        ? task.createdAt.toISOString()
+        : (task.createdAt ?? null),
+    version: task.version ?? 1,
+  };
+}
+
 @Injectable()
 export class TasksService {
   /**
@@ -91,13 +120,7 @@ export class TasksService {
         entityId: task.id,
         operation: ChangeOperation.CREATE,
         version: task.version,
-        payload: {
-          title: task.title,
-          projectId: task.projectId,
-          priority: task.priority,
-          status: task.status,
-          dueDate: task.dueDate,
-        },
+        payload: taskChangePayload(task),
       });
       highestCursor = logged.cursor;
 
@@ -293,12 +316,7 @@ export class TasksService {
         entityId: updatedTask.id,
         operation: ChangeOperation.UPDATE,
         version: updatedTask.version,
-        payload: {
-          title: updatedTask.title,
-          priority: updatedTask.priority,
-          status: updatedTask.status,
-          isCompleted: updatedTask.status === TaskStatus.COMPLETED,
-        },
+        payload: taskChangePayload(updatedTask),
       });
       highestCursor = logged.cursor;
 
@@ -343,11 +361,7 @@ export class TasksService {
         entityId: completedTask.id,
         operation: ChangeOperation.UPDATE,
         version: completedTask.version,
-        payload: {
-          id: completedTask.id,
-          isCompleted: true,
-          status: TaskStatus.COMPLETED,
-        },
+        payload: taskChangePayload(completedTask),
       });
       highestCursor = completionLogged.cursor;
 
@@ -394,11 +408,7 @@ export class TasksService {
           entityId: nextRecurringTask.id,
           operation: ChangeOperation.CREATE,
           version: nextRecurringTask.version,
-          payload: {
-            title: nextRecurringTask.title,
-            dueDate: nextRecurringTask.dueDate,
-            isRecurringInstance: true,
-          },
+          payload: taskChangePayload(nextRecurringTask),
         });
         // The higher of the two, which is the one a device has not read: the
         // completion above took the number before it, and both rows are inside
@@ -442,7 +452,7 @@ export class TasksService {
         entityId: taskId,
         operation: ChangeOperation.DELETE,
         version: existing.version + 1,
-        payload: { id: taskId },
+        payload: { version: existing.version + 1 },
       });
       highestCursor = logged.cursor;
 

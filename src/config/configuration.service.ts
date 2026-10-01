@@ -1,5 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import * as crypto from "node:crypto";
 
 /**
  * Shorter ADMIN_SECRET values are treated as unset. 32 matches the
@@ -201,6 +202,15 @@ export class ConfigurationService {
 
   get jwtAccessSecret(): string {
     return this.configService.getOrThrow<string>("JWT_ACCESS_SECRET");
+  }
+
+  get jwtMfaSecret(): string {
+    const custom = this.configService.get<string>("JWT_MFA_SECRET")?.trim();
+    if (custom) return custom;
+    return crypto
+      .createHmac("sha256", this.jwtAccessSecret)
+      .update("allinone:mfa:challenge:secret")
+      .digest("hex");
   }
 
   /**
@@ -405,15 +415,27 @@ export class ConfigurationService {
   // ========================================================================
 
   get googleClientId(): string | undefined {
-    return this.configService.get("GOOGLE_CLIENT_ID");
+    return (
+      this.configService.get<string>("GOOGLE_CLIENT_ID")?.trim() ||
+      this.configService.get<string>("OAUTH_GOOGLE_CLIENT_ID")?.trim() ||
+      undefined
+    );
   }
 
   get appleClientId(): string | undefined {
-    return this.configService.get("APPLE_CLIENT_ID");
+    return (
+      this.configService.get<string>("APPLE_CLIENT_ID")?.trim() ||
+      this.configService.get<string>("OAUTH_APPLE_CLIENT_ID")?.trim() ||
+      undefined
+    );
   }
 
   get microsoftClientId(): string | undefined {
-    return this.configService.get("MICROSOFT_CLIENT_ID");
+    return (
+      this.configService.get<string>("MICROSOFT_CLIENT_ID")?.trim() ||
+      this.configService.get<string>("OAUTH_MICROSOFT_CLIENT_ID")?.trim() ||
+      undefined
+    );
   }
 
   // ========================================================================

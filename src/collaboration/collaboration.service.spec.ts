@@ -741,6 +741,32 @@ describe("CollaborationService", () => {
       expect(listed).toEqual([share]);
     });
 
+    it("restricts collaborator visibility so non-admin viewers only see their own grant", async () => {
+      const share1 = await createShare({ role: "VIEWER" });
+      await service.shareResource(OWNER, {
+        resourceType: "NOTE",
+        resourceId: "note-1",
+        email: "stranger@example.com",
+        role: "EDITOR",
+      } as any);
+
+      // VIEWER only sees their own share, not other collaborator's email
+      const viewerListed = await service.getSharesForResource(
+        COLLAB,
+        "NOTE",
+        "note-1",
+      );
+      expect(viewerListed).toEqual([share1]);
+
+      // OWNER sees both shares
+      const ownerListed = await service.getSharesForResource(
+        OWNER,
+        "NOTE",
+        "note-1",
+      );
+      expect(ownerListed.length).toBe(2);
+    });
+
     it("403s a caller with no grant at all", async () => {
       await createShare();
 

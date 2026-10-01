@@ -214,7 +214,7 @@ for the parts of the ERD that are still missing. Where this page and
 #### `Note`
 
 - **Primary Key**: `id` (`Uuid`)
-- **Fields**: `userId` (`Uuid`), `folderId` (`Uuid`?, FK -> `Folder.id`, `onDelete: NoAction`), `title`, `content` (`String?`, plain text the client renders as rich content), `isPinned` (Boolean, default `false`), `isArchived` (Boolean, default `false`), `isEncrypted` (Boolean, default `false`), `tags` (`String[]`, default `[]`), `color` (`String?`), `version` (Int, default `1`), `createdAt`, `updatedAt`, `deletedAt`.
+- **Fields**: `userId` (`Uuid`), `folderId` (`Uuid`?, FK -> `Folder.id`, `onDelete: NoAction`), `title`, `content` (`String?`, plain text the client renders as rich content), `isPinned` (Boolean, default `false`), `isArchived` (Boolean, default `false`), `isEncrypted` (Boolean, default `false`), `tags` (`String[]`, default `[]`), `color` (`String?`), `noteType` (`String?`), `structured` (`String?`), `version` (Int, default `1`), `createdAt`, `updatedAt`, `deletedAt`.
 - **Indexes**: `@@index([userId])`, `@@index([folderId])`, `@@index([updatedAt])`.
 - **`isEncrypted`** exists in the schema and is written by `POST /notes`, and it is
   dead: no read path in this repo branches on it, it is not in the `note` change
@@ -232,6 +232,31 @@ for the parts of the ERD that are still missing. Where this page and
   overwrites the new column rather than returning it, so the string list reaches
   a device through `/sync/pull` (where the payload carries it verbatim) and not
   through `GET /notes`.
+- **`noteType` and `structured`** are the same client's note format and the table
+  a formatted note holds instead of a body. `noteType` is the format's stable key
+  (`normal`, `diary`, `shopping`, `bucket`, `quotes`) rather than the label shown
+  for it, and it is deliberately not closed to those five on the server: a format
+  is only a name the client looks up, and it renders an unrecognised one as a
+  normal note. `structured` is the JSON text the client serialises, stored opaque
+  for the reason the vault stores its blob opaque — the row shape is the app's to
+  evolve. Both are nullable rather than defaulted, because `null` ("this note has
+  no table") and the client's `{"rows":[]}` ("a table it emptied") are different
+  state.
+- Why a REST-authored change names `noteType`/`structured` only when its caller
+  did: `POST /sync/push` now projects an accepted note change onto this row
+  (`projectAcceptedChange`, `src/sync/change-projection.ts`), so the copy tracks
+  the log for anything that has synced — but a device editing offline still holds
+  a table this server has never heard of, and a `PATCH` that restated the row's
+  copy would replay that newer table backwards onto every other device, since a
+  device reads a present key as the whole new value. Silence is the only safe
+  answer for a key the caller did not name. `tags` and `color` are restated
+  always, because a REST caller that omits them is saying "no labels" and the
+  client has no way to tell that from a build that never learned the key.
+- Two things the projection deliberately does **not** do: it writes no
+  `NoteHistory` snapshot, so a device's edit is not a version
+  `GET /notes/:id/history` can offer back, and it performs no `noteTags`
+  normalisation, so the scalar `tags` column and the `NoteTag` join can now
+  disagree by more than which build wrote what.
 
 #### `NoteTag`
 
@@ -284,8 +309,8 @@ for the parts of the ERD that are still missing. Where this page and
   `:238` and `:342` — so every note response carries an `attachments` array that is
   empty for every account, and `notes.controller.ts:53` still advertises attachments in
   the summary for `GET /notes/:id`. It is not a sync type either:
-  `SYNC_ENTITY_TYPES` (`sync/change-payload.validator.ts:11-18`) admits `note`, `task`,
-  `event`, `habit`, `habit_log` and `vault_item`, and a push naming `attachment` is
+  `SYNC_ENTITY_TYPES` (`sync/change-payload.validator.ts:11-24`) admits `note`, `task`,
+  `event`, `calendar`, `habit`, `habit_log` and `vault_item`, and a push naming `attachment` is
   refused by the entity-type check. `schema.prisma` is the only description this model
   has, and the storage path, checksum and mime type in it are a design no endpoint
   implements.

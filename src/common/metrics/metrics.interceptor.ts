@@ -29,7 +29,7 @@ export class MetricsInterceptor implements NestInterceptor {
         const durationSeconds = diff[0] + diff[1] / 1e9;
 
         const method = req.method || "GET";
-        const route = req.route?.path || req.url || "unknown";
+        const route = req.route?.path || "unmatched";
         const statusCode = res.statusCode || 200;
 
         // Ignore scraping /metrics requests from self-recording to keep histograms clean

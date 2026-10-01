@@ -135,6 +135,10 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return "Token payload is unreadable";
     }
 
+    if (payload.type !== "access" || payload.purpose) {
+      return "Only access tokens may connect to sync gateway";
+    }
+
     const user = await users.getUserById(userId);
     if (!user) {
       return "Account not found";

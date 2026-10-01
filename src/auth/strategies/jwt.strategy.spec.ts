@@ -19,6 +19,7 @@ describe("JwtStrategy", () => {
     sub: "user-1",
     email: "test@example.com",
     sessionId: "session-1",
+    type: "access",
   };
 
   beforeEach(() => {
@@ -67,12 +68,33 @@ describe("JwtStrategy", () => {
     );
   });
 
-  it("still accepts tokens that carry no session, which is what older and service tokens look like", async () => {
+  it("still accepts tokens that carry no session as long as type is access", async () => {
     await expect(
-      strategy.validate({ sub: "user-1", email: "test@example.com" }),
+      strategy.validate({ sub: "user-1", email: "test@example.com", type: "access" }),
     ).resolves.toMatchObject({ id: "user-1" });
 
     expect(usersService.isSessionLive).not.toHaveBeenCalled();
+  });
+
+  it("rejects tokens without type access", async () => {
+    await expect(
+      strategy.validate({ sub: "user-1", email: "test@example.com" } as any),
+    ).rejects.toMatchObject({
+      response: { code: ErrorCode.TOKEN_INVALID },
+    });
+  });
+
+  it("rejects MFA challenge tokens as access tokens", async () => {
+    await expect(
+      strategy.validate({
+        sub: "user-1",
+        email: "test@example.com",
+        purpose: "MFA_CHALLENGE",
+        type: "mfa_challenge",
+      } as any),
+    ).rejects.toMatchObject({
+      response: { code: ErrorCode.TOKEN_INVALID },
+    });
   });
 
   it("rejects an account that is no longer active", async () => {

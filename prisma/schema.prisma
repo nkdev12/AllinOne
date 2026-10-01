@@ -66,6 +66,7 @@ model EmailVerificationOtp {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([expiresAt])
+  @@map("email_verification_otps")
 }
 
 // Out-of-band identity codes for password reset and vault recovery. Keyed by
@@ -339,16 +340,29 @@ enum AuditAction {
 // ============================================================================
 
 model Folder {
-  id          String   @id @default(uuid()) @map("_id")
-  userId      String
-  parentId    String?
-  name        String
-  color       String?
-  icon        String?
-  sortOrder   Int      @default(0)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  deletedAt   DateTime?
+  id        String   @id @default(uuid()) @map("_id")
+  userId    String
+  parentId  String?
+  name      String
+  color     String?
+  icon      String?
+  // Which of the desktop app's note formats a note created in this folder gets:
+  // the same stable key `Note.noteType` holds (`normal`, `diary`, `shopping`,
+  // `bucket`, `quotes`), and held for the same three reasons — it is the app's
+  // name rather than a label, it is not closed to the five the current build
+  // knows, and `icon` is the folder's own glyph so a type's default icon stays
+  // the app's to change.
+  //
+  // `version` is the folder's position in the change log, mirrored from the
+  // accepted change the way `Note.version` is. A folder syncs as a whole
+  // document, so without a number to compare an edit still queued on another
+  // device would arrive as the newest word on its name.
+  type      String?
+  version   Int      @default(1)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
 
   // Relations
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -399,6 +413,22 @@ model Note {
   // empty, and `color` is nullable, so no document has to be rewritten.
   tags        String[] @default([])
   color       String?
+  // The same client-authored pair, one level down: which of the desktop app's
+  // note formats a note is, and the rows its table holds.
+  //
+  // `noteType` is the format's stable key (`normal`, `diary`, `shopping`,
+  // `bucket`, `quotes`) rather than a label, so a rename in the app's UI is not
+  // a migration here. `structured` is the JSON text the client serialises, and
+  // the server holds it as opaque text for the reason the vault holds its blob
+  // opaquely: the row's shape is the app's to evolve, and re-shaping it on the
+  // way through would drop anything this server has not been taught about yet.
+  //
+  // Both are nullable rather than defaulted: a note written before the format
+  // existed has no type to invent, and an absent `structured` means "this note
+  // has no table" in a way a `{"rows":[]}` — a table the user cleared — does
+  // not. `null` is the value that distinction needs, so it stays a value here.
+  noteType    String?
+  structured  String?
   version     Int      @default(1)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

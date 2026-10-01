@@ -64,6 +64,19 @@ describe("SyncService", () => {
         }),
         findUnique: jest.fn().mockResolvedValue({ seq: BigInt(100) }),
       },
+      // The row a projected change lands on. Defaulted to "no such note", so a
+      // push in these tests mirrors itself into a create and every case that
+      // cares about the other branch says so.
+      note: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({ id: "note-uuid-10" }),
+        update: jest.fn().mockResolvedValue({ id: "note-uuid-10" }),
+      },
+      folder: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({ id: "folder-uuid-11" }),
+        update: jest.fn().mockResolvedValue({ id: "folder-uuid-11" }),
+      },
       deviceSyncState: {
         upsert: jest.fn().mockResolvedValue(mockSyncState),
         findUnique: jest.fn().mockResolvedValue(mockSyncState),
@@ -264,6 +277,151 @@ describe("SyncService", () => {
         }),
       );
     });
+
+    it("carries an accepted change through to the note row", async () => {
+      prismaService.device.findFirst.mockResolvedValue(mockDevice);
+      prismaService.change.findFirst.mockResolvedValue(null);
+      prismaService.note.findUnique.mockResolvedValue({
+        userId,
+        version: 3,
+        deletedAt: null,
+      });
+
+      await service.pushChanges(userId, {
+        deviceId,
+        changes: [
+          {
+            entityType: "note",
+            entityId: "note-uuid-10",
+            operation: ChangeOperation.UPDATE,
+            version: 4,
+            payload: {
+              title: "Edited offline",
+              content: "Three devices, one text",
+              tags: ["errand"],
+              color: "#22AA88",
+              noteType: "shopping",
+              structured: '{"rows":[{"id":"r1","item":"Bread"}]}',
+              version: 4,
+            },
+          },
+        ],
+      });
+
+      // Without this write the `Note` table kept whatever the note was when REST
+      // last touched it, so `GET /notes`, the search filter and the AI routes
+      // answered from a stale copy — and a REST edit then logged a payload built
+      // from that copy, which every device replayed over the newer one.
+      expect(prismaService.note.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "note-uuid-10" },
+          data: expect.objectContaining({
+            title: "Edited offline",
+            content: "Three devices, one text",
+            tags: ["errand"],
+            color: "#22AA88",
+            noteType: "shopping",
+            structured: '{"rows":[{"id":"r1","item":"Bread"}]}',
+            version: 4,
+          }),
+        }),
+      );
+    });
+
+    it("projects nothing for a change the log refused", async () => {
+      prismaService.device.findFirst.mockResolvedValue(mockDevice);
+      prismaService.change.findFirst.mockResolvedValue({
+        ...mockChange,
+        version: 9,
+        payload: { title: "Newer on the server", content: "" },
+      });
+
+      const result = await service.pushChanges(userId, {
+        deviceId,
+        changes: [
+          {
+            entityType: "note",
+            entityId: "note-uuid-10",
+            operation: ChangeOperation.UPDATE,
+            version: 3,
+            payload: {
+              title: "Written before the server moved on",
+              content: "",
+            },
+          },
+        ],
+      });
+
+      expect(result.conflicts).toHaveLength(1);
+      // The mirror agrees with the log and not with what the device tried to
+      // say, so a refused change writes no row — and the version already stored
+      // is the one the next pull hands back.
+      expect(prismaService.note.update).not.toHaveBeenCalled();
+      expect(prismaService.note.create).not.toHaveBeenCalled();
+    });
+
+    it("leaves an entity it has no columns for alone", async () => {
+      prismaService.device.findFirst.mockResolvedValue(mockDevice);
+      prismaService.change.findFirst.mockResolvedValue(null);
+
+      await service.pushChanges(userId, {
+        deviceId,
+        changes: [
+          {
+            entityType: "task",
+            entityId: "22222222-2222-4222-8222-222222222222",
+            operation: ChangeOperation.UPDATE,
+            version: 2,
+            payload: { title: "Post the letter" },
+          },
+        ],
+      });
+
+      // A task still has no projection: its payload is judged by nothing, so
+      // guessing at its columns would refuse pushes that sync correctly today.
+      expect(prismaService.note.findUnique).not.toHaveBeenCalled();
+      expect(prismaService.folder.findUnique).not.toHaveBeenCalled();
+      expect(prismaService.change.create).toHaveBeenCalled();
+    });
+
+    it("projects a folder rename onto the folder row", async () => {
+      prismaService.device.findFirst.mockResolvedValue(mockDevice);
+      prismaService.change.findFirst.mockResolvedValue(null);
+      prismaService.folder.findUnique.mockResolvedValue({
+        userId,
+        version: 1,
+        deletedAt: null,
+      });
+
+      await service.pushChanges(userId, {
+        deviceId,
+        changes: [
+          {
+            entityType: "folder",
+            entityId: "folder-uuid-11",
+            operation: ChangeOperation.UPDATE,
+            version: 2,
+            payload: { name: "Groceries", type: "shopping", icon: "cart" },
+          },
+        ],
+      });
+
+      // The folder tree reaches a device through this log, so a `Folder` row is
+      // written for the same reason a `Note` row now is: nothing else replays a
+      // change back into a table, and `GET /folders` would otherwise keep
+      // answering from whatever the folder was called when it was created.
+      expect(prismaService.folder.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "folder-uuid-11" },
+          data: expect.objectContaining({
+            name: "Groceries",
+            type: "shopping",
+            icon: "cart",
+            version: 2,
+          }),
+        }),
+      );
+    });
   });
 
   describe("the reason a device cannot sync", () => {
@@ -427,6 +585,38 @@ describe("SyncService", () => {
       expect(rejection.getResponse()).toMatchObject({
         code: ErrorCode.VALIDATION_ERROR,
       });
+    });
+
+    it("re-synchronizes from 0 when a device cursor exceeds the server highest cursor (e.g. after a restore)", async () => {
+      prismaService.device.findFirst.mockResolvedValue(mockDevice);
+      // Server highest cursor is 100, but client sends cursor "150" (e.g. server restored to an earlier backup)
+      prismaService.syncCursor.findUnique.mockResolvedValue({
+        seq: BigInt(100),
+      });
+      prismaService.change.findFirst.mockResolvedValue({ cursor: BigInt(100) });
+
+      // Mock returns changes starting from 0 to catch up
+      prismaService.change.findMany.mockResolvedValue([
+        { ...mockChange, cursor: BigInt(100) },
+      ]);
+
+      const result = await service.pullChanges(userId, {
+        deviceId,
+        cursor: "150",
+      });
+
+      // Query should NOT filter with cursor > 150 (effectiveCursor should be undefined)
+      expect(prismaService.change.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { userId },
+        }),
+      );
+      expect(result.nextCursor).toBe("100");
+      expect(prismaService.deviceSyncState.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({ lastPulledCursor: "100" }),
+        }),
+      );
     });
   });
 

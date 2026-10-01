@@ -10,6 +10,8 @@ export interface JwtPayload {
   sub: string;
   email: string;
   sessionId?: string;
+  type?: string;
+  purpose?: string;
   iat?: number;
   exp?: number;
 }
@@ -42,6 +44,13 @@ export class JwtStrategy extends PassportStrategy(Strategy, "jwt") {
   }
 
   async validate(payload: JwtPayload) {
+    if (payload.type !== "access" || payload.purpose) {
+      throw unauthorized(
+        ErrorCode.TOKEN_INVALID,
+        "Only access tokens may be used to authenticate requests",
+      );
+    }
+
     const user = await this.usersService.getUserById(payload.sub);
     if (!user || user.status !== "ACTIVE" || user.deletedAt) {
       throw unauthorized(

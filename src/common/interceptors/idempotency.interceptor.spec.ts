@@ -72,6 +72,20 @@ describe("IdempotencyInterceptor", () => {
     expect(emittedData).toEqual({ result: "success" });
   });
 
+  it("should bypass idempotency for unauthenticated requests", async () => {
+    reqMock.user = undefined;
+    reqMock.headers["idempotency-key"] = "test-key-unauth";
+
+    const result$ = await interceptor.intercept(executionContext, callHandler);
+    let emittedData: any;
+    result$.subscribe((data) => (emittedData = data));
+
+    expect(callHandler.handle).toHaveBeenCalled();
+    expect(prismaService.idempotencyKey.findUnique).not.toHaveBeenCalled();
+    expect(prismaService.idempotencyKey.upsert).not.toHaveBeenCalled();
+    expect(emittedData).toEqual({ result: "success" });
+  });
+
   it("should return cached response on cache hit", async () => {
     reqMock.headers["idempotency-key"] = "existing-key";
     const cachedResponse = { id: 1, name: "cached" };

@@ -19,6 +19,8 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
+    "test:backup": "./scripts/test-backup-restore.sh",
+    "test:dr": "./scripts/test-backup-restore.sh",
     "test:load:sync": "k6 run test/load/k6-sync-load.js",
     "test:load:auth": "k6 run test/load/k6-auth-load.js",
     "typecheck": "tsc --noEmit",

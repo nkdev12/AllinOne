@@ -52,6 +52,12 @@ export class NotesService {
           // the empty list rather than leaving the column out of the document.
           tags: dto.tags ?? [],
           color: dto.color ?? null,
+          // Same for these two, with the opposite default: a note this server
+          // creates has no format invented for it. `null` is the value that
+          // keeps the two meanings apart downstream — "no table" here, and a
+          // table the user cleared is the client's `{"rows":[]}`.
+          noteType: dto.noteType ?? null,
+          structured: dto.structured ?? null,
           version: 1,
           noteTags:
             dto.tagIds && dto.tagIds.length > 0
@@ -265,6 +271,14 @@ export class NotesService {
           // clears it and an absent key leaves it standing.
           tags: dto.tags === undefined ? undefined : (dto.tags ?? []),
           color: dto.color,
+          // The format and its table are `color`'s rule exactly, and for the
+          // same reason: an absent key is Prisma's "do not write", so a REST
+          // edit of one field cannot rewrite the other, while an explicit
+          // `null` is a caller saying this note really has no table — a
+          // different statement from the client's `{"rows":[]}`, which is a
+          // table it has and has emptied.
+          noteType: dto.noteType,
+          structured: dto.structured,
           version: { increment: 1 },
         },
         include: {
@@ -281,7 +295,7 @@ export class NotesService {
         entityId: updatedNote.id,
         operation: ChangeOperation.UPDATE,
         version: updatedNote.version,
-        payload: noteChangePayload(updatedNote),
+        payload: noteChangePayload(updatedNote, silentAbout(dto)),
       });
       highestCursor = logged.cursor;
 
@@ -401,8 +415,12 @@ export class NotesService {
         // The one payload that carries more than the shape: which snapshot
         // this came from is provenance the log has nowhere else to say it. A
         // device reads the three keys it knows and ignores this one.
+        //
+        // Both format keys are silent, because `NoteHistory` stores a title and
+        // a body and nothing else: a restore cannot bring a table back, and
+        // emitting the row's copy would say it had.
         payload: {
-          ...noteChangePayload(restoredNote),
+          ...noteChangePayload(restoredNote, ["noteType", "structured"]),
           restoredFromVersion: snapshot.version,
         },
       });
@@ -446,12 +464,30 @@ export class NotesService {
  * which is not when the note began, and the client keeps a note's birth from the
  * payload rather than from its own clock.
  *
- * `tags` and `color` are named here for the opposite reason: a device applies an
- * absent key as nothing, so a REST edit that logged only the body would rewrite
- * every other device's note into one with its labels gone and its colour cleared
- * — the same erasure `change-payload.validator.ts` refuses to let a client
- * author. Both keys are therefore always present on a server-authored change,
- * the row's own value when it has one and the empty form when it does not.
+ * `tags` and `color` are always present because a note payload is a whole
+ * document and the version beside it is last-write-wins: a device that missed a
+ * change has no other way to learn a newer label set, so leaving the keys off
+ * would let the two copies of one note diverge for good. The row's copy is what
+ * this endpoint has, so that is what goes on the wire.
+ *
+ * `noteType` and `structured` are here under the same whole-document rule, with
+ * one amendment worth its weight: this row is *not* authoritative for them
+ * unless the caller just wrote them. `/sync/push` appends to the log and never
+ * touches the `Note` row, so a device's newer table can sit several versions
+ * ahead of the copy this row is still holding, and a device reads a present key
+ * as the whole new value — which makes restating the stale one the exact way for
+ * a rename of a note's title to empty somebody's shopping list. So a change
+ * names them when its caller did, and says nothing when it did not. Absence is
+ * safe on this side of the wire for precisely these keys: `SyncManager._apply`
+ * guards each with `containsKey` (`sync_manager.dart:593`) and leaves a column
+ * it was not given alone. The same staleness is latent in `tags` and `color`,
+ * whose guards are identical; it is left alone here because that rule is a
+ * separate call to make.
+ *
+ * When a table is named, each key carries its own empty form rather than one
+ * invented here — `null` is a note with no format and a note with no table, and
+ * the app's *cleared but still a table* is its own `{"rows":[]}`, so the two
+ * states stay distinguishable all the way through.
  *
  * What is deliberately absent is what used to be the whole payload —
  * `folderId`, `isPinned`, `isArchived`, `isEncrypted`. Those are a device's
@@ -460,18 +496,42 @@ export class NotesService {
  * so logging them only made two write paths look like they disagreed about what
  * a note *is*. The `Note` row still holds them; the log records what syncs.
  */
-function noteChangePayload(note: {
-  title: string;
-  content: string | null;
-  createdAt: Date;
-  tags?: string[] | null;
-  color?: string | null;
-}) {
+type FormatField = "noteType" | "structured";
+
+function noteChangePayload(
+  note: {
+    title: string;
+    content: string | null;
+    createdAt: Date;
+    tags?: string[] | null;
+    color?: string | null;
+    noteType?: string | null;
+    structured?: string | null;
+  },
+  /** The format keys this change must not speak for. */
+  silent: ReadonlyArray<FormatField> = [],
+) {
   return {
     title: note.title,
     content: note.content,
     createdAt: note.createdAt.toISOString(),
     tags: note.tags ?? [],
     color: note.color ?? null,
+    ...(silent.includes("noteType") ? {} : { noteType: note.noteType ?? null }),
+    ...(silent.includes("structured")
+      ? {}
+      : { structured: note.structured ?? null }),
   };
+}
+
+/**
+ * The format keys a PATCH left out, which its logged change has to leave out
+ * too: an absent key on the request is the caller saying nothing, and the row's
+ * copy of that column is not news about the note.
+ */
+function silentAbout(dto: { noteType?: string; structured?: string }) {
+  const silent: FormatField[] = [];
+  if (dto.noteType === undefined) silent.push("noteType");
+  if (dto.structured === undefined) silent.push("structured");
+  return silent;
 }

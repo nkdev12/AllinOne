@@ -129,6 +129,19 @@ function createFakePrisma(devices: FakeDevice[]) {
         return take === undefined ? rows : rows.slice(0, take);
       }),
     },
+    // Something for the write-through projection to land on. This spec is about
+    // cursors, so the row only has to answer a read and accept a write; the
+    // projection's own rules are in `change-projection.spec.ts`.
+    note: {
+      findUnique: jest.fn(async () => null),
+      create: jest.fn(async ({ data }: any) => ({ ...data })),
+      update: jest.fn(async ({ data }: any) => ({ ...data })),
+    },
+    folder: {
+      findUnique: jest.fn(async () => null),
+      create: jest.fn(async ({ data }: any) => ({ ...data })),
+      update: jest.fn(async ({ data }: any) => ({ ...data })),
+    },
     syncCursor: {
       upsert: jest.fn(async ({ where, update, create }: any) => {
         const current = counters.get(where.userId) ?? BigInt(0);
