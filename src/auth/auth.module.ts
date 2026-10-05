@@ -7,29 +7,31 @@ import { PrismaModule } from "@/common/prisma/prisma.module";
 import { UsersModule } from "@/users/users.module";
 import { ConfigurationModule } from "@/config/configuration.module";
 import { ConfigurationService } from "@/config/configuration.service";
-import { MailModule } from "@/common/mail/mail.module";
 import { AuditLogModule } from "@/common/audit/audit-log.module";
+import { MailModule } from "@/common/mail/mail.module";
+import { OtpModule } from "@/common/otp/otp.module";
 import { JwtStrategy } from "./strategies/jwt.strategy";
 import { JwtAuthGuard } from "./guards/jwt-auth.guard";
-import { BullModule } from "@nestjs/bull";
 
 @Module({
   imports: [
     PrismaModule,
     UsersModule,
     ConfigurationModule,
-    MailModule,
     AuditLogModule,
-    BullModule.registerQueue({
-      name: "mail",
-    }),
+    MailModule,
+    OtpModule,
     PassportModule.register({ defaultStrategy: "jwt" }),
     JwtModule.registerAsync({
       imports: [ConfigurationModule],
       useFactory: async (configService: ConfigurationService) => ({
         secret: configService.jwtAccessSecret,
         signOptions: {
-          expiresIn: "15m",
+          // Every `sign()` in `AuthService` names its own lifetime, so this
+          // default governs only a call that forgets to — which is exactly the
+          // way a hardcoded "15m" here would come to disagree with
+          // `JWT_ACCESS_EXPIRATION` without anyone noticing.
+          expiresIn: configService.jwtAccessExpiresInSeconds,
         },
       }),
       inject: [ConfigurationService],

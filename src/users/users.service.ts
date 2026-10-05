@@ -2,11 +2,8 @@ import {
   Injectable,
   ConflictException,
   NotFoundException,
-  Optional,
   Logger,
 } from "@nestjs/common";
-import { InjectQueue } from "@nestjs/bull";
-import { Queue } from "bull";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { User, UserStatus } from "@prisma/client";
 import { UpdateUserProfileDto } from "./dto/update-user-profile.dto";
@@ -15,27 +12,27 @@ import { UpdateUserProfileDto } from "./dto/update-user-profile.dto";
 export class UsersService {
   private readonly logger = new Logger(UsersService.name);
 
-  constructor(
-    private readonly prisma: PrismaService,
-    @Optional() @InjectQueue("export") private readonly exportQueue?: Queue,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
+
+  // Prisma on MongoDB does not match documents whose field is absent, so a
+  // `deletedAt: null` filter would hide every user created before the field
+  // existed. Filter in code instead.
+  private notDeleted(user: User | null): User | null {
+    return user && !user.deletedAt ? user : null;
+  }
 
   async getUserById(userId: string): Promise<User | null> {
-    return this.prisma.user.findFirst({
-      where: {
-        id: userId,
-        deletedAt: null,
-      },
-    });
+    return this.notDeleted(
+      await this.prisma.user.findFirst({ where: { id: userId } }),
+    );
   }
 
   async findByEmail(email: string): Promise<User | null> {
-    return this.prisma.user.findFirst({
-      where: {
-        email: email.toLowerCase(),
-        deletedAt: null,
-      },
-    });
+    return this.notDeleted(
+      await this.prisma.user.findFirst({
+        where: { email: email.toLowerCase() },
+      }),
+    );
   }
 
   async createUser(data: {
@@ -118,20 +115,12 @@ export class UsersService {
       throw new NotFoundException("User profile not found");
     }
 
-    if (this.exportQueue) {
-      await this.exportQueue.add("process-export", {
-        userId,
-        email: user.email,
-        requestedAt: new Date().toISOString(),
-      });
-    } else {
-      this.logger.log(`Data export requested for user ${userId}`);
-    }
+    this.logger.log(`Data export requested for user ${userId}`);
 
     return {
       status: "accepted",
       message:
-        "Data export request queued. An email with your download link will be dispatched shortly.",
+        "Data export request recorded. Background export delivery is disabled.",
     };
   }
 
@@ -158,6 +147,23 @@ export class UsersService {
         lastActivityAt: "desc",
       },
     });
+  }
+
+  /**
+   * Whether the session a token names is still live.
+   *
+   * Read without a `revokedAt: null` filter on purpose: this runs on every
+   * authenticated request, and a filter that fails to match a document (which
+   * MongoDB makes possible when the field was never written) would log people
+   * out of a session that was never revoked. Absent, null and unset are all
+   * "not revoked" here; only a real timestamp means stop.
+   */
+  async isSessionLive(userId: string, sessionId: string): Promise<boolean> {
+    const session = await this.prisma.session.findFirst({
+      where: { id: sessionId, userId },
+    });
+
+    return Boolean(session && !session.revokedAt);
   }
 
   async revokeUserSession(

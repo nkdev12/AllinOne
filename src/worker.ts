@@ -1,32 +1,42 @@
 import { NestFactory } from "@nestjs/core";
 import { Logger } from "@nestjs/common";
-import { AppModule } from "./app/app.module";
 import { getQueueToken } from "@nestjs/bull";
 import { Queue } from "bull";
+import { WorkerModule } from "./worker.module";
 
 /**
  * Distributed Background Worker Process
  *
- * Backed by Redis & BullMQ Distributed Job Queues:
+ * Backed by Redis & Bull distributed job queues, all owned by WorkerModule:
  * - Mail Queue ('mail')
  * - Notification Queue ('notification')
  * - Export Processing Queue ('export')
  * - Maintenance & Cleanup Queue ('maintenance')
  *
- * Run with: npm run start (in worker container or process)
+ * WorkerModule — not AppModule — is the root here on purpose: `BullModule.forRoot`,
+ * the four `registerQueue` calls and every `@Processor` class live inside
+ * QueuesModule, which only WorkerModule imports. Bootstrapping AppModule instead
+ * leaves the processors uninstantiated and the queue tokens unresolvable, so the
+ * process idles without consuming anything.
+ *
+ * This is a headless context (`createApplicationContext`), so no HTTP adapter is
+ * created and the process never binds a port.
+ *
+ * Run with: node dist/worker.js (see Dockerfile.worker)
  */
 
-async function bootstrap() {
+export async function bootstrap() {
   const logger = new Logger("Worker");
 
-  const app = await NestFactory.create(AppModule, {
+  // Lifecycle hooks (`onModuleInit`, `onApplicationBootstrap`) have already run
+  // by the time this resolves — that is what registers each `@Process` handler
+  // against its Bull queue. A queue missing from this graph makes Nest throw
+  // here rather than quietly doing nothing.
+  const app = await NestFactory.createApplicationContext(WorkerModule, {
     logger: ["log", "error", "warn"],
   });
 
   logger.log("🔄 Allinone BullMQ Distributed Background Worker starting...");
-
-  await app.init();
-
   logger.log("✓ Worker application context initialized");
 
   try {
@@ -59,8 +69,13 @@ async function bootstrap() {
       "✓ BullMQ Maintenance Queue initialized with repeatable hourly scheduled cleanup.",
     );
   } catch (err: any) {
-    logger.warn(
-      `Worker queue scheduling warning (Redis connection may be mock/offline): ${err.message}`,
+    // The queue itself is guaranteed to exist at this point (Nest would have
+    // failed to boot otherwise), so this is a Redis transport problem: the
+    // worker still consumes jobs already on the queue, it just cannot schedule.
+    logger.error(
+      "Failed to schedule startup maintenance on the 'maintenance' queue. " +
+        `Redis may be unreachable: ${err?.message}`,
+      err?.stack,
     );
   }
 
@@ -75,9 +90,15 @@ async function bootstrap() {
 
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));
+
+  return app;
 }
 
-bootstrap().catch((error) => {
-  console.error("Failed to start BullMQ worker:", error);
-  process.exit(1);
-});
+// Only start when this file is the process entry point (`node dist/worker.js`).
+// Guarded so the boot spec can drive bootstrap() explicitly.
+if (require.main === module) {
+  bootstrap().catch((error) => {
+    console.error("Failed to start BullMQ worker:", error);
+    process.exit(1);
+  });
+}

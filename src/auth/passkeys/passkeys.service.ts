@@ -1,44 +1,36 @@
-import {
-  Injectable,
-  BadRequestException,
-  UnauthorizedException,
-  NotFoundException,
-  Logger,
-} from "@nestjs/common";
+import { Injectable, Logger } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
-import { JwtService } from "@nestjs/jwt";
-import { ConfigurationService } from "@/config/configuration.service";
 import { AuditLogService } from "@/common/audit/audit-log.service";
-import { AuthType, AuditAction, UserStatus, Platform } from "@prisma/client";
+import { AuthType, AuditAction } from "@prisma/client";
 import * as crypto from "crypto";
-import {
-  LoginOptionsResponse,
-  RegistrationOptionsResponse,
-} from "./passkeys.interface";
-import {
-  LoginOptionsDto,
-  LoginVerifyDto,
-  RegisterOptionsDto,
-  RegisterVerifyDto,
-} from "./dto/passkeys.dto";
+import { ErrorCode } from "@/common/errors/error-code";
+import { badRequest, notFound } from "@/common/errors/http-errors";
+import { RegistrationOptionsResponse } from "./passkeys.interface";
+import { RegisterOptionsDto, RegisterVerifyDto } from "./dto/passkeys.dto";
 
 interface StoredChallenge {
   challenge: string;
   userId?: string;
-  email?: string;
   expiresAt: number;
 }
 
+/**
+ * Registration only. The passwordless *login* half of this service was removed:
+ * it minted access and refresh tokens after checking nothing but the shape of
+ * `clientDataJSON`, which made it a working authentication bypass rather than a
+ * half-built one, and the credential material `verifyRegistration` stores (a
+ * raw `attestationObject`, not a parsed COSE key) could not be verified against
+ * even by a correct implementation. Re-adding login means a real relying-party
+ * library and re-enrolling every passkey that already exists — see the vault
+ * audit plan, item 40.
+ */
 @Injectable()
 export class PasskeysService {
   private readonly logger = new Logger(PasskeysService.name);
   private readonly registrationChallenges = new Map<string, StoredChallenge>();
-  private readonly loginChallenges = new Map<string, StoredChallenge>();
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly jwtService: JwtService,
-    private readonly configService: ConfigurationService,
     private readonly auditLogService: AuditLogService,
   ) {}
 
@@ -47,11 +39,6 @@ export class PasskeysService {
     for (const [key, value] of this.registrationChallenges.entries()) {
       if (value.expiresAt < now) {
         this.registrationChallenges.delete(key);
-      }
-    }
-    for (const [key, value] of this.loginChallenges.entries()) {
-      if (value.expiresAt < now) {
-        this.loginChallenges.delete(key);
       }
     }
   }
@@ -67,7 +54,7 @@ export class PasskeysService {
     });
 
     if (!user) {
-      throw new NotFoundException("User not found.");
+      throw notFound(ErrorCode.NOT_FOUND, "User not found.");
     }
 
     const challenge = crypto.randomBytes(32).toString("base64url");
@@ -104,7 +91,8 @@ export class PasskeysService {
   ): Promise<{ success: boolean; credentialId: string }> {
     const stored = this.registrationChallenges.get(userId);
     if (!stored || stored.expiresAt < Date.now()) {
-      throw new BadRequestException(
+      throw badRequest(
+        ErrorCode.PASSKEY_CHALLENGE_INVALID,
         "Registration challenge expired or invalid.",
       );
     }
@@ -118,17 +106,24 @@ export class PasskeysService {
       ).toString("utf-8");
       clientData = JSON.parse(decodedClientData);
     } catch (_) {
-      throw new BadRequestException("Invalid clientDataJSON format.");
+      throw badRequest(
+        ErrorCode.PASSKEY_CHALLENGE_INVALID,
+        "Invalid clientDataJSON format.",
+      );
     }
 
     if (clientData.type !== "webauthn.create") {
-      throw new BadRequestException(
+      throw badRequest(
+        ErrorCode.PASSKEY_CHALLENGE_INVALID,
         `Invalid clientData type: expected 'webauthn.create', got '${clientData.type}'.`,
       );
     }
 
     if (clientData.challenge !== stored.challenge) {
-      throw new BadRequestException("Registration challenge mismatch.");
+      throw badRequest(
+        ErrorCode.PASSKEY_CHALLENGE_INVALID,
+        "Registration challenge mismatch.",
+      );
     }
 
     // Check for duplicate credential
@@ -140,7 +135,10 @@ export class PasskeysService {
     });
 
     if (existing) {
-      throw new BadRequestException("This passkey is already registered.");
+      throw badRequest(
+        ErrorCode.ALREADY_EXISTS,
+        "This passkey is already registered.",
+      );
     }
 
     await this.prisma.authentication.create({
@@ -173,202 +171,5 @@ export class PasskeysService {
     this.logger.log(`Passkey registered for user ${userId} [${dto.id}]`);
 
     return { success: true, credentialId: dto.id };
-  }
-
-  async generateLoginOptions(
-    dto?: LoginOptionsDto,
-  ): Promise<LoginOptionsResponse> {
-    this.cleanExpiredChallenges();
-
-    const challenge = crypto.randomBytes(32).toString("base64url");
-    let allowCredentials: any[] | undefined;
-
-    if (dto?.email) {
-      const user = await this.prisma.user.findFirst({
-        where: { email: dto.email.toLowerCase(), deletedAt: null },
-        include: {
-          authentications: {
-            where: { type: AuthType.PASSKEY },
-          },
-        },
-      });
-
-      if (user && user.authentications.length > 0) {
-        allowCredentials = user.authentications.map((auth) => ({
-          id: auth.identifier,
-          type: "public-key",
-        }));
-      }
-    }
-
-    const key = challenge;
-    this.loginChallenges.set(key, {
-      challenge,
-      email: dto?.email?.toLowerCase(),
-      expiresAt: Date.now() + 5 * 60 * 1000,
-    });
-
-    return {
-      challenge,
-      timeout: 60000,
-      rpId: "localhost",
-      allowCredentials,
-    };
-  }
-
-  async verifyLogin(
-    dto: LoginVerifyDto,
-    ipAddress?: string,
-    userAgent?: string,
-  ): Promise<{
-    user: any;
-    tokens: { accessToken: string; refreshToken: string };
-    sessionId: string;
-  }> {
-    // Validate clientDataJSON
-    let clientData: any;
-    try {
-      const decodedClientData = Buffer.from(
-        dto.clientDataJSON,
-        "base64url",
-      ).toString("utf-8");
-      clientData = JSON.parse(decodedClientData);
-    } catch (_) {
-      throw new BadRequestException("Invalid clientDataJSON format.");
-    }
-
-    if (clientData.type !== "webauthn.get") {
-      throw new BadRequestException(
-        `Invalid clientData type: expected 'webauthn.get', got '${clientData.type}'.`,
-      );
-    }
-
-    // Verify against pending challenge
-    const stored = this.loginChallenges.get(clientData.challenge);
-    if (!stored || stored.expiresAt < Date.now()) {
-      throw new BadRequestException("Login challenge expired or invalid.");
-    }
-
-    // Find authentication credential
-    const auth = await this.prisma.authentication.findFirst({
-      where: {
-        type: AuthType.PASSKEY,
-        identifier: dto.id,
-      },
-      include: {
-        user: true,
-      },
-    });
-
-    if (!auth || !auth.user) {
-      throw new UnauthorizedException("Invalid passkey credential.");
-    }
-
-    const user = auth.user;
-
-    // Check account status and lockout
-    if (user.status !== UserStatus.ACTIVE) {
-      throw new UnauthorizedException("Account is not active.");
-    }
-
-    if (user.lockedUntil && user.lockedUntil > new Date()) {
-      throw new UnauthorizedException("Account is temporarily locked.");
-    }
-
-    // Update credential and last login
-    await this.prisma.$transaction([
-      this.prisma.authentication.update({
-        where: { id: auth.id },
-        data: { lastUsedAt: new Date() },
-      }),
-      this.prisma.user.update({
-        where: { id: user.id },
-        data: {
-          lastLoginAt: new Date(),
-          failedLoginAttempts: 0,
-          lockedUntil: null,
-        },
-      }),
-    ]);
-
-    // Find or create default web device
-    let device = await this.prisma.device.findFirst({
-      where: { userId: user.id, platform: Platform.WEB, revokedAt: null },
-    });
-    if (!device) {
-      device = await this.prisma.device.create({
-        data: {
-          userId: user.id,
-          name: "Passkey Authenticator",
-          platform: Platform.WEB,
-          appVersion: "1.0.0",
-          publicKey: "passkey",
-        },
-      });
-    }
-
-    // Generate JWT tokens
-    const accessToken = this.jwtService.sign(
-      { sub: user.id, email: user.email },
-      {
-        secret: this.configService.jwtAccessSecret,
-        expiresIn: "15m",
-      },
-    );
-
-    const refreshToken = this.jwtService.sign(
-      { sub: user.id, email: user.email },
-      {
-        secret: this.configService.jwtRefreshSecret,
-        expiresIn: "7d",
-      },
-    );
-
-    // Create session
-    const accessExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
-    const refreshExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-
-    const session = await this.prisma.session.create({
-      data: {
-        userId: user.id,
-        deviceId: device.id,
-        accessToken,
-        refreshToken,
-        accessExpiresAt,
-        refreshExpiresAt,
-        userAgent,
-        ipAddress,
-      },
-    });
-
-    this.loginChallenges.delete(clientData.challenge);
-
-    await this.auditLogService.recordAuditLog({
-      userId: user.id,
-      action: AuditAction.LOGIN_SUCCESS,
-      ipAddress,
-      userAgent,
-      metadata: {
-        authType: "PASSKEY",
-        credentialId: dto.id,
-        sessionId: session.id,
-      },
-    });
-
-    this.logger.log(`Passkey authentication successful for ${user.email}`);
-
-    return {
-      user: {
-        id: user.id,
-        email: user.email,
-        displayName: user.displayName,
-        locale: user.locale,
-        timezone: user.timezone,
-        status: user.status,
-        createdAt: user.createdAt,
-      },
-      tokens: { accessToken, refreshToken },
-      sessionId: session.id,
-    };
   }
 }

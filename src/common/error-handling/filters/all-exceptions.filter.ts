@@ -6,13 +6,17 @@ import {
   HttpStatus,
   Logger,
 } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import { Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
+import { ErrorCode } from "../../errors/error-code";
 
 interface CanonicalErrorResponse {
   statusCode: number;
   code: string;
   message: string | string[];
+  /** Structured, developer-facing context: failing fields, a blocked id. */
+  details?: Record<string, unknown>;
   requestId: string;
   traceId?: string;
   timestamp: string;
@@ -63,6 +67,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     let status = HttpStatus.INTERNAL_SERVER_ERROR;
     let code = "INTERNAL_ERROR";
     let message: string | string[] = "An unexpected error occurred";
+    let details: Record<string, unknown> | undefined;
 
     if (exception instanceof HttpException) {
       status = exception.getStatus();
@@ -72,12 +77,52 @@ export class AllExceptionsFilter implements ExceptionFilter {
       if (typeof exceptionResponse === "object" && exceptionResponse !== null) {
         code = exceptionResponse.code || code;
         message = exceptionResponse.message || message;
+        details = exceptionResponse.details;
       } else if (typeof exceptionResponse === "string") {
         message = exceptionResponse;
       }
+    } else if (exception instanceof Prisma.PrismaClientKnownRequestError) {
+      // Prisma's text names models, columns and sometimes the values that
+      // failed, so it stays in the log. The client gets a stable code and the
+      // non-sensitive meta the database already reported.
+      this.logger.error(`Prisma ${exception.code}: ${exception.message}`, {
+        requestId,
+        meta: exception.meta,
+      });
+      status = HttpStatus.INTERNAL_SERVER_ERROR;
+      code = "INTERNAL_ERROR";
+      message = "The server could not save that change.";
+
+      switch (exception.code) {
+        case "P2002":
+          status = HttpStatus.CONFLICT;
+          code = ErrorCode.ALREADY_EXISTS;
+          message = "That entry already exists.";
+          details = { target: exception.meta?.target };
+          break;
+        case "P2003":
+          status = HttpStatus.CONFLICT;
+          code = "CONFLICT";
+          message = "A record this one depends on is missing or still in use.";
+          details = { field: exception.meta?.field };
+          break;
+        case "P2025":
+          status = HttpStatus.NOT_FOUND;
+          code = ErrorCode.NOT_FOUND;
+          message = "That item no longer exists.";
+          break;
+      }
+    } else if (exception instanceof Prisma.PrismaClientValidationError) {
+      // A query the code built wrong: a bug to fix here, never a message to
+      // show anyone else.
+      this.logger.error(
+        `Prisma query rejected: ${exception.message}`,
+        exception.stack,
+      );
+      message = "An unexpected error occurred";
     } else if (exception instanceof Error) {
       code = this.getErrorCodeForStatus(status);
-      message = exception.message || "An unexpected error occurred";
+      message = "An unexpected error occurred";
 
       this.logger.error(
         `Unhandled exception: ${exception.message}`,
@@ -89,6 +134,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       statusCode: status,
       code,
       message,
+      ...(details ? { details } : {}),
       requestId,
       ...(inboundTraceId ? { traceId: inboundTraceId } : {}),
       timestamp: new Date().toISOString(),

@@ -57,8 +57,12 @@ COPY --chown=nodejs:nodejs prisma ./prisma
 USER nodejs
 
 # Health check
+# /health/live is the liveness probe: it answers 200 as soon as the HTTP server
+# is up and never touches Mongo/Redis. /health/ready does check dependencies, so
+# using it here would have Docker kill a healthy container over a degraded DB.
+# (There is no global route prefix -- /api is only the Swagger UI mount.)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:3000/api/health || exit 1
+    CMD curl -f http://localhost:3000/health/live || exit 1
 
 # Use dumb-init to handle signals properly
 ENTRYPOINT ["dumb-init", "--"]

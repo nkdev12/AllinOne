@@ -36,7 +36,7 @@ Allinone is a **100% free, self-hosted** backend that combines:
 | Component | Technology | Self-Hosted |
 |-----------|-----------|------------|
 | **Backend** | Node.js + NestJS + TypeScript | ✅ |
-| **Database** | PostgreSQL 16+ | ✅ |
+| **Database** | MongoDB 7.0 | ✅ |
 | **Cache & Queues** | Redis + BullMQ | ✅ |
 | **Object Storage** | MinIO (S3-compatible) | ✅ |
 | **Email** | SMTP (Mailpit for dev) | ✅ |
@@ -72,7 +72,7 @@ Edit `.env` if needed (defaults work for local development):
 
 ```env
 APP_ENV=development
-DATABASE_URL=postgresql://allinone:allinone@localhost:5432/allinone_dev
+DATABASE_URL=mongodb://localhost:27017/allinone_dev
 REDIS_URL=redis://localhost:6379
 ```
 
@@ -87,7 +87,7 @@ Services running:
 
 - **API** → http://localhost:3000
 - **API Docs** → http://localhost:3000/api
-- **PostgreSQL** → localhost:5432
+- **MongoDB** → localhost:27017
 - **Redis** → localhost:6379
 - **MinIO** → http://localhost:9000 (username/password: `minioadmin`)
 - **Mailpit** (email testing) → http://localhost:8025
@@ -102,8 +102,8 @@ npm install
 # Generate Prisma client
 npm run db:generate
 
-# Run database migrations
-npm run db:migrate
+# Apply the schema (Prisma Migrate does not support the mongodb provider)
+npm run db:push
 ```
 
 ### 5. Start Development Server
@@ -142,14 +142,12 @@ allinone-backend/
 │
 ├── prisma/
 │   ├── schema.prisma        # Database schema ✅
-│   ├── migrations/          # Database migrations
 │   └── seed.ts              # Test data seeding
 │
 ├── infrastructure/
 │   ├── prometheus/          # Metrics configuration
 │   ├── grafana/             # Dashboard provisioning
-│   ├── caddy/               # Reverse proxy configuration
-│   └── postgres/            # Backup scripts
+│   └── caddy/               # Reverse proxy configuration
 │
 ├── test/                    # Integration & E2E tests
 ├── scripts/                 # Utility scripts
@@ -168,7 +166,7 @@ allinone-backend/
 All variables are documented in [`.env.example`](.env.example):
 
 **Critical variables:**
-- `DATABASE_URL` — PostgreSQL connection
+- `DATABASE_URL` — MongoDB connection
 - `REDIS_URL` — Redis connection
 - `JWT_ACCESS_SECRET` — Access token secret (generate: `openssl rand -hex 32`)
 - `JWT_REFRESH_SECRET` — Refresh token secret (generate: `openssl rand -hex 32`)
@@ -187,9 +185,9 @@ npm run lint                  # ESLint + fixes
 
 # Database
 npm run db:generate           # Generate Prisma client
-npm run db:migrate            # Create new migration
-npm run db:migrate:deploy     # Apply migrations
-npm run db:push               # Push schema changes
+npm run db:push               # Apply schema changes — the only one of these that works
+npm run db:migrate            # Fails: Prisma Migrate rejects the mongodb provider
+npm run db:migrate:deploy     # Same error, same reason
 npm run db:seed               # Seed test data
 npm run db:studio             # Prisma Studio UI
 
@@ -226,7 +224,7 @@ docker build -t allinone-api:latest .    # Build API image
           └──────────┬──┴────────────┘
                      ▼
         ┌─────────────────────────┐
-        │ PostgreSQL (Primary DB) │
+        │ MongoDB (Primary DB)    │
         └─────────────────────────┘
                      │
         ┌─────────────┴──────────────┐
@@ -249,7 +247,7 @@ nano .env.prod
 
 # Key variables to set:
 # APP_URL=https://your-domain.com
-# DATABASE_URL=postgresql://user:password@postgres:5432/allinone_prod
+# DATABASE_URL=mongodb://user:password@mongo:27017/allinone_prod
 # JWT_ACCESS_SECRET=<generate: openssl rand -hex 32>
 # JWT_REFRESH_SECRET=<generate: openssl rand -hex 32>
 # ENCRYPTION_KEY=<generate: openssl rand -base64 32>
@@ -260,8 +258,8 @@ nano .env.prod
 # Start production stack
 docker compose up -d
 
-# Run migrations
-docker compose exec api npm run db:migrate:deploy
+# Apply the schema
+docker compose exec api npm run db:push
 
 # Verify health
 curl https://your-domain.com/api/health
@@ -270,14 +268,14 @@ curl https://your-domain.com/api/health
 ### Backup & Recovery
 
 ```bash
-# Backup database
-docker compose exec -T postgres pg_dump -U allinone allinone_prod > backup.sql
+# Backup database (mongodump archive, timestamped)
+./scripts/backup-database.sh
 
 # Backup MinIO data
 docker compose exec minio mc mirror /data ./backups/minio
 
-# Restore database
-docker compose exec -T postgres psql -U allinone allinone_prod < backup.sql
+# Restore database (asks for confirmation, then verifies collection counts)
+./scripts/restore-database.sh /opt/allinone-backup/allinone-db-<YYYYMMDD_HHMMSS>.archive.gz
 
 # See docs/disaster-recovery.md for complete procedures
 ```
@@ -422,7 +420,7 @@ Contributions welcome! See [CONTRIBUTING.md](docs/CONTRIBUTING.md)
 - [x] Notes & hierarchical folders, version history (`NoteHistory`), tags
 - [x] Tasks & projects, Kanban sections, RRULE recurrence, task reminders
 - [x] Calendar & events, attendees, RSVP management, date range queries
-- [x] Zero-Knowledge password vault, master key unlock, encrypted items
+- [x] Password vault: client-side AES-256-GCM entries synced as `vault_item` oplog changes, master-key unlock, OTP-verified master-password recovery (not zero-knowledge — see `docs/SECURITY.md`)
 
 ### Stage 8 — Infrastructure & Security Hardening (Completed)
 - [x] Redis & BullMQ distributed job processing (`mail`, `notification`, `export`, `maintenance`)

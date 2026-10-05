@@ -1,5 +1,6 @@
 import { ApiProperty } from "@nestjs/swagger";
 import {
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
   IsDate,
@@ -14,11 +15,17 @@ import {
 } from "class-validator";
 import { Type } from "class-transformer";
 import { ChangeOperation } from "@prisma/client";
+import {
+  MAX_CHANGES_PER_PUSH,
+  SYNC_ENTITY_TYPES,
+} from "../change-payload.validator";
 
 export class ChangeItemDto {
   @ApiProperty({
     example: "note",
-    description: "Type of entity (e.g. note, task, event)",
+    enum: SYNC_ENTITY_TYPES,
+    description:
+      "Synced entity kind. Anything outside this list is refused on push, because a row nothing replays is copied to every device for the life of the log.",
   })
   @IsString()
   @IsNotEmpty()
@@ -49,7 +56,7 @@ export class ChangeItemDto {
   @ApiProperty({
     example: { title: "My Note", content: "Hello World" },
     description:
-      "Plain object payload OR client-side zero-knowledge encrypted wrapper payload",
+      "Document for note, task, event, calendar, habit and habit_log. A note CREATE/UPDATE must carry {title, content} — title a string, content a string or null — and may carry createdAt (a string), tags (a list of strings or null), color (a string or null), noteType (a string or null: the app's format key, unknown values accepted) and structured (a string or null: the note's table as JSON text, held opaque), which a device that has not learned the later keys simply omits; a habit must carry all fourteen of the columns a device overwrites from it, and a habit_log {habitId, day, amount, note, completedAt}; a vault_item UPDATE/CREATE must carry {type, encryptedData, iv, authTag, isEncrypted} with the same key names the client encrypts under. A DELETE is exempt from all of them: it announces an end rather than a body.",
   })
   @IsObject()
   payload!: Record<string, any>;
@@ -66,7 +73,11 @@ export class ChangeItemDto {
   @ApiProperty({
     example: "2026-09-07T12:00:00.000Z",
     description:
-      "Client timestamp for Last-Write-Wins (LWW) conflict resolution",
+      "When the device made the edit, on the device's own clock. Stored on the " +
+      "change and echoed back on pull, so a client's list can order by the edit " +
+      "rather than by when this server received it — `createdAt` is the arrival. " +
+      "Never used to decide conflicts: refusal is by `version` alone, so a device " +
+      "with a fast clock cannot push its way past a newer write.",
     required: false,
   })
   @Type(() => Date)
@@ -85,9 +96,12 @@ export class PushSyncDto {
 
   @ApiProperty({
     type: [ChangeItemDto],
-    description: "Array of change items to push",
+    description: `Array of change items to push. At most ${MAX_CHANGES_PER_PUSH} per request: the whole batch is written inside one \`$transaction\`.`,
   })
   @IsArray()
+  @ArrayMaxSize(MAX_CHANGES_PER_PUSH, {
+    message: `a push may carry at most ${MAX_CHANGES_PER_PUSH} changes`,
+  })
   @ValidateNested({ each: true })
   @Type(() => ChangeItemDto)
   changes!: ChangeItemDto[];

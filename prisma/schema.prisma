@@ -45,10 +45,49 @@ model User {
   calendars         Calendar[]
   events            Event[]
   vaultSetting      VaultSetting?
-  vaultItems        VaultItem[]
+  emailVerificationOtp EmailVerificationOtp?
+  otpTokens        OtpToken[]
+  // Collaboration grants: the resources this account shares out, and the ones it
+  // was given access to. Back-relations for `ResourceShare`.
+  ownedShares       ResourceShare[] @relation("ResourceShareOwner")
+  receivedShares    ResourceShare[] @relation("ResourceShareGrantee")
 
   @@index([status])
   @@index([createdAt])
+}
+
+model EmailVerificationOtp {
+  id        String   @id @default(uuid()) @map("_id")
+  userId    String   @unique
+  codeHash  String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("email_verification_otps")
+}
+
+// Out-of-band identity codes for password reset and vault recovery. Keyed by
+// purpose so a code issued for one flow can never be spent on the other.
+model OtpToken {
+  id        String     @id @default(uuid()) @map("_id")
+  userId    String
+  purpose   OtpPurpose
+  codeHash  String
+  expiresAt DateTime
+  createdAt DateTime   @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, purpose])
+  @@index([expiresAt])
+}
+
+enum OtpPurpose {
+  PASSWORD_RESET
+  VAULT_RECOVERY
 }
 
 enum UserStatus {
@@ -187,14 +226,35 @@ model Change {
   entityId          String
   operation         ChangeOperation
   version           Int
-  payload           Json     // Contains only non-sensitive metadata
+  payload           Json     // note/task/event content, or opaque vault ciphertext
   cursor            BigInt   @default(0)
   createdAt         DateTime @default(now())
+  // When the authoring device made the edit, stamped on its clock. `createdAt`
+  // is when this server heard about it, which for a device that was offline for
+  // a week is a week later — and clients sort their lists on the edit. Stored
+  // and echoed, never compared: conflict refusal is by `version` alone, so an
+  // ahead-of-clock device cannot push its way past a newer write.
+  clientTimestamp   DateTime?
 
   @@index([userId])
   @@index([deviceId])
   @@index([userId, cursor])
   @@index([createdAt])
+}
+
+// Per-user high-water mark for `Change.cursor`. MongoDB has no sequence object
+// and Prisma exposes no way to derive "one greater than anything this user has
+// ever been handed" from the Change collection itself without a max() scan that
+// races concurrent writers, so the counter lives in its own document and is
+// advanced with an atomic $inc inside the same interactive transaction that
+// writes the Change row. Two concurrent pushes therefore serialise on this
+// document instead of handing the same cursor to two rows.
+model SyncCursor {
+  id        String   @id @default(uuid()) @map("_id")
+  userId    String   @unique
+  seq       BigInt   @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 enum ChangeOperation {
@@ -206,7 +266,7 @@ enum ChangeOperation {
 
 model IdempotencyKey {
   id                String   @id @default(uuid()) @map("_id")
-  key               String   @unique
+  key               String
   userId            String
   endpoint          String
   method            String
@@ -215,6 +275,10 @@ model IdempotencyKey {
   expiresAt         DateTime
   createdAt         DateTime @default(now())
 
+  // Scoped per account: a globally unique key made one account's cached response
+  // addressable by anybody who held the string, and the write path that reuses an
+  // unknown key overwrites the row it collided with — including its userId.
+  @@unique([userId, key])
   @@index([userId])
   @@index([expiresAt])
 }
@@ -263,6 +327,12 @@ enum AuditAction {
   ACCOUNT_UNLOCKED
   OAUTH_CONNECTED
   OAUTH_REVOKED
+  // Collaboration grants. `/collaboration` used to borrow DEVICE_ADDED /
+  // DEVICE_REVOKED because this enum had no share member, which made every SIEM
+  // query for device enrolment drag in resource shares too. Additive, so rows
+  // already written keep their old values; the enum is plain strings on MongoDB.
+  RESOURCE_SHARED
+  RESOURCE_SHARE_REVOKED
 }
 
 // ============================================================================
@@ -270,16 +340,29 @@ enum AuditAction {
 // ============================================================================
 
 model Folder {
-  id          String   @id @default(uuid()) @map("_id")
-  userId      String
-  parentId    String?
-  name        String
-  color       String?
-  icon        String?
-  sortOrder   Int      @default(0)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  deletedAt   DateTime?
+  id        String   @id @default(uuid()) @map("_id")
+  userId    String
+  parentId  String?
+  name      String
+  color     String?
+  icon      String?
+  // Which of the desktop app's note formats a note created in this folder gets:
+  // the same stable key `Note.noteType` holds (`normal`, `diary`, `shopping`,
+  // `bucket`, `quotes`), and held for the same three reasons — it is the app's
+  // name rather than a label, it is not closed to the five the current build
+  // knows, and `icon` is the folder's own glyph so a type's default icon stays
+  // the app's to change.
+  //
+  // `version` is the folder's position in the change log, mirrored from the
+  // accepted change the way `Note.version` is. A folder syncs as a whole
+  // document, so without a number to compare an edit still queued on another
+  // device would arrive as the newest word on its name.
+  type      String?
+  version   Int      @default(1)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
 
   // Relations
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -317,6 +400,35 @@ model Note {
   isPinned    Boolean  @default(false)
   isArchived  Boolean  @default(false)
   isEncrypted Boolean  @default(false)
+  // The desktop client's own label list and highlight colour, kept under exactly
+  // the key names the client's Isar schema and `toMap()` write, because a sync
+  // payload is matched by name and renaming one loses the user's tags.
+  //
+  // `tags` is a list of bare strings rather than the normalised `NoteTag` join
+  // this row also carries: a device typing a label into the note has no tag UUID
+  // to point at, so the join cannot hold what it sends. The two are different
+  // state and neither is derived from the other.
+  //
+  // Both read back safely on rows written before they existed: a list defaults to
+  // empty, and `color` is nullable, so no document has to be rewritten.
+  tags        String[] @default([])
+  color       String?
+  // The same client-authored pair, one level down: which of the desktop app's
+  // note formats a note is, and the rows its table holds.
+  //
+  // `noteType` is the format's stable key (`normal`, `diary`, `shopping`,
+  // `bucket`, `quotes`) rather than a label, so a rename in the app's UI is not
+  // a migration here. `structured` is the JSON text the client serialises, and
+  // the server holds it as opaque text for the reason the vault holds its blob
+  // opaquely: the row's shape is the app's to evolve, and re-shaping it on the
+  // way through would drop anything this server has not been taught about yet.
+  //
+  // Both are nullable rather than defaulted: a note written before the format
+  // existed has no type to invent, and an absent `structured` means "this note
+  // has no table" in a way a `{"rows":[]}` — a table the user cleared — does
+  // not. `null` is the value that distinction needs, so it stays a value here.
+  noteType    String?
+  structured  String?
   version     Int      @default(1)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -617,25 +729,46 @@ model EventReminder {
 }
 
 // ============================================================================
-// Zero-Knowledge Password Vault
+// Password Vault
 // ============================================================================
-
-enum VaultItemType {
-  LOGIN
-  SECURE_NOTE
-  CREDIT_CARD
-  IDENTITY
-  PASSWORD
-}
 
 model VaultSetting {
   id                String   @id @default(uuid()) @map("_id")
   userId            String   @unique
+  // base64(SHA-256(...)) of the verifier the client derived, wrapped in
+  // hmac-sha256 under the server-only ENCRYPTION_KEY. Stored as anything else
+  // it would be a bearer secret: holding it is holding the unlock.
   masterKeyHash     String
   keySalt           String
-  kdfIterations     Int      @default(100000)
+  // What the client derived with, recorded for diagnostics and read by nothing:
+  // the authoritative copy of these parameters is the `_kdf` marker sealed
+  // inside every vault blob. `t = 3` / `m = 65536` KiB are the values the
+  // shipped client sends; the 100000 this column defaulted to was a PBKDF2-shaped
+  // placeholder from before a client existed, so rows written before it carry
+  // that number and nothing should be read into it.
+  kdfIterations     Int      @default(3)
   kdfMemory         Int?     @default(65536)
   isVaultConfigured Boolean  @default(true)
+
+  // Master-password recovery: recoveryKey wraps the master key so an
+  // OTP-verified reset can decrypt and re-encrypt the vault instead of
+  // destroying it. The trade-off is that the server now holds material that
+  // can recover any vault, so this is no longer zero-knowledge.
+  recoveryKey       String?
+  wrappedMasterKey  String?
+  wrappedMasterIv   String?
+  wrappedMasterTag  String?
+  // Set when a recovery OTP is spent; the re-encryption upload must land
+  // before this deadline, otherwise the recovery grant expires.
+  recoveryGrantedAt DateTime?
+  // Failed master-password verifications, counted here and never on `User`: a
+  // wrong *master password* must not lock the *account* out of its notes,
+  // tasks and calendar.
+  unlockFailedAttempts Int       @default(0)
+  // While this is in the future the unlock endpoint refuses without even
+  // comparing the verifier.
+  unlockLockedUntil    DateTime?
+
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
@@ -643,25 +776,58 @@ model VaultSetting {
   user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
-model VaultItem {
-  id            String        @id @default(uuid()) @map("_id")
-  userId        String
-  type          VaultItemType @default(LOGIN)
-  name          String
-  category      String?
-  encryptedData String
-  iv            String
-  authTag       String
-  isFavorite    Boolean       @default(false)
-  version       Int           @default(1)
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-  deletedAt     DateTime?
+// ============================================================================
+// Collaboration & Resource Sharing
+// ============================================================================
+
+enum ShareRole {
+  VIEWER
+  EDITOR
+  ADMIN
+}
+
+enum ShareResourceType {
+  NOTE
+  PROJECT
+  CALENDAR
+}
+
+// One role granted on one resource to one recipient.
+//
+// This row is the reason `/collaboration` can carry collaboration at all: the
+// service kept grants in `private readonly shares = new Map()` — process memory,
+// lost on every restart, invisible to other workers, and with nothing but an
+// audit-log entry as a trace. `sharedWithUserId` is required, which is the schema
+// refusing the old email-only invite: a grant with no user behind it can never be
+// matched by `checkAccess(userId, …)` and silently granted nothing.
+//
+// `resourceType`/`resourceId` is polymorphic (note, project, calendar), so the
+// resource side cannot carry a foreign key and is resolved by the service before
+// a grant is written. The two user sides can, and do.
+model ResourceShare {
+  id               String            @id @default(uuid()) @map("_id")
+  resourceType     ShareResourceType
+  resourceId       String
+  ownerId          String
+  sharedWithUserId String
+  sharedWithEmail  String
+  role             ShareRole         @default(VIEWER)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  deletedAt        DateTime?
 
   // Relations
-  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  owner            User              @relation("ResourceShareOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  sharedWith       User              @relation("ResourceShareGrantee", fields: [sharedWithUserId], references: [id], onDelete: Cascade)
 
-  @@index([userId])
-  @@index([type])
-  @@index([category])
+  // The duplicate-share rule, enforced where two racing requests can both lose
+  // or both win: the service used to `find` over the map first, and nothing
+  // stopped concurrent callers from both missing. Revoked grants keep their row
+  // (`deletedAt`), so a collision on this key is read back by the service and
+  // either revived — a re-share with the same person — or answered with `409`.
+  @@unique([resourceType, resourceId, sharedWithEmail])
+  @@index([resourceType, resourceId])
+  @@index([sharedWithUserId])
+  @@index([sharedWithEmail])
+  @@index([ownerId])
 }

@@ -1,13 +1,17 @@
-import { Injectable, UnauthorizedException } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { PassportStrategy } from "@nestjs/passport";
 import { ExtractJwt, Strategy } from "passport-jwt";
 import { ConfigurationService } from "@/config/configuration.service";
 import { UsersService } from "@/users/users.service";
+import { ErrorCode } from "@/common/errors/error-code";
+import { unauthorized } from "@/common/errors/http-errors";
 
 export interface JwtPayload {
   sub: string;
   email: string;
   sessionId?: string;
+  type?: string;
+  purpose?: string;
   iat?: number;
   exp?: number;
 }
@@ -40,9 +44,34 @@ export class JwtStrategy extends PassportStrategy(Strategy, "jwt") {
   }
 
   async validate(payload: JwtPayload) {
+    if (payload.type !== "access" || payload.purpose) {
+      throw unauthorized(
+        ErrorCode.TOKEN_INVALID,
+        "Only access tokens may be used to authenticate requests",
+      );
+    }
+
     const user = await this.usersService.getUserById(payload.sub);
     if (!user || user.status !== "ACTIVE" || user.deletedAt) {
-      throw new UnauthorizedException("User account is inactive or invalid");
+      throw unauthorized(
+        ErrorCode.ACCOUNT_DISABLED,
+        "User account is inactive or invalid",
+      );
+    }
+
+    // The token proves who you were when it was signed; the row proves you are
+    // still allowed to be. Without this, "log out everywhere" leaves every
+    // signed-in device reading the vault until its access token expires.
+    // Tokens with no `sessionId` are the ones minted before sessions were
+    // stamped, and the paths that use them, so they keep passing.
+    if (
+      payload.sessionId &&
+      !(await this.usersService.isSessionLive(payload.sub, payload.sessionId))
+    ) {
+      throw unauthorized(
+        ErrorCode.SESSION_REVOKED,
+        "Session has been revoked or no longer exists.",
+      );
     }
 
     return {

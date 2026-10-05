@@ -2,12 +2,15 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  Optional,
 } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { SyncNotificationService } from "@/sync/sync-notification.service";
 import { CreateEventDto } from "../dto/create-event.dto";
 import { UpdateEventDto } from "../dto/update-event.dto";
 import { QueryEventsDto } from "../dto/query-events.dto";
 import { CreateEventReminderDto } from "../dto/create-event-reminder.dto";
+import { appendChange } from "@/sync/change-cursor";
 import {
   AttendeeStatus,
   ChangeOperation,
@@ -15,9 +18,69 @@ import {
   ReminderChannel,
 } from "@prisma/client";
 
+export function eventChangePayload(event: any): Record<string, any> {
+  const reminderMinutes =
+    event.reminders && event.reminders.length > 0
+      ? event.reminders[0].minutesBefore
+      : (event.reminderMinutes ?? null);
+
+  const attendees = Array.isArray(event.attendees)
+    ? event.attendees.map((a: any) => ({
+        email: a.email ?? "",
+        name: a.name ?? "",
+        status: a.status ?? "NEEDS_ACTION",
+      }))
+    : [];
+
+  return {
+    calendarId: event.calendarId,
+    title: event.title ?? "",
+    description: event.description ?? null,
+    location: event.location ?? null,
+    startAt:
+      event.startAt instanceof Date
+        ? event.startAt.toISOString()
+        : event.startAt,
+    endAt:
+      event.endAt instanceof Date ? event.endAt.toISOString() : event.endAt,
+    isAllDay: Boolean(event.isAllDay),
+    recurrenceRule: event.recurrenceRule ?? null,
+    exceptions: Array.isArray(event.exceptions) ? event.exceptions : [],
+    exceptionUntil:
+      event.exceptionUntil instanceof Date
+        ? event.exceptionUntil.toISOString()
+        : (event.exceptionUntil ?? null),
+    recurrenceMasterId: event.recurrenceMasterId ?? null,
+    detachedOccurrenceAt:
+      event.detachedOccurrenceAt instanceof Date
+        ? event.detachedOccurrenceAt.toISOString()
+        : (event.detachedOccurrenceAt ?? null),
+    status: event.status ?? "CONFIRMED",
+    color: event.color ?? null,
+    attendees,
+    reminderMinutes,
+    createdAt:
+      event.createdAt instanceof Date
+        ? event.createdAt.toISOString()
+        : (event.createdAt ?? null),
+    version: event.version ?? 1,
+  };
+}
+
 @Injectable()
 export class EventsService {
-  constructor(private readonly prisma: PrismaService) {}
+  /**
+   * `syncNotifications` is how this account's other devices learn that an event
+   * moved without waiting for their next pull. As in `NotesService` and
+   * `TasksService`, the notification goes out after the transaction that
+   * appended the `Change` row has resolved, never from inside it, and the
+   * injection is optional so a graph with no WebSocket server still saves the
+   * event.
+   */
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly syncNotifications?: SyncNotificationService,
+  ) {}
 
   async createEvent(userId: string, dto: CreateEventDto) {
     const calendar = await this.prisma.calendar.findFirst({
@@ -36,7 +99,9 @@ export class EventsService {
       );
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    let highestCursor: bigint | undefined;
+
+    const created = await this.prisma.$transaction(async (tx) => {
       const event = await tx.event.create({
         data: {
           userId,
@@ -71,25 +136,22 @@ export class EventsService {
         },
       });
 
-      await tx.change.create({
-        data: {
-          userId,
-          entityType: "event",
-          entityId: event.id,
-          operation: ChangeOperation.CREATE,
-          version: event.version,
-          payload: {
-            title: event.title,
-            calendarId: event.calendarId,
-            startAt: event.startAt,
-            endAt: event.endAt,
-            isAllDay: event.isAllDay,
-          },
-        },
+      const logged = await appendChange(tx, {
+        userId,
+        entityType: "event",
+        entityId: event.id,
+        operation: ChangeOperation.CREATE,
+        version: event.version,
+        payload: eventChangePayload(event),
       });
+      highestCursor = logged.cursor;
 
       return event;
     });
+
+    this.syncNotifications?.notifyMutation({ userId, highestCursor });
+
+    return created;
   }
 
   async getEvents(userId: string, query: QueryEventsDto) {
@@ -185,7 +247,9 @@ export class EventsService {
       );
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    let highestCursor: bigint | undefined;
+
+    const updated = await this.prisma.$transaction(async (tx) => {
       if (dto.attendees !== undefined) {
         await tx.eventAttendee.deleteMany({ where: { eventId: existing.id } });
         if (dto.attendees.length > 0) {
@@ -223,24 +287,22 @@ export class EventsService {
         },
       });
 
-      await tx.change.create({
-        data: {
-          userId,
-          entityType: "event",
-          entityId: updatedEvent.id,
-          operation: ChangeOperation.UPDATE,
-          version: updatedEvent.version,
-          payload: {
-            title: updatedEvent.title,
-            startAt: updatedEvent.startAt,
-            endAt: updatedEvent.endAt,
-            status: updatedEvent.status,
-          },
-        },
+      const logged = await appendChange(tx, {
+        userId,
+        entityType: "event",
+        entityId: updatedEvent.id,
+        operation: ChangeOperation.UPDATE,
+        version: updatedEvent.version,
+        payload: eventChangePayload(updatedEvent),
       });
+      highestCursor = logged.cursor;
 
       return updatedEvent;
     });
+
+    this.syncNotifications?.notifyMutation({ userId, highestCursor });
+
+    return updated;
   }
 
   async updateAttendeeRSVP(
@@ -293,24 +355,29 @@ export class EventsService {
       throw new NotFoundException(`Event with ID '${eventId}' not found.`);
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    let highestCursor: bigint | undefined;
+
+    const result = await this.prisma.$transaction(async (tx) => {
       await tx.event.update({
         where: { id: eventId },
         data: { deletedAt: new Date(), version: { increment: 1 } },
       });
 
-      await tx.change.create({
-        data: {
-          userId,
-          entityType: "event",
-          entityId: eventId,
-          operation: ChangeOperation.DELETE,
-          version: existing.version + 1,
-          payload: { id: eventId },
-        },
+      const logged = await appendChange(tx, {
+        userId,
+        entityType: "event",
+        entityId: eventId,
+        operation: ChangeOperation.DELETE,
+        version: existing.version + 1,
+        payload: { version: existing.version + 1 },
       });
+      highestCursor = logged.cursor;
 
       return { success: true, message: "Event deleted successfully." };
     });
+
+    this.syncNotifications?.notifyMutation({ userId, highestCursor });
+
+    return result;
   }
 }

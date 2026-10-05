@@ -3,9 +3,11 @@ import {
   NotFoundException,
   BadRequestException,
   Logger,
+  Optional,
 } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
-import { ConfigService } from "@nestjs/config";
+import { appendChange } from "@/sync/change-cursor";
+import { SyncNotificationService } from "@/sync/sync-notification.service";
 import {
   ChangeOperation,
   TaskPriority as PrismaTaskPriority,
@@ -14,9 +16,12 @@ import {
   ExtractedTask,
   ExtractedTasksResult,
   SuggestedTagsResult,
+  SummaryFormat,
+  SummaryLength,
   SummaryResult,
   TaskPriority,
 } from "./ai.interface";
+import { GeminiClient } from "./gemini.client";
 import {
   ConvertTasksDto,
   ExtractTasksDto,
@@ -207,7 +212,11 @@ export class AiService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly configService: ConfigService,
+    private readonly gemini: GeminiClient,
+    // `@Optional()` for the same reason the other write paths use it: this
+    // service is constructed in unit graphs that register no sync module, and a
+    // missing notifier costs the wake-up and nothing else.
+    @Optional() private readonly syncNotifications?: SyncNotificationService,
   ) {}
 
   private mapToPrismaPriority(priority?: TaskPriority): PrismaTaskPriority {
@@ -249,61 +258,57 @@ export class AiService {
     );
   }
 
+  /**
+   * Summarize raw text or one of the caller's own notes.
+   *
+   * `provider` reports what actually answered: `"gemini"` only when an
+   * operator has set a non-blank `GEMINI_API_KEY` *and* the call came back
+   * with usable text. Everything else — no key, a non-2xx, a transport
+   * failure, the `GEMINI_TIMEOUT_MS` deadline firing, an empty candidate —
+   * is logged at `warn` and answered by the deterministic heuristic below.
+   * This endpoint cannot fail because Google is slow or down; it just
+   * quietly answers less well.
+   */
   async summarize(
     userId: string,
     dto: SummarizeTextDto,
   ): Promise<SummaryResult> {
     const { content } = await this.resolveText(userId, dto.text, dto.noteId);
-    const geminiKey = this.configService.get<string>("GEMINI_API_KEY");
+    const length: SummaryLength = dto.length || "brief";
+    const format: SummaryFormat = dto.format || "paragraph";
 
-    if (geminiKey && geminiKey.trim().length > 0) {
+    if (this.gemini.isConfigured) {
       try {
         const geminiResult = await this.summarizeWithGemini(
           content,
-          geminiKey,
-          dto.length || "brief",
-          dto.format || "paragraph",
+          length,
+          format,
         );
         if (geminiResult) {
           return geminiResult;
         }
       } catch (err: any) {
+        // `err.message` is built by GeminiClient from a status code or an
+        // abort reason — it carries neither the API key nor the request URL.
         this.logger.warn(
           `Gemini API call failed, using heuristic fallback: ${err.message}`,
         );
       }
     }
 
-    return this.summarizeHeuristic(
-      content,
-      dto.length || "brief",
-      dto.format || "paragraph",
-    );
+    return this.summarizeHeuristic(content, length, format);
   }
 
   private async summarizeWithGemini(
     content: string,
-    apiKey: string,
-    length: string,
-    format: string,
+    length: SummaryLength,
+    format: SummaryFormat,
   ): Promise<SummaryResult | null> {
+    // Built from the full text, but `GeminiClient` caps what goes on the
+    // wire (`MAX_GEMINI_PROMPT_CHARS`, truncating rather than failing). The
+    // lengths reported below stay those of the caller's real input.
     const prompt = `Summarize the following text in a ${length} manner, formatted as ${format}. Text:\n\n${content}`;
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
-
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Gemini status code ${response.status}`);
-    }
-
-    const data = (await response.json()) as any;
-    const generated = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+    const generated = await this.gemini.generateText(prompt);
 
     if (!generated) {
       return null;
@@ -314,15 +319,21 @@ export class AiService {
       originalLength: content.length,
       summaryLength: generated.length,
       compressionRatio: +(generated.length / (content.length || 1)).toFixed(2),
-      format: format as any,
+      format,
       provider: "gemini",
     };
   }
 
+  /**
+   * Deterministic extractive summarizer, and the answer this endpoint gives
+   * whenever Gemini is unconfigured or fails. Its output is byte-for-byte
+   * fixed for a given input and is pinned by `ai.service.spec.ts`, because
+   * the Flutter client renders it directly — see docs/API_REFERENCE.md §12.
+   */
   private summarizeHeuristic(
     content: string,
-    length: string,
-    format: string,
+    length: SummaryLength,
+    format: SummaryFormat,
   ): SummaryResult {
     // 1. Split into sentences
     const sentences = content
@@ -336,7 +347,7 @@ export class AiService {
         originalLength: content.length,
         summaryLength: content.length,
         compressionRatio: 1.0,
-        format: format as any,
+        format,
         provider: "heuristic",
       };
     }
@@ -383,11 +394,19 @@ export class AiService {
       originalLength: content.length,
       summaryLength: summary.length,
       compressionRatio: +(summary.length / (content.length || 1)).toFixed(2),
-      format: format as any,
+      format,
       provider: "heuristic",
     };
   }
 
+  /**
+   * Heuristic-only by design: this route has no Gemini code path, so
+   * `provider` is the literal `"heuristic"` on every call, whatever
+   * `GEMINI_API_KEY`, `GEMINI_MODEL` or `GEMINI_TIMEOUT_MS` are set to. Only
+   * `summarize()` consults the provider. Wiring remote extraction up here
+   * would need a budget decision, not just a call — see docs/API_REFERENCE.md
+   * §12.
+   */
   async extractTasks(
     userId: string,
     dto: ExtractTasksDto,
@@ -472,6 +491,10 @@ export class AiService {
     };
   }
 
+  /**
+   * Also heuristic-only: frequency-ranked tags plus keyword categories, with
+   * no provider call, so `provider` is always `"heuristic"` here too.
+   */
   async suggestTags(
     userId: string,
     dto: SuggestTagsDto,
@@ -540,6 +563,8 @@ export class AiService {
       throw new NotFoundException(`Note with ID '${noteId}' not found.`);
     }
 
+    let highestCursor: bigint | undefined;
+
     const createdTasks = await this.prisma.$transaction(async (tx) => {
       const results = [];
       for (const item of dto.tasks) {
@@ -554,25 +579,34 @@ export class AiService {
           },
         });
 
-        await tx.change.create({
-          data: {
-            userId,
-            entityType: "task",
-            entityId: task.id,
-            operation: ChangeOperation.CREATE,
-            version: 1,
-            payload: {
-              title: task.title,
-              priority: task.priority,
-              extractedFromNoteId: noteId,
-            },
+        const logged = await appendChange(tx, {
+          userId,
+          entityType: "task",
+          entityId: task.id,
+          operation: ChangeOperation.CREATE,
+          version: 1,
+          payload: {
+            title: task.title,
+            priority: task.priority,
+            extractedFromNoteId: noteId,
           },
         });
+
+        // Cursors only rise inside one transaction, so the last row written is
+        // the end of the log — and one wake-up after commit covers every task
+        // this loop appended.
+        highestCursor = logged.cursor;
 
         results.push(task);
       }
       return results;
     });
+
+    // `tasks: []` is valid input, and a wake-up that announces no new row just
+    // costs every other device a pull that returns nothing.
+    if (highestCursor !== undefined) {
+      this.syncNotifications?.notifyMutation({ userId, highestCursor });
+    }
 
     return {
       createdCount: createdTasks.length,

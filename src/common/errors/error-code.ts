@@ -1,0 +1,53 @@
+/**
+ * Stable, machine-readable failure keys.
+ *
+ * Clients branch on these instead of matching on message text, so a reworded
+ * message never breaks a caller. The coarse names the exception filter derives
+ * from a status code (VALIDATION_ERROR, UNAUTHORIZED, NOT_FOUND, CONFLICT,
+ * RATE_LIMITED, INTERNAL_ERROR) stay valid for anything that does not carry a
+ * specific code.
+ */
+export enum ErrorCode {
+  VALIDATION_ERROR = "VALIDATION_ERROR",
+
+  // Credentials and session
+  INVALID_CREDENTIALS = "INVALID_CREDENTIALS",
+  EMAIL_NOT_VERIFIED = "EMAIL_NOT_VERIFIED",
+  EMAIL_ALREADY_REGISTERED = "EMAIL_ALREADY_REGISTERED",
+  ACCOUNT_DISABLED = "ACCOUNT_DISABLED",
+  TOKEN_INVALID = "TOKEN_INVALID",
+  TOKEN_EXPIRED = "TOKEN_EXPIRED",
+  SESSION_REVOKED = "SESSION_REVOKED",
+  OTP_INVALID = "OTP_INVALID",
+  RATE_LIMITED = "RATE_LIMITED",
+
+  // Two-factor
+  MFA_CHALLENGE_INVALID = "MFA_CHALLENGE_INVALID",
+  MFA_CODE_INVALID = "MFA_CODE_INVALID",
+
+  // Passkeys
+  PASSKEY_NOT_REGISTERED = "PASSKEY_NOT_REGISTERED",
+  PASSKEY_CHALLENGE_INVALID = "PASSKEY_CHALLENGE_INVALID",
+
+  // Vault
+  VAULT_NOT_CONFIGURED = "VAULT_NOT_CONFIGURED",
+  VAULT_ALREADY_CONFIGURED = "VAULT_ALREADY_CONFIGURED",
+  VAULT_MASTER_KEY_MISMATCH = "VAULT_MASTER_KEY_MISMATCH",
+  VAULT_RECOVERY_NOT_PENDING = "VAULT_RECOVERY_NOT_PENDING",
+  VAULT_RECOVERY_UNAVAILABLE = "VAULT_RECOVERY_UNAVAILABLE",
+
+  // Devices and sync
+  DEVICE_NOT_REGISTERED = "DEVICE_NOT_REGISTERED",
+  // A device row exists, was revoked, and cannot sync again. Its own code rather
+  // than a second DEVICE_NOT_REGISTERED because a client can self-heal from one
+  // ("I have no row — get one") and must not from the other ("the row was
+  // revoked on purpose — minting a new one would undo somebody's decision").
+  DEVICE_REVOKED = "DEVICE_REVOKED",
+  SYNC_PUSH_REJECTED = "SYNC_PUSH_REJECTED",
+
+  // Entities
+  NOT_FOUND = "NOT_FOUND",
+  ALREADY_EXISTS = "ALREADY_EXISTS",
+
+  INTERNAL_ERROR = "INTERNAL_ERROR",
+}

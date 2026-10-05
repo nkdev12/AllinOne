@@ -1,10 +1,18 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { AuthController } from "./auth.controller";
 import { AuthService } from "./auth.service";
+import { ConfigurationService } from "@/config/configuration.service";
 
 describe("AuthController", () => {
   let controller: AuthController;
   let authService: any;
+
+  /**
+   * Deliberately not a week. The cookie used to carry `7 * 24 * 60 * 60 * 1000`
+   * regardless of what `JWT_REFRESH_EXPIRATION` said, so a test that asserted
+   * 604800000 would pass either way.
+   */
+  const REFRESH_TTL_SECONDS = 3600;
 
   const mockUser = {
     id: "user-uuid-123",
@@ -42,7 +50,13 @@ describe("AuthController", () => {
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AuthController],
-      providers: [{ provide: AuthService, useValue: authService }],
+      providers: [
+        { provide: AuthService, useValue: authService },
+        {
+          provide: ConfigurationService,
+          useValue: { jwtRefreshExpiresInSeconds: REFRESH_TTL_SECONDS },
+        },
+      ],
     }).compile();
 
     controller = module.get<AuthController>(AuthController);
@@ -117,10 +131,18 @@ describe("AuthController", () => {
       expect(authService.refreshTokens).toHaveBeenCalledWith({
         refreshToken: "cookie-refresh-token",
       });
+      // The whole option set, not `expect.any(Object)`: `maxAge` is the reason
+      // this controller reads configuration at all, and an assertion that
+      // accepted any object would not notice it going back to a literal week.
       expect(resMock.cookie).toHaveBeenCalledWith(
         "refresh_token",
         "mock-refresh-token",
-        expect.any(Object),
+        expect.objectContaining({
+          httpOnly: true,
+          sameSite: "strict",
+          path: "/auth/refresh",
+          maxAge: REFRESH_TTL_SECONDS * 1000,
+        }),
       );
       expect(result).toEqual({ tokens: mockAuthResponse.tokens });
     });

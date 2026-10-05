@@ -1,0 +1,116 @@
+name: CI
+
+# What this repo can actually gate on today, per package.json:
+#   npm run lint       -> eslint "{src,apps,libs,test}/**/*.ts" --fix
+#   npm run typecheck  -> tsc --noEmit
+#   npm test           -> jest (unit config is inline in package.json, rootDir: src,
+#                          testRegex *.spec.ts, "@/*" mapped to src)
+#   npm run test:e2e   -> jest --config ./test/jest-e2e.json (testRegex *.e2e-spec.ts)
+#   npm run db:generate-> prisma generate (required first: @prisma/client types do
+#                          not exist until the client is generated, and there is no
+#                          postinstall hook to do it for us)
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ==========================================================================
+  # Lint + typecheck + unit tests
+  # ==========================================================================
+  build:
+    name: Lint, typecheck & unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches the node:20-alpine images used by Dockerfile/Dockerfile.worker.
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run db:generate
+
+      - name: Lint
+        # `npm run lint` passes --fix to eslint, so formatting drift alone would
+        # self-heal instead of failing. The next step closes that hole.
+        run: npm run lint
+
+      - name: Fail if lint had to rewrite anything
+        run: |
+          if ! git diff --exit-code; then
+            echo "::error::'npm run lint' had to modify tracked files; run it locally and commit the result."
+            exit 1
+          fi
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+  # ==========================================================================
+  # End-to-end HTTP tests
+  #
+  # No `services:` block, on purpose: none of the five suites in test/e2e/*.e2e-spec.ts
+  # boot AppModule or touch a real datastore. Each one builds a narrow
+  # Test.createTestingModule({ imports: [TracingModule, ErrorHandlingModule] }) over a
+  # single controller, provides PrismaService/Services as in-process fakes
+  # (test/e2e/sync-flow.e2e-spec.ts drives a hand-built in-memory change log) and
+  # overrides JwtAuthGuard, then talks to the app through supertest. Grep over
+  # src/common/tracing and src/common/error-handling shows neither module imports
+  # ConfigModule, PrismaModule or ioredis, so nothing reaches MongoDB or Redis and
+  # the `--replSet rs0` requirement from docker-compose.dev.yml does not apply here.
+  #
+  # Verified by reading test/jest-e2e.json and all five specs; this job needs no
+  # fixture database and no cache. Do not paper over a failure here with
+  # `continue-on-error` or `|| true`, and do not add services until a spec
+  # actually requires them.
+  #
+  # If a future spec boots AppModule or uses a real PrismaService, add:
+  #   services:
+  #     mongodb:
+  #       image: mongo:7.0
+  #       ports: ["27017:27017"]
+  #       command: ["--replSet", "rs0", "--bind_ip_all"]
+  #       # a single-node replica set must be initiated before $transaction works:
+  #       #   mongosh --eval "rs.initiate({_id:'rs0',members:[{_id:0,host:'127.0.0.1:27017'}]})"
+  #     redis:
+  #       image: redis:7-alpine
+  #       ports: ["6379:6379"]
+  # and point DATABASE_URL/REDIS_URL at them.
+  # ==========================================================================
+  e2e:
+    name: E2E (in-process, no external services)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run db:generate
+
+      - name: E2E tests
+        run: npm run test:e2e

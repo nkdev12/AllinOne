@@ -22,14 +22,12 @@ import { AdminModule } from "@/admin/admin.module";
 import { CollaborationModule } from "@/collaboration/collaboration.module";
 import { AiModule } from "@/ai/ai.module";
 import { PasskeysModule } from "@/auth/passkeys/passkeys.module";
-import { QueuesModule } from "@/queues/queues.module";
 import { ErrorHandlingModule } from "@/common/error-handling/error-handling.module";
 import { AuditLogModule } from "@/common/audit/audit-log.module";
 import { MetricsModule } from "@/common/metrics/metrics.module";
 import { MetricsInterceptor } from "@/common/metrics/metrics.interceptor";
 import { CustomThrottlerGuard } from "@/common/guards/custom-throttler.guard";
 import { IdempotencyInterceptor } from "@/common/interceptors/idempotency.interceptor";
-import { RedisThrottlerStorage } from "@/common/throttler/redis-throttler.storage";
 import { TracingModule } from "@/common/tracing/tracing.module";
 import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
 
@@ -56,14 +54,66 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
         // Database
         DATABASE_URL: Joi.string().required(),
 
+        // Email (SMTP — required so OTP / password-reset mails can be sent)
+        SMTP_HOST: Joi.string().required(),
+        SMTP_PORT: Joi.number().default(587),
+        SMTP_USER: Joi.string().allow("").optional(),
+        SMTP_PASSWORD: Joi.string().allow("").optional(),
+        SMTP_FROM: Joi.string().required(),
+        SMTP_TLS: Joi.boolean().default(true),
+        EMAIL_VERIFY_ENABLED: Joi.boolean().default(false),
+        EMAIL_VERIFY_TOKEN_EXPIRY: Joi.string().default("24h"),
+
         // Redis
-        REDIS_URL: Joi.string().required(),
 
         // JWT
         JWT_ACCESS_SECRET: Joi.string().required(),
         JWT_ACCESS_EXPIRATION: Joi.string().default("15m"),
         JWT_REFRESH_SECRET: Joi.string().required(),
         JWT_REFRESH_EXPIRATION: Joi.string().default("7d"),
+        JWT_MFA_SECRET: Joi.string().allow("").optional(),
+
+        // OAuth Providers
+        OAUTH_GOOGLE_CLIENT_ID: Joi.string().allow("").optional(),
+        OAUTH_APPLE_CLIENT_ID: Joi.string().allow("").optional(),
+        OAUTH_MICROSOFT_CLIENT_ID: Joi.string().allow("").optional(),
+        GOOGLE_CLIENT_ID: Joi.string().allow("").optional(),
+        APPLE_CLIENT_ID: Joi.string().allow("").optional(),
+        MICROSOFT_CLIENT_ID: Joi.string().allow("").optional(),
+
+        // Admin access (AdminGuard). Optional and with NO default on purpose:
+        // unset or empty means the corresponding admit path is closed, so a
+        // deployment that never provisions these simply has no admin API.
+        // ConfigurationService enforces the ADMIN_SECRET length floor.
+        ADMIN_EMAILS: Joi.string().allow("").optional(),
+        ADMIN_USER_IDS: Joi.string().allow("").optional(),
+        ADMIN_SECRET: Joi.string().allow("").optional(),
+
+        // Cross-origin policy. `CORS_ORIGIN` answers the HTTP app's
+        // `enableCors()`; the `WS_*` keys answer the `/sync` namespace, which
+        // `SyncIoAdapter` builds from configuration at boot
+        // (`src/sync/adapters/sync-io.adapter.ts`). Declared so the surface
+        // exists in the same place the other transport settings do — the real
+        // documentation is `.env.example`, since `allowUnknown` means a typo
+        // here is not what catches it.
+        //
+        // `WS_CORS_ALLOW_NULL_ORIGIN` and `WS_REDIS_ADAPTER` stay strings
+        // rather than `Joi.boolean()` because the adapter parses the truthy
+        // spellings itself (`true`/`1`/`yes`/`on`) and a boolean here would
+        // reject values the code supports.
+        CORS_ORIGIN: Joi.string().allow("").optional(),
+        WS_CORS_ORIGINS: Joi.string().allow("").optional(),
+        WS_CORS_ALLOW_NULL_ORIGIN: Joi.string().allow("").optional(),
+        WS_REDIS_ADAPTER: Joi.string().allow("").optional(),
+
+        // AI summarization (Google Gemini). Optional and opt-in like the admin
+        // keys: a missing or blank GEMINI_API_KEY leaves AiService on its
+        // deterministic heuristics and no request is ever sent. The model and
+        // timeout defaults mirror src/ai/gemini.client.ts, which still re-checks
+        // each value itself, so a blank or non-positive setting cannot break it.
+        GEMINI_API_KEY: Joi.string().allow("").optional(),
+        GEMINI_MODEL: Joi.string().default("gemini-1.5-flash"),
+        GEMINI_TIMEOUT_MS: Joi.number().default(5000),
 
         // Object Storage
         OBJECT_STORAGE_ENDPOINT: Joi.string().required(),
@@ -72,15 +122,6 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
         OBJECT_STORAGE_ACCESS_KEY: Joi.string().required(),
         OBJECT_STORAGE_SECRET_KEY: Joi.string().required(),
         OBJECT_STORAGE_USE_SSL: Joi.boolean().default(false),
-
-        // SMTP
-        SMTP_HOST: Joi.string().required(),
-        SMTP_PORT: Joi.number().required(),
-        SMTP_USER: Joi.string().optional(),
-        SMTP_PASSWORD: Joi.string().optional(),
-        SMTP_FROM: Joi.string().required(),
-        SMTP_TLS: Joi.boolean().default(true),
-        EMAIL_VERIFY_ENABLED: Joi.boolean().default(true),
 
         // Encryption
         ENCRYPTION_KEY: Joi.string().min(32).required(),
@@ -119,7 +160,6 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
     PrismaModule,
     TracingModule,
     ErrorHandlingModule,
-    QueuesModule,
     AuditLogModule,
     MetricsModule,
 
@@ -136,7 +176,6 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
             limit: config.rateLimitMaxRequests,
           },
         ],
-        storage: new RedisThrottlerStorage(config),
       }),
     }),
 

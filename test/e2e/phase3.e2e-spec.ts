@@ -163,33 +163,6 @@ describe("Phase 3: Product Capabilities (E2E)", () => {
           deviceName: dto.deviceName || "WebAuthn Device",
         };
       }),
-
-      generateLoginOptions: jest.fn().mockImplementation(async (dto) => ({
-        challenge: "base64url-challenge-login-67890",
-        rpId: "localhost",
-        timeout: 60000,
-        userVerification: "preferred",
-        allowCredentials: dto.email
-          ? [{ id: "mock-cred-id", type: "public-key" }]
-          : [],
-      })),
-
-      verifyLogin: jest.fn().mockImplementation(async (dto) => {
-        if (dto.id === "unknown-cred") {
-          throw new UnauthorizedException(
-            "Passkey credential not recognized or has been revoked.",
-          );
-        }
-        return {
-          user: mockUser,
-          tokens: {
-            accessToken: "mock.passkey.jwt.access.token",
-            refreshToken: "mock.passkey.jwt.refresh.token",
-            expiresIn: 900,
-          },
-          sessionId: "passkey-session-987",
-        };
-      }),
     };
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -423,44 +396,24 @@ describe("Phase 3: Product Capabilities (E2E)", () => {
       expect(response.body.credentialId).toBe("credential-id-xyz");
     });
 
-    it("POST /auth/passkeys/login-options - should return public login challenge", async () => {
-      const response = await request(app.getHttpServer())
-        .post("/auth/passkeys/login-options")
-        .send({ email: "owner@example.com" })
-        .expect(200);
-
-      expect(response.body.challenge).toBe("base64url-challenge-login-67890");
-      expect(response.body.allowCredentials.length).toBe(1);
-    });
-
-    it("POST /auth/passkeys/login-verify - should authenticate passkey assertion and issue JWT", async () => {
-      const response = await request(app.getHttpServer())
-        .post("/auth/passkeys/login-verify")
-        .send({
-          id: "credential-id-xyz",
-          clientDataJSON: "base64-client-data",
-          authenticatorData: "base64-auth-data",
-          signature: "base64-signature",
-        })
-        .expect(200);
-
-      expect(response.body.user.id).toBe(mockUser.id);
-      expect(response.body.tokens.accessToken).toBe(
-        "mock.passkey.jwt.access.token",
-      );
-      expect(response.body.sessionId).toBe("passkey-session-987");
-    });
-
-    it("POST /auth/passkeys/login-verify - should reject unrecognized passkey credential", async () => {
-      await request(app.getHttpServer())
-        .post("/auth/passkeys/login-verify")
-        .send({
-          id: "unknown-cred",
-          clientDataJSON: "base64-client-data",
-          authenticatorData: "base64-auth-data",
-          signature: "base64-signature",
-        })
-        .expect(401);
-    });
+    // Both login routes are gone, and the 404 is the assertion that matters:
+    // `verifyLogin` used to mint access and refresh tokens after checking only
+    // that `clientDataJSON.type` was "webauthn.get", so any request shaped like
+    // an assertion completed a login with no passkey involved. A live route
+    // returning anything else here means the bypass is back.
+    it.each(["login-options", "login-verify"])(
+      "POST /auth/passkeys/%s - is not routed at all",
+      async (route) => {
+        await request(app.getHttpServer())
+          .post(`/auth/passkeys/${route}`)
+          .send({
+            id: "credential-id-xyz",
+            clientDataJSON: "base64-client-data",
+            authenticatorData: "base64-auth-data",
+            signature: "base64-signature",
+          })
+          .expect(404);
+      },
+    );
   });
 });
