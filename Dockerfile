@@ -3,7 +3,7 @@
 # ============================================================================
 # Build stage
 # ============================================================================
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /build
 
@@ -27,10 +27,13 @@ RUN npm run db:generate
 # Build TypeScript
 RUN npm run build
 
+# Prune devDependencies to keep only production dependencies (with compiled native modules)
+RUN npm prune --omit=dev && npm cache clean --force
+
 # ============================================================================
 # Runtime stage
 # ============================================================================
-FROM node:20-alpine
+FROM node:22-alpine
 
 WORKDIR /app
 
@@ -41,14 +44,13 @@ RUN apk add --no-cache dumb-init curl
 RUN addgroup -g 1001 -S nodejs && adduser -S nodejs -u 1001
 
 # Copy package files
-COPY package.json package-lock.json ./
+COPY --chown=nodejs:nodejs package.json ./
 
-# Install production dependencies only
-RUN npm ci --omit=dev && npm cache clean --force
+# Copy compiled production dependencies from builder
+COPY --from=builder --chown=nodejs:nodejs /build/node_modules ./node_modules
 
 # Copy built application from builder
 COPY --from=builder --chown=nodejs:nodejs /build/dist ./dist
-COPY --from=builder --chown=nodejs:nodejs /build/node_modules/.prisma ./node_modules/.prisma
 
 # Copy Prisma schema for migrations
 COPY --chown=nodejs:nodejs prisma ./prisma
