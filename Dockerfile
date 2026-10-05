@@ -8,7 +8,7 @@ FROM node:22-alpine AS builder
 WORKDIR /build
 
 # Install build dependencies
-RUN apk add --no-cache python3 make g++
+RUN apk add --no-cache openssl python3 make g++
 
 # Copy package files
 COPY package.json package-lock.json ./
@@ -37,8 +37,8 @@ FROM node:22-alpine
 
 WORKDIR /app
 
-# Install dumb-init for proper signal handling
-RUN apk add --no-cache dumb-init curl
+# Install dumb-init for proper signal handling and openssl for Prisma runtime
+RUN apk add --no-cache dumb-init curl openssl
 
 # Create non-root user
 RUN addgroup -g 1001 -S nodejs && adduser -S nodejs -u 1001
