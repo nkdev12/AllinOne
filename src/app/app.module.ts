@@ -45,7 +45,7 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
           .valid("development", "staging", "production")
           .default("development"),
         APP_PORT: Joi.number().default(3000),
-        APP_URL: Joi.string().default("http://localhost:3000"),
+        APP_URL: Joi.string().required(),
         NODE_ENV: Joi.string()
           .valid("development", "production")
           .default("development"),
