@@ -77,6 +77,8 @@ model OtpToken {
   purpose   OtpPurpose
   codeHash  String
   expiresAt DateTime
+  // Failed verification attempts for this code; capped by OtpService.MAX_ATTEMPTS
+  attempts  Int        @default(0)
   createdAt DateTime   @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
