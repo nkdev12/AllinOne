@@ -1,8 +1,8 @@
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient } from "@prisma/client";
 
 /**
  * Database Seed Script
- * 
+ *
  * Creates sample data for development and testing.
  * Run with: npm run db:seed
  */
@@ -10,7 +10,7 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log('🌱 Seeding database...');
+  console.log("🌱 Seeding database...");
 
   // TODO: Implement sample data seeding
   // - Users
@@ -20,12 +20,12 @@ async function main() {
   // - Calendar events
   // - Relationships and links
 
-  console.log('✓ Database seeded');
+  console.log("✓ Database seeded");
 }
 
 main()
   .catch((e) => {
-    console.error('Seed failed:', e);
+    console.error("Seed failed:", e);
     process.exit(1);
   })
   .finally(async () => {

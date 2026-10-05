@@ -89,14 +89,15 @@
 - [x] Multi-device delta synchronization event triggering on event mutations (`CREATE`, `UPDATE`, `DELETE`)
 - [x] Unit tests for Calendar Module (`events.service.spec.ts`)
 
-### Zero-Knowledge Password Vault (Stage 7)
+### Password Vault (Stage 7)
 - [x] Vault Configuration & Key Parameters API (`VaultSettingsService`, `VaultSettingsController`) storing `keySalt`, `kdfIterations`, and `masterKeyHash`
 - [x] Master Password Unlock Verification API (`POST /vault/settings/unlock`)
-- [x] Encrypted Vault Items API (`VaultItemsService`, `VaultItemsController`) storing client-side AES-256-GCM ciphertext, IV, and AuthTag
-- [x] Categorization & Item Types (`LOGIN`, `SECURE_NOTE`, `CREDIT_CARD`, `IDENTITY`, `PASSWORD`)
-- [x] Multi-device delta synchronization event triggering on vault item mutations (`CREATE`, `UPDATE`, `DELETE`)
-- [x] Paginated item search & type/favorite filtering (`QueryVaultItemsDto`)
-- [x] Unit tests for Vault Module (`vault-items.service.spec.ts`)
+- [x] Master-password recovery (`recovery/request`, `recovery/verify`, `recovery/complete`): an OTP-verified flow re-encrypts the vault instead of discarding it. Requires `recoveryKey` to be stored in plaintext beside `wrappedMasterKey`, so the vault is **not** zero-knowledge — see `docs/SECURITY.md`.
+- [x] Vault entries travel exclusively through the sync oplog as `Change` rows with `entityType: "vault_item"`. The `/vault/items` REST API, its DTOs and the `VaultItem` model were removed: two write paths that never crossed meant entries stored through one were invisible to the other.
+- [x] Push payload validation (`src/sync/change-payload.validator.ts`) — entity-type whitelist and a required vault blob shape, enforced batch-wide before any write
+- [x] Per-user monotonic change cursors (`SyncCursor` + `src/sync/change-cursor.ts`) so `POST /sync/pull` replays in order across devices; `npm run sync:backfill:cursor` seeds rows written before cursors existed
+- [x] Multi-device delta synchronization event triggering on vault entry mutations (`CREATE`, `UPDATE`, `DELETE`)
+- [x] Unit tests for the vault and sync paths (`vault-settings.service.spec.ts`, `sync.service.spec.ts`, `sync.cursor.spec.ts`, `change-payload.validator.spec.ts`, `src/common/testing/idor.spec.ts`)
 
 ---
 
@@ -118,7 +119,7 @@ npm install
 
 # 5. Set up database
 npm run db:generate
-npm run db:migrate
+npm run db:push
 
 # 6. Start development server
 npm run start:dev
@@ -154,14 +155,12 @@ allinone-backend/
 │
 ├── prisma/
 │   ├── schema.prisma              # Database schema ✓
-│   ├── migrations/                # Database migrations
 │   └── seed.ts                    # Test data seeding
 │
 ├── infrastructure/
 │   ├── prometheus/                # Metrics config
 │   ├── grafana/                   # Dashboard config
-│   ├── caddy/                     # Reverse proxy
-│   └── postgres/                  # Database backup
+│   └── caddy/                     # Reverse proxy
 │
 ├── scripts/
 │   ├── backup-database.sh         # Automated backups
@@ -207,7 +206,7 @@ Service (Business Logic)
     ↓
 Repository/Prisma (Database)
     ↓
-PostgreSQL
+MongoDB
     ↓
 Response Mapping
     ↓
@@ -221,7 +220,7 @@ Caddy (Reverse Proxy with HTTPS)
 NestJS API (Multiple instances)
    ↓
 ┌─────────────────────────────┐
-│  PostgreSQL  Redis  MinIO   │
+│   MongoDB    Redis  MinIO   │
 └─────────────────────────────┘
    ↓
 Prometheus & Grafana (Monitoring)
@@ -269,7 +268,7 @@ Prometheus & Grafana (Monitoring)
 | **Backend** | Node.js 20 LTS | MIT |
 | **Framework** | NestJS | MIT |
 | **Language** | TypeScript 5.3 | Apache 2.0 |
-| **Database** | PostgreSQL 16 | PostgreSQL |
+| **Database** | MongoDB 7.0 | Server Side Public License |
 | **Cache** | Redis 7 | BSD |
 | **Job Queue** | BullMQ | MIT |
 | **ORM** | Prisma | Apache 2.0 |
@@ -289,7 +288,7 @@ Prometheus & Grafana (Monitoring)
 - Project structure
 - TypeScript configuration
 - NestJS setup
-- PostgreSQL & Prisma
+- MongoDB & Prisma
 - Logging & error handling
 - Health checks
 - OpenAPI documentation
@@ -382,13 +381,13 @@ Prometheus & Grafana (Monitoring)
 ### Development
 ```bash
 APP_ENV=development
-SQLITE_URL=postgresql://allinone:allinone@localhost:5432/allinone_dev
+DATABASE_URL=mongodb://localhost:27017/allinone_dev
 ```
 
 ### Production
 ```bash
 APP_ENV=production
-DATABASE_URL=postgresql://user:pass@postgres:5432/allinone_prod
+DATABASE_URL=mongodb://mongodb:27017/allinone_prod
 JWT_ACCESS_SECRET=<generate with openssl>
 JWT_REFRESH_SECRET=<generate with openssl>
 ENCRYPTION_KEY=<generate with openssl>
@@ -432,18 +431,19 @@ npm run lint && npm run typecheck && npm run test
 - OpenAPI/Swagger integration
 - Excellent for production systems
 
-### Why PostgreSQL?
-- ACID transactions
-- Full-text search support
-- JSON/JSONB columns
-- Window functions
-- Mature & battle-tested
+### Why MongoDB?
+- Document-shaped storage for notes, tasks and sync payloads
+- Self-hosted with the rest of the stack, no paid dependency
+- Multi-document `$transaction` via the `rs0` replica set both compose files start
+
+The consequences of not running SQL — no foreign keys, no autoincrement, bounded
+transaction size — are recorded in [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ### Why Prisma?
 - Type-safe queries
 - Auto-generated types
 - Visual database browser
-- Easy migrations
+- Schema changes via `prisma db push` — Migrate does not support the `mongodb` provider
 - Good relationship handling
 
 ---

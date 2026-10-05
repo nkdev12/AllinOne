@@ -1,24 +1,29 @@
 import {
   Injectable,
   UnauthorizedException,
-  ConflictException,
   BadRequestException,
   Logger,
   Optional,
 } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
 import * as argon2 from "argon2";
+import { ErrorCode } from "@/common/errors/error-code";
+import {
+  badRequest,
+  conflict,
+  unauthorized,
+} from "@/common/errors/http-errors";
 import { generateSecret, generateURI, verify } from "otplib";
 import * as qrcode from "qrcode";
 import * as crypto from "crypto";
 import * as jwt from "jsonwebtoken";
 import { OAuth2Client } from "google-auth-library";
-import { InjectQueue } from "@nestjs/bull";
-import { Queue } from "bull";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { UsersService } from "@/users/users.service";
 import { ConfigurationService } from "@/config/configuration.service";
 import { AuditLogService } from "@/common/audit/audit-log.service";
+import { MailService } from "@/common/mail/mail.service";
+import { OtpService } from "@/common/otp/otp.service";
 import { RegisterDto } from "./dto/register.dto";
 import { LoginDto } from "./dto/login.dto";
 import { RefreshTokenDto } from "./dto/refresh-token.dto";
@@ -31,7 +36,8 @@ import {
   MfaSecretResponseDto,
   MfaEnableResponseDto,
 } from "./dto/mfa.dto";
-import { AuthType, Platform, AuditAction } from "@prisma/client";
+import { AuthType, Platform, AuditAction, OtpPurpose } from "@prisma/client";
+import { Session } from "@prisma/client";
 
 @Injectable()
 export class AuthService {
@@ -40,74 +46,86 @@ export class AuthService {
   private appleJwksCache: { keys: any[]; fetchedAt: number } | null = null;
   private microsoftJwksCache: { keys: any[]; fetchedAt: number } | null = null;
   private readonly JWKS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+  private readonly RESET_OTP_TTL_MINUTES = 15;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly usersService: UsersService,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigurationService,
-    @InjectQueue("mail") private readonly mailQueue: Queue,
+    private readonly otpService: OtpService,
     @Optional() private readonly auditLogService?: AuditLogService,
+    @Optional() private readonly mailService?: MailService,
   ) {}
 
   async register(dto: RegisterDto): Promise<AuthResponseDto> {
     const existingUser = await this.usersService.findByEmail(dto.email);
     if (existingUser) {
-      throw new ConflictException("User with this email already exists");
+      throw conflict(
+        ErrorCode.EMAIL_ALREADY_REGISTERED,
+        "User with this email already exists",
+      );
     }
 
     const hashedPassword = await argon2.hash(dto.password);
 
-    const result = await this.prisma.$transaction(async (tx) => {
-      const user = await tx.user.create({
-        data: {
-          email: dto.email.toLowerCase(),
-          displayName: dto.displayName || null,
-          locale: dto.locale || "en-US",
-          timezone: dto.timezone || "UTC",
-          status: "ACTIVE",
-        },
-      });
+    let result;
+    try {
+      result = await this.prisma.$transaction(async (tx) => {
+        const user = await tx.user.create({
+          data: {
+            email: dto.email.toLowerCase(),
+            displayName: dto.displayName || null,
+            locale: dto.locale || "en-US",
+            timezone: dto.timezone || "UTC",
+            status: "ACTIVE",
+          },
+        });
 
-      await tx.authentication.create({
-        data: {
-          userId: user.id,
-          type: "EMAIL_PASSWORD",
-          identifier: dto.email.toLowerCase(),
-          passwordHash: hashedPassword,
-          emailVerified: false,
-        },
-      });
+        await tx.authentication.create({
+          data: {
+            userId: user.id,
+            type: "EMAIL_PASSWORD",
+            identifier: dto.email.toLowerCase(),
+            passwordHash: hashedPassword,
+            emailVerified: false,
+          },
+        });
 
-      const device = await tx.device.create({
-        data: {
-          userId: user.id,
-          name: "Primary Web/Client Device",
-          platform: Platform.WEB,
-          appVersion: "1.0.0",
-          publicKey: "",
-        },
-      });
+        const device = await tx.device.create({
+          data: {
+            userId: user.id,
+            name: "Primary Web/Client Device",
+            platform: Platform.WEB,
+            appVersion: "1.0.0",
+            publicKey: "",
+          },
+        });
 
-      return { user, device };
+        return { user, device };
+      });
+    } catch (error: any) {
+      if (error.code === "P2002") {
+        throw conflict(
+          ErrorCode.EMAIL_ALREADY_REGISTERED,
+          "User with this email already exists",
+        );
+      }
+      throw error;
+    }
+
+    const { tokens, session } = await this.issueSession({
+      userId: result.user.id,
+      email: result.user.email,
+      deviceId: result.device.id,
     });
 
-    const tokens = await this.generateTokens(result.user.id, result.user.email);
-    const session = await this.createSession(
-      result.user.id,
-      result.device.id,
-      tokens.accessToken,
-      tokens.refreshToken,
-    );
-
-    if (this.configService.emailVerifyEnabled) {
-      this.requestEmailVerification(result.user.email).catch((err) => {
-        this.logger.error(
-          `Failed to send initial verification email to ${result.user.email}`,
-          err,
-        );
-      });
-    }
+    this.requestEmailVerification(result.user.email).catch((err) => {
+      this.logger.error(
+        `Failed to generate initial verification OTP for ${result.user.email}`,
+        err,
+      );
+    });
 
     await this.auditLogService?.recordAuditLog({
       userId: result.user.id,
@@ -128,6 +146,7 @@ export class AuthService {
       },
       tokens,
       sessionId: session.id,
+      deviceId: result.device.id,
     };
   }
 
@@ -159,7 +178,10 @@ export class AuthService {
           reason: "Invalid identifier or password hash",
         },
       });
-      throw new UnauthorizedException("Invalid email or password");
+      throw unauthorized(
+        ErrorCode.INVALID_CREDENTIALS,
+        "Invalid email or password",
+      );
     }
 
     const user = authRecord.user;
@@ -181,7 +203,8 @@ export class AuthService {
           lockedUntil: user.lockedUntil,
         },
       });
-      throw new UnauthorizedException(
+      throw unauthorized(
+        ErrorCode.RATE_LIMITED,
         `Account is temporarily locked due to multiple failed login attempts. Please try again in ${remainingMinutes} minute(s).`,
       );
     }
@@ -226,7 +249,8 @@ export class AuthService {
           `[AuthService] Account ${user.id} locked for 15 minutes after ${attempts} failed attempts`,
         );
 
-        throw new UnauthorizedException(
+        throw unauthorized(
+          ErrorCode.RATE_LIMITED,
           "Account has been temporarily locked for 15 minutes due to multiple failed login attempts.",
         );
       }
@@ -243,11 +267,15 @@ export class AuthService {
         },
       });
 
-      throw new UnauthorizedException("Invalid email or password");
+      throw unauthorized(
+        ErrorCode.INVALID_CREDENTIALS,
+        "Invalid email or password",
+      );
     }
 
     if (user.status !== "ACTIVE" || user.deletedAt) {
-      throw new UnauthorizedException(
+      throw unauthorized(
+        ErrorCode.ACCOUNT_DISABLED,
         "Account is disabled or pending verification",
       );
     }
@@ -263,14 +291,30 @@ export class AuthService {
       });
     }
 
-    let device = await this.prisma.device.findFirst({
-      where: {
-        userId: user.id,
-        name: dto.deviceName || "Primary Client Device",
-        platform: dto.platform || Platform.WEB,
-        revokedAt: null,
-      },
-    });
+    // A desktop app keeps the device row it was handed at sign-up and asks for
+    // it by id, so signing out and back in does not pile up devices. An id that
+    // is unknown, revoked or owned by someone else is ignored here; the lookup
+    // below still finds (or creates) a device the caller can use.
+    let device = dto.deviceId
+      ? await this.prisma.device.findFirst({
+          where: {
+            id: dto.deviceId,
+            userId: user.id,
+            revokedAt: null,
+          },
+        })
+      : undefined;
+
+    if (!device) {
+      device = await this.prisma.device.findFirst({
+        where: {
+          userId: user.id,
+          name: dto.deviceName || "Primary Client Device",
+          platform: dto.platform || Platform.WEB,
+          revokedAt: null,
+        },
+      });
+    }
 
     if (!device) {
       device = await this.prisma.device.create({
@@ -295,8 +339,9 @@ export class AuthService {
           email: user.email,
           deviceId: device.id,
           purpose: "MFA_CHALLENGE",
+          type: "mfa_challenge",
         },
-        { secret: this.configService.jwtAccessSecret, expiresIn: "5m" },
+        { secret: this.configService.jwtMfaSecret, expiresIn: "5m" },
       );
 
       return {
@@ -305,15 +350,13 @@ export class AuthService {
       };
     }
 
-    const tokens = await this.generateTokens(user.id, user.email);
-    const session = await this.createSession(
-      user.id,
-      device.id,
-      tokens.accessToken,
-      tokens.refreshToken,
+    const { tokens, session } = await this.issueSession({
+      userId: user.id,
+      email: user.email,
+      deviceId: device.id,
       ipAddress,
       userAgent,
-    );
+    });
 
     await this.prisma.user.update({
       where: { id: user.id },
@@ -340,6 +383,7 @@ export class AuthService {
       },
       tokens,
       sessionId: session.id,
+      deviceId: device.id,
     };
   }
 
@@ -477,13 +521,15 @@ export class AuthService {
         format: "jwk",
       });
 
+      const appleClientId = this.configService.appleClientId;
+      if (!appleClientId) {
+        throw new UnauthorizedException("Apple OAuth is not configured on this server");
+      }
       const verifyOptions: jwt.VerifyOptions = {
         algorithms: ["RS256"],
         issuer: "https://appleid.apple.com",
+        audience: appleClientId,
       };
-      if (this.configService.appleClientId) {
-        verifyOptions.audience = this.configService.appleClientId;
-      }
 
       const payload = jwt.verify(idToken, publicKey, verifyOptions) as any;
       if (!payload || !payload.sub || !payload.email) {
@@ -521,12 +567,14 @@ export class AuthService {
         format: "jwk",
       });
 
+      const microsoftClientId = this.configService.microsoftClientId;
+      if (!microsoftClientId) {
+        throw new UnauthorizedException("Microsoft OAuth is not configured on this server");
+      }
       const verifyOptions: jwt.VerifyOptions = {
         algorithms: ["RS256"],
+        audience: microsoftClientId,
       };
-      if (this.configService.microsoftClientId) {
-        verifyOptions.audience = this.configService.microsoftClientId;
-      }
 
       const payload = jwt.verify(idToken, publicKey, verifyOptions) as any;
       const email = payload?.email || payload?.preferred_username;
@@ -556,10 +604,14 @@ export class AuthService {
   }
 
   private async verifyGoogleToken(idToken: string) {
+    const googleClientId = this.configService.googleClientId;
+    if (!googleClientId) {
+      throw new UnauthorizedException("Google OAuth is not configured on this server");
+    }
     try {
       const ticket = await this.googleClient.verifyIdToken({
         idToken,
-        audience: this.configService.googleClientId,
+        audience: googleClientId,
       });
       const payload = ticket.getPayload();
       if (!payload || !payload.email) {
@@ -572,6 +624,9 @@ export class AuthService {
         picture: payload.picture,
       };
     } catch (error) {
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
       this.logger.error("Failed to verify Google ID token", error);
       throw new UnauthorizedException("Invalid or expired Google ID token");
     }
@@ -589,9 +644,18 @@ export class AuthService {
   ): Promise<AuthResponseDto> {
     const normalizedEmail = email.toLowerCase();
 
-    let user = await this.usersService.findByEmail(normalizedEmail);
+    let user = await this.prisma.user.findFirst({
+      where: { email: normalizedEmail },
+    });
 
-    if (!user) {
+    if (user) {
+      if (user.deletedAt || user.status !== "ACTIVE") {
+        throw unauthorized(
+          ErrorCode.ACCOUNT_DISABLED,
+          "User account is inactive or deleted",
+        );
+      }
+    } else {
       user = await this.prisma.user.create({
         data: {
           email: normalizedEmail,
@@ -651,15 +715,13 @@ export class AuthService {
       });
     }
 
-    const tokens = await this.generateTokens(user.id, user.email);
-    const session = await this.createSession(
-      user.id,
-      device.id,
-      tokens.accessToken,
-      tokens.refreshToken,
+    const { tokens, session } = await this.issueSession({
+      userId: user.id,
+      email: user.email,
+      deviceId: device.id,
       ipAddress,
       userAgent,
-    );
+    });
 
     await this.prisma.user.update({
       where: { id: user.id },
@@ -686,15 +748,19 @@ export class AuthService {
       },
       tokens,
       sessionId: session.id,
+      deviceId: device.id,
     };
   }
 
   async refreshTokens(
     dto: RefreshTokenDto,
-  ): Promise<{ tokens: AuthTokenDataDto }> {
+  ): Promise<{ tokens: AuthTokenDataDto; deviceId: string }> {
     try {
       if (!dto.refreshToken) {
-        throw new UnauthorizedException("Invalid or expired refresh token");
+        throw unauthorized(
+          ErrorCode.TOKEN_INVALID,
+          "Invalid or expired refresh token",
+        );
       }
       const payload = this.jwtService.verify(dto.refreshToken, {
         secret: this.configService.jwtRefreshSecret,
@@ -711,7 +777,10 @@ export class AuthService {
         session.refreshExpiresAt < new Date() ||
         session.userId !== payload.sub
       ) {
-        throw new UnauthorizedException("Invalid or expired refresh token");
+        throw unauthorized(
+          ErrorCode.TOKEN_INVALID,
+          "Invalid or expired refresh token",
+        );
       }
 
       const tokens = await this.generateTokens(
@@ -720,8 +789,12 @@ export class AuthService {
         session.id,
       );
 
-      const accessExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
-      const refreshExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      const accessExpiresAt = new Date(
+        Date.now() + this.configService.jwtAccessExpiresInSeconds * 1000,
+      );
+      const refreshExpiresAt = new Date(
+        Date.now() + this.configService.jwtRefreshExpiresInSeconds * 1000,
+      );
 
       await this.prisma.session.update({
         where: { id: session.id },
@@ -734,10 +807,16 @@ export class AuthService {
         },
       });
 
-      return { tokens };
+      // The session row knows which device it was opened on, so a client that
+      // lost its saved device id gets it back here instead of having to sign in
+      // again before /sync/* will accept it.
+      return { tokens, deviceId: session.deviceId };
     } catch (error) {
       this.logger.error("Failed to refresh tokens", error);
-      throw new UnauthorizedException("Invalid or expired refresh token");
+      throw unauthorized(
+        ErrorCode.TOKEN_INVALID,
+        "Invalid or expired refresh token",
+      );
     }
   }
 
@@ -757,46 +836,112 @@ export class AuthService {
   async requestEmailVerification(email: string): Promise<{ message: string }> {
     const user = await this.usersService.findByEmail(email);
     if (user && !user.emailVerifiedAt) {
-      const token = this.jwtService.sign(
-        { sub: user.id, email: user.email, purpose: "EMAIL_VERIFICATION" },
-        { secret: this.configService.jwtAccessSecret, expiresIn: "24h" },
-      );
+      const otp = crypto.randomInt(100000, 1000000).toString();
+      const codeHash = crypto.createHash("sha256").update(otp).digest("hex");
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
 
-      await this.mailQueue.add("send-verification-email", {
-        email: user.email,
-        token,
+      await this.prisma.$runCommandRaw({
+        update: "email_verification_otps",
+        updates: [
+          {
+            q: { userId: user.id },
+            u: {
+              $set: { codeHash, expiresAt },
+              $setOnInsert: { userId: user.id, createdAt: new Date() },
+            },
+            upsert: true,
+          },
+        ],
       });
+
+      // Dev-only console fallback so OTP is visible even if SMTP is down.
+      if (!this.configService.isProduction) {
+        this.logger.debug(
+          `OTP CODE FOR ${user.email}: ${otp} (expires in 60 minutes)`,
+        );
+      }
+
+      // Send the OTP to the candidate's email address.
+      try {
+        const sent = await this.mailService?.sendOtpEmail(user.email, otp);
+        if (!sent) {
+          this.logger.warn(
+            `OTP email could not be delivered to ${user.email}. Check SMTP configuration.`,
+          );
+        }
+      } catch (err) {
+        this.logger.error(`Failed to send OTP email to ${user.email}`, err);
+      }
     }
 
     return {
-      message: "If the account exists, a verification link has been sent.",
+      message:
+        "If the account exists, a verification code has been sent to the email address.",
     };
   }
 
-  async confirmEmailVerification(token: string): Promise<{ message: string }> {
+  async confirmEmailVerification(
+    token: string | undefined,
+    email?: string,
+    otp?: string,
+  ): Promise<{ message: string }> {
     try {
-      const payload = this.jwtService.verify(token, {
-        secret: this.configService.jwtAccessSecret,
-      });
+      let userId: string;
 
-      if (payload.purpose !== "EMAIL_VERIFICATION") {
-        throw new BadRequestException("Invalid verification token type");
+      if (email && otp) {
+        // OTP verification from MongoDB
+        const user = await this.usersService.findByEmail(email);
+        if (!user) throw new BadRequestException("User not found");
+        const codeHash = crypto.createHash("sha256").update(otp).digest("hex");
+        const result = (await this.prisma.$runCommandRaw({
+          findAndModify: "email_verification_otps",
+          query: {
+            userId: user.id,
+            codeHash,
+            expiresAt: { $gt: new Date() },
+          },
+          remove: true,
+        })) as { value?: { _id: any } | null };
+        const storedOtp = result.value;
+        if (!storedOtp) {
+          throw badRequest(ErrorCode.OTP_INVALID, "Invalid or expired OTP");
+        }
+        userId = user.id;
+      } else if (token) {
+        // Token verification
+        const payload = this.jwtService.verify(token, {
+          secret: this.configService.jwtAccessSecret,
+        });
+
+        if (payload.purpose !== "EMAIL_VERIFICATION") {
+          throw badRequest(
+            ErrorCode.TOKEN_INVALID,
+            "Invalid verification token type",
+          );
+        }
+        userId = payload.sub;
+      } else {
+        throw badRequest(
+          ErrorCode.VALIDATION_ERROR,
+          "Must provide either a token or email and OTP",
+        );
       }
 
       await this.prisma.user.update({
-        where: { id: payload.sub },
+        where: { id: userId },
         data: { emailVerifiedAt: new Date() },
       });
 
       await this.prisma.authentication.updateMany({
-        where: { userId: payload.sub, type: "EMAIL_PASSWORD" },
+        where: { userId: userId, type: "EMAIL_PASSWORD" },
         data: { emailVerified: true },
       });
 
       return { message: "Email address successfully verified" };
     } catch (error) {
       this.logger.error("Failed to confirm email verification", error);
-      throw new BadRequestException(
+      throw badRequest(
+        ErrorCode.TOKEN_INVALID,
         "Invalid or expired email verification token",
       );
     }
@@ -805,60 +950,147 @@ export class AuthService {
   async forgotPassword(email: string): Promise<{ message: string }> {
     const user = await this.usersService.findByEmail(email);
     if (user) {
-      const token = this.jwtService.sign(
-        { sub: user.id, email: user.email, purpose: "PASSWORD_RESET" },
-        { secret: this.configService.jwtAccessSecret, expiresIn: "1h" },
+      const otp = await this.otpService.issue(
+        user.id,
+        OtpPurpose.PASSWORD_RESET,
+        this.RESET_OTP_TTL_MINUTES,
       );
 
-      await this.mailQueue.add("send-password-reset-email", {
-        email: user.email,
-        token,
-      });
+      // Dev-only console fallback so the code is visible even if SMTP is down.
+      if (!this.configService.isProduction) {
+        this.logger.debug(`PASSWORD RESET OTP FOR ${user.email}: ${otp}`);
+      }
+
+      try {
+        const sent = await this.mailService?.sendPasswordResetOtpEmail(
+          user.email,
+          otp,
+        );
+        if (!sent) {
+          this.logger.warn(
+            `Password reset OTP could not be delivered to ${user.email}. Check SMTP configuration.`,
+          );
+        }
+      } catch (err) {
+        this.logger.error(
+          `Failed to send password reset OTP email to ${user.email}`,
+          err,
+        );
+      }
     }
 
     return {
       message:
-        "If the account exists, password reset instructions have been sent.",
+        "If the account exists, password reset instructions have been sent to the email address.",
     };
   }
 
   async resetPassword(
-    token: string,
+    email: string,
+    otp: string,
     newPassword: string,
   ): Promise<{ message: string }> {
+    const user = await this.usersService.findByEmail(email);
+    if (!user) {
+      throw badRequest(
+        ErrorCode.OTP_INVALID,
+        "Invalid or expired verification code",
+      );
+    }
+
+    const verified = await this.otpService.consume(
+      user.id,
+      OtpPurpose.PASSWORD_RESET,
+      otp,
+    );
+    if (!verified) {
+      throw badRequest(
+        ErrorCode.OTP_INVALID,
+        "Invalid or expired verification code",
+      );
+    }
+
+    const hashedPassword = await argon2.hash(newPassword);
+
+    const auth = await this.prisma.authentication.updateMany({
+      where: { userId: user.id, type: "EMAIL_PASSWORD" },
+      data: { passwordHash: hashedPassword },
+    });
+    if (auth.count === 0) {
+      // An OAuth-only account can't have a password set through this flow.
+      throw new BadRequestException(
+        "This account does not use a password. Sign in with your provider instead.",
+      );
+    }
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { failedLoginAttempts: 0, lockedUntil: null },
+    });
+
+    // No token-version column, so the only way to make old access tokens
+    // unusable is to revoke the sessions that carry them.
+    await this.prisma.session.updateMany({
+      where: { userId: user.id, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+
+    await this.auditLogService?.recordAuditLog({
+      userId: user.id,
+      action: AuditAction.PASSWORD_CHANGED,
+    });
+
+    return {
+      message:
+        "Password successfully reset. Please log in with your new password.",
+    };
+  }
+
+  private getTotpEncryptionKey(): Buffer {
+    const rawKey =
+      this.configService.encryptionKey ||
+      "allinone-default-dev-totp-encryption-key-32b";
+    return crypto.createHash("sha256").update(rawKey).digest();
+  }
+
+  private encryptTotpSecret(secret: string): string {
+    const key = this.getTotpEncryptionKey();
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+    const encrypted = Buffer.concat([
+      cipher.update(secret, "utf8"),
+      cipher.final(),
+    ]);
+    const tag = cipher.getAuthTag();
+    return `v1:${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
+  }
+
+  private decryptTotpSecret(stored: string): string {
+    if (!stored.startsWith("v1:")) {
+      // Backward compatibility for existing plaintext / unencrypted secrets
+      return stored;
+    }
+    const parts = stored.split(":");
+    if (parts.length !== 4) {
+      return stored;
+    }
+    const [, ivHex, tagHex, dataHex] = parts;
     try {
-      const payload = this.jwtService.verify(token, {
-        secret: this.configService.jwtAccessSecret,
-      });
-
-      if (payload.purpose !== "PASSWORD_RESET") {
-        throw new BadRequestException("Invalid reset token type");
-      }
-
-      const hashedPassword = await argon2.hash(newPassword);
-
-      await this.prisma.authentication.updateMany({
-        where: { userId: payload.sub, type: "EMAIL_PASSWORD" },
-        data: { passwordHash: hashedPassword },
-      });
-
-      await this.prisma.session.updateMany({
-        where: { userId: payload.sub, revokedAt: null },
-        data: { revokedAt: new Date() },
-      });
-
-      await this.auditLogService?.recordAuditLog({
-        userId: payload.sub,
-        action: AuditAction.PASSWORD_CHANGED,
-      });
-
-      return {
-        message:
-          "Password successfully reset. Please log in with your new password.",
-      };
-    } catch (error) {
-      this.logger.error("Failed to reset password", error);
-      throw new BadRequestException("Invalid or expired password reset token");
+      const key = this.getTotpEncryptionKey();
+      const decipher = crypto.createDecipheriv(
+        "aes-256-gcm",
+        key,
+        Buffer.from(ivHex, "hex"),
+      );
+      decipher.setAuthTag(Buffer.from(tagHex, "hex"));
+      const decrypted = Buffer.concat([
+        decipher.update(Buffer.from(dataHex, "hex")),
+        decipher.final(),
+      ]);
+      return decrypted.toString("utf8");
+    } catch (err) {
+      this.logger.error("Failed to decrypt TOTP secret", err);
+      return stored;
     }
   }
 
@@ -880,11 +1112,11 @@ export class AuthService {
       where: { userId },
       create: {
         userId,
-        totpSecret: secret,
+        totpSecret: this.encryptTotpSecret(secret),
         totpEnabled: false,
       },
       update: {
-        totpSecret: secret,
+        totpSecret: this.encryptTotpSecret(secret),
         totpEnabled: false,
       },
     });
@@ -912,7 +1144,7 @@ export class AuthService {
 
     const verifyRes = verify({
       token: dto.totpCode,
-      secret: mfaSetting.totpSecret,
+      secret: this.decryptTotpSecret(mfaSetting.totpSecret),
     });
     const isValid = Boolean(
       verifyRes &&
@@ -1045,7 +1277,7 @@ export class AuthService {
     if (dto.totpCode) {
       const verifyRes = verify({
         token: dto.totpCode,
-        secret: mfaSetting.totpSecret,
+        secret: this.decryptTotpSecret(mfaSetting.totpSecret),
       });
       isSecondFactorValid = Boolean(
         verifyRes &&
@@ -1090,7 +1322,7 @@ export class AuthService {
     let payload: any;
     try {
       payload = this.jwtService.verify(dto.mfaToken, {
-        secret: this.configService.jwtAccessSecret,
+        secret: this.configService.jwtMfaSecret,
       });
 
       if (payload.purpose !== "MFA_CHALLENGE") {
@@ -1098,7 +1330,10 @@ export class AuthService {
       }
     } catch (error) {
       this.logger.error("Failed to verify MFA login token", error);
-      throw new UnauthorizedException("Invalid or expired MFA challenge token");
+      throw unauthorized(
+        ErrorCode.MFA_CHALLENGE_INVALID,
+        "Invalid or expired MFA challenge token",
+      );
     }
 
     const userId = payload.sub;
@@ -1107,6 +1342,26 @@ export class AuthService {
     const user = await this.usersService.getUserById(userId);
     if (!user || user.status !== "ACTIVE" || user.deletedAt) {
       throw new UnauthorizedException("User account is inactive or deleted");
+    }
+
+    if (user.lockedUntil && new Date() < new Date(user.lockedUntil)) {
+      const remainingMs = new Date(user.lockedUntil).getTime() - Date.now();
+      const remainingMinutes = Math.max(1, Math.ceil(remainingMs / 60000));
+      await this.auditLogService?.recordAuditLog({
+        userId: user.id,
+        action: AuditAction.LOGIN_FAILURE,
+        ipAddress,
+        userAgent,
+        metadata: {
+          email: user.email,
+          reason: "Account is temporarily locked",
+          remainingMinutes,
+        },
+      });
+      throw unauthorized(
+        ErrorCode.RATE_LIMITED,
+        `Account is temporarily locked due to multiple failed login attempts. Please try again in ${remainingMinutes} minute(s).`,
+      );
     }
 
     const mfaSetting = await this.prisma.mFASetting.findUnique({
@@ -1122,7 +1377,7 @@ export class AuthService {
     if (dto.totpCode) {
       const verifyRes = verify({
         token: dto.totpCode,
-        secret: mfaSetting.totpSecret,
+        secret: this.decryptTotpSecret(mfaSetting.totpSecret),
       });
       isCodeValid = Boolean(
         verifyRes &&
@@ -1133,20 +1388,81 @@ export class AuthService {
     }
 
     if (!isCodeValid) {
-      throw new UnauthorizedException(
+      const attempts = (user.failedLoginAttempts || 0) + 1;
+      const MAX_FAILED_ATTEMPTS = 5;
+      const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
+      const isNowLocked = attempts >= MAX_FAILED_ATTEMPTS;
+      const lockedUntil = isNowLocked
+        ? new Date(Date.now() + LOCKOUT_DURATION_MS)
+        : null;
+
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          failedLoginAttempts: attempts,
+          lockedUntil,
+        },
+      });
+
+      if (isNowLocked) {
+        await this.auditLogService?.recordAuditLog({
+          userId: user.id,
+          action: AuditAction.ACCOUNT_LOCKED,
+          ipAddress,
+          userAgent,
+          metadata: {
+            email: user.email,
+            attempts,
+            lockedUntil,
+            reason: "Maximum failed MFA attempts reached",
+          },
+        });
+
+        this.logger.warn(
+          `[AuthService] Account ${user.id} locked for 15 minutes after ${attempts} failed attempts`,
+        );
+
+        throw unauthorized(
+          ErrorCode.RATE_LIMITED,
+          "Account has been temporarily locked for 15 minutes due to multiple failed login attempts.",
+        );
+      }
+
+      await this.auditLogService?.recordAuditLog({
+        userId: user.id,
+        action: AuditAction.LOGIN_FAILURE,
+        ipAddress,
+        userAgent,
+        metadata: {
+          email: user.email,
+          failedLoginAttempts: attempts,
+          reason: "MFA verification failed",
+        },
+      });
+
+      throw unauthorized(
+        ErrorCode.MFA_CODE_INVALID,
         "Invalid TOTP verification code or recovery code",
       );
     }
 
-    const tokens = await this.generateTokens(user.id, user.email);
-    const session = await this.createSession(
-      user.id,
+    if (user.failedLoginAttempts > 0 || user.lockedUntil !== null) {
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+        },
+      });
+    }
+
+    const { tokens, session } = await this.issueSession({
+      userId: user.id,
+      email: user.email,
       deviceId,
-      tokens.accessToken,
-      tokens.refreshToken,
       ipAddress,
       userAgent,
-    );
+    });
 
     await this.prisma.user.update({
       where: { id: user.id },
@@ -1165,6 +1481,7 @@ export class AuthService {
       },
       tokens,
       sessionId: session.id,
+      deviceId,
     };
   }
 
@@ -1173,47 +1490,76 @@ export class AuthService {
     email: string,
     sessionId?: string,
   ): Promise<AuthTokenDataDto> {
-    const payload = { sub: userId, email, ...(sessionId ? { sessionId } : {}) };
+    const basePayload = { sub: userId, email, ...(sessionId ? { sessionId } : {}) };
 
-    const accessToken = this.jwtService.sign(payload, {
-      secret: this.configService.jwtAccessSecret,
-      expiresIn: "15m",
-    });
+    // The seconds form, not the `JWT_*_EXPIRATION` string, goes to `sign()`:
+    // then the `exp` stamped into the token and the `expiresIn` handed back for
+    // the client to count down are the same number, and the only interpretation
+    // of "15m" in the request path is the parser's. One setting, one decision,
+    // three places that read it.
+    const accessToken = this.jwtService.sign(
+      { ...basePayload, type: "access" },
+      {
+        secret: this.configService.jwtAccessSecret,
+        expiresIn: this.configService.jwtAccessExpiresInSeconds,
+      },
+    );
 
-    const refreshToken = this.jwtService.sign(payload, {
-      secret: this.configService.jwtRefreshSecret,
-      expiresIn: "7d",
-    });
+    const refreshToken = this.jwtService.sign(
+      { ...basePayload, type: "refresh" },
+      {
+        secret: this.configService.jwtRefreshSecret,
+        expiresIn: this.configService.jwtRefreshExpiresInSeconds,
+      },
+    );
 
     return {
       accessToken,
       refreshToken,
-      expiresIn: 900,
+      expiresIn: this.configService.jwtAccessExpiresInSeconds,
     };
   }
 
-  private async createSession(
-    userId: string,
-    deviceId: string,
-    accessToken: string,
-    refreshToken: string,
-    ipAddress?: string,
-    userAgent?: string,
-  ) {
-    const accessExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
-    const refreshExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  /**
+   * Open a session and mint the tokens that name it.
+   *
+   * The id is generated before the row exists so it can go inside the tokens:
+   * `JwtStrategy` compares that claim against the row on every request, which
+   * is the only thing that makes a logout land before the access token has
+   * expired on its own. Tokens minted without it are never checked.
+   */
+  private async issueSession(data: {
+    userId: string;
+    email: string;
+    deviceId: string;
+    ipAddress?: string;
+    userAgent?: string;
+  }): Promise<{ tokens: AuthTokenDataDto; session: Session }> {
+    const id = crypto.randomUUID();
+    const tokens = await this.generateTokens(data.userId, data.email, id);
+    // Derived from the same settings that minted the tokens above, so the row
+    // cannot claim a lifetime the credential it stores does not have.
+    const accessExpiresAt = new Date(
+      Date.now() + this.configService.jwtAccessExpiresInSeconds * 1000,
+    );
+    const refreshExpiresAt = new Date(
+      Date.now() + this.configService.jwtRefreshExpiresInSeconds * 1000,
+    );
 
-    return this.prisma.session.create({
+    const session = await this.prisma.session.create({
       data: {
-        userId,
-        deviceId,
-        accessToken,
-        refreshToken,
+        id,
+        userId: data.userId,
+        deviceId: data.deviceId,
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
         accessExpiresAt,
         refreshExpiresAt,
-        ipAddress,
-        userAgent,
+        ipAddress: data.ipAddress,
+        userAgent: data.userAgent,
       },
     });
+
+    return { tokens, session };
   }
 }

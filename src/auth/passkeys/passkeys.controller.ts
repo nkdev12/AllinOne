@@ -3,8 +3,6 @@ import {
   Post,
   Body,
   UseGuards,
-  Ip,
-  Headers,
   HttpCode,
   HttpStatus,
 } from "@nestjs/common";
@@ -17,12 +15,7 @@ import {
 import { JwtAuthGuard } from "@/auth/guards/jwt-auth.guard";
 import { GetUser } from "@/auth/decorators/get-user.decorator";
 import { PasskeysService } from "./passkeys.service";
-import {
-  LoginOptionsDto,
-  LoginVerifyDto,
-  RegisterOptionsDto,
-  RegisterVerifyDto,
-} from "./dto/passkeys.dto";
+import { RegisterOptionsDto, RegisterVerifyDto } from "./dto/passkeys.dto";
 
 @ApiTags("Passkeys")
 @Controller("auth/passkeys")
@@ -62,37 +55,5 @@ export class PasskeysController {
     @Body() dto: RegisterVerifyDto,
   ) {
     return this.passkeysService.verifyRegistration(userId, dto);
-  }
-
-  @Post("login-options")
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary: "Generate WebAuthn challenge for passwordless passkey login",
-  })
-  @ApiResponse({ status: 200, description: "Login options generated" })
-  async generateLoginOptions(@Body() dto: LoginOptionsDto) {
-    return this.passkeysService.generateLoginOptions(dto);
-  }
-
-  @Post("login-verify")
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary:
-      "Verify passkey signature assertion, authenticate user, and issue tokens",
-  })
-  @ApiResponse({
-    status: 200,
-    description: "Passkey authentication successful",
-  })
-  @ApiResponse({
-    status: 401,
-    description: "Invalid passkey or locked account",
-  })
-  async verifyLogin(
-    @Body() dto: LoginVerifyDto,
-    @Ip() ipAddress: string,
-    @Headers("user-agent") userAgent: string,
-  ) {
-    return this.passkeysService.verifyLogin(dto, ipAddress, userAgent);
   }
 }

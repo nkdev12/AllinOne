@@ -83,4 +83,29 @@ export class RedisIoAdapter extends IoAdapter {
     }
     return server;
   }
+
+  /**
+   * Release the two Pub/Sub handles on shutdown.
+   *
+   * `connectToRedis()` opens them and Socket.IO's `close()` on the server does
+   * not quit them, so an ioredis client with a live connection keeps the event
+   * loop owned — the exact shape of problem `enableShutdownHooks()` in
+   * `src/main.ts` exists to avoid. Nest calls this from the socket module's own
+   * teardown, after every namespace has been closed.
+   */
+  async dispose(): Promise<void> {
+    for (const client of [this.pubClient, this.subClient]) {
+      if (!client) continue;
+      try {
+        await client.quit();
+      } catch (_) {
+        try {
+          client.disconnect();
+        } catch (_) {}
+      }
+    }
+    this.pubClient = undefined;
+    this.subClient = undefined;
+    this.adapterConstructor = undefined;
+  }
 }

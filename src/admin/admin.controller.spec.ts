@@ -1,9 +1,11 @@
+import { ForbiddenException } from "@nestjs/common";
 import { Test, TestingModule } from "@nestjs/testing";
 import { AdminController } from "./admin.controller";
 import { AdminService } from "./admin.service";
 import { UserStatus, AuditAction } from "@prisma/client";
 import { JwtAuthGuard } from "@/auth/guards/jwt-auth.guard";
 import { AdminGuard } from "./guards/admin.guard";
+import { ConfigurationService } from "@/config/configuration.service";
 
 describe("AdminController", () => {
   let controller: AdminController;
@@ -45,6 +47,10 @@ describe("AdminController", () => {
       controllers: [AdminController],
       providers: [{ provide: AdminService, useValue: adminService }],
     })
+      // The delegation tests below stub both guards on purpose: they assert
+      // what the controller hands to the service, not who gets to call it.
+      // Authorization itself is covered by the "admin authorization wiring"
+      // block, which compiles the same controller with the real AdminGuard.
       .overrideGuard(JwtAuthGuard)
       .useValue({ canActivate: () => true })
       .overrideGuard(AdminGuard)
@@ -139,6 +145,91 @@ describe("AdminController", () => {
         "Customer verified",
       );
       expect(res.success).toBe(true);
+    });
+  });
+
+  describe("admin authorization wiring (P0-10)", () => {
+    async function realGuard(env: {
+      adminEmails?: string[];
+      adminUserIds?: string[];
+      adminSecret?: string;
+    }): Promise<AdminGuard> {
+      const configStub = {
+        adminEmails: env.adminEmails ?? [],
+        adminUserIds: env.adminUserIds ?? [],
+        adminSecret: env.adminSecret,
+      } as unknown as ConfigurationService;
+
+      const module: TestingModule = await Test.createTestingModule({
+        controllers: [AdminController],
+        providers: [
+          { provide: AdminService, useValue: adminService },
+          { provide: ConfigurationService, useValue: configStub },
+          AdminGuard,
+        ],
+      })
+        .overrideGuard(JwtAuthGuard)
+        .useValue({ canActivate: () => true })
+        .compile();
+
+      return module.get(AdminGuard);
+    }
+
+    function httpContext(user: unknown, headers: Record<string, unknown> = {}) {
+      return {
+        switchToHttp: () => ({ getRequest: () => ({ user, headers }) }),
+      } as any;
+    }
+
+    it("stands between every /admin route and the service, behind JWT", () => {
+      // Nest records @UseGuards() under this key; AdminController is the only
+      // thing in front of the routes, so the guard list is the access control.
+      const guards = Reflect.getMetadata("__guards__", AdminController) ?? [];
+      expect(guards).toEqual(
+        expect.arrayContaining([JwtAuthGuard, AdminGuard]),
+      );
+    });
+
+    it("denies an authenticated admin@example.com while no ADMIN_* is configured", async () => {
+      const guard = await realGuard({});
+      expect(() =>
+        guard.canActivate(
+          httpContext({ id: "user-1", email: "admin@example.com" }),
+        ),
+      ).toThrow(ForbiddenException);
+    });
+
+    it("admits the owner of an explicitly configured admin address", async () => {
+      const guard = await realGuard({ adminEmails: ["ops@allinone.app"] });
+      expect(
+        guard.canActivate(
+          httpContext({ id: "user-1", email: "ops@allinone.app" }),
+        ),
+      ).toBe(true);
+    });
+
+    it("admits an authenticated caller that presents the configured x-admin-secret", async () => {
+      const secret = "operator-break-glass-secret-0123456789abcdef";
+      const guard = await realGuard({ adminSecret: secret });
+      expect(
+        guard.canActivate(
+          httpContext({ id: "user-1" }, { "x-admin-secret": secret }),
+        ),
+      ).toBe(true);
+    });
+
+    it("denies a caller whose header does not match the configured secret", async () => {
+      const guard = await realGuard({
+        adminSecret: "operator-break-glass-secret-0123456789abcdef",
+      });
+      expect(() =>
+        guard.canActivate(
+          httpContext(
+            { id: "user-1", email: "ops@allinone.app" },
+            { "x-admin-secret": "not-the-operator-secret-at-all" },
+          ),
+        ),
+      ).toThrow(ForbiddenException);
     });
   });
 });

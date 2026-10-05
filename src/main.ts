@@ -1,10 +1,11 @@
 import { NestFactory } from "@nestjs/core";
 import { SwaggerModule, DocumentBuilder } from "@nestjs/swagger";
-import { ValidationPipe, Logger } from "@nestjs/common";
+import { Logger } from "@nestjs/common";
 import helmet from "helmet";
 import { AppModule } from "./app/app.module";
 import { ConfigService } from "@nestjs/config";
-import { RedisIoAdapter } from "./sync/adapters/redis-io.adapter";
+import { createValidationPipe } from "./common/errors/validation.pipe";
+import { SyncIoAdapter } from "./sync/adapters/sync-io.adapter";
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -13,6 +14,9 @@ async function bootstrap() {
 
   const configService = app.get(ConfigService);
   const logger = new Logger("Bootstrap");
+
+  const expressApp = app.getHttpAdapter().getInstance();
+  expressApp.set("trust proxy", 1);
 
   // ========================================================================
   // Security (Helmet & CORS)
@@ -23,7 +27,7 @@ async function bootstrap() {
         directives: {
           defaultSrc: ["'self'"],
           styleSrc: ["'self'", "'unsafe-inline'"],
-          scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+          scriptSrc: ["'self'", "'unsafe-inline'"],
           imgSrc: ["'self'", "data:", "https:"],
           connectSrc: ["'self'", "ws:", "wss:"],
         },
@@ -49,24 +53,7 @@ async function bootstrap() {
   // ========================================================================
   // Global middleware and pipes
   // ========================================================================
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      forbidNonWhitelisted: true,
-      transform: true,
-      transformOptions: {
-        enableImplicitConversion: true,
-      },
-    }),
-  );
-
-  // ========================================================================
-  // WebSocket Adapter (Redis Pub/Sub Clustering)
-  // ========================================================================
-  const redisUrl = configService.get<string>("REDIS_URL");
-  const redisIoAdapter = new RedisIoAdapter(app, redisUrl);
-  await redisIoAdapter.connectToRedis();
-  app.useWebSocketAdapter(redisIoAdapter);
+  app.useGlobalPipes(createValidationPipe());
 
   // ========================================================================
   // OpenAPI/Swagger Documentation
@@ -102,8 +89,25 @@ async function bootstrap() {
   });
 
   // ========================================================================
+  // WebSocket adapter (CORS + clustering) for the /sync namespace
+  // ========================================================================
+  // Must be installed before listen(): Nest binds every gateway to the adapter
+  // that is configured at that moment, and the namespace's origin policy is
+  // decided when its Socket.IO server is built — which is why it is not a
+  // `@WebSocketGateway` option (decorator metadata cannot see injected config).
+  // One adapter does both jobs: Redis rooms when `REDIS_URL` is configured and
+  // reachable, in-memory otherwise.
+  app.useWebSocketAdapter(await SyncIoAdapter.fromConfig(app, configService));
+
+  // ========================================================================
   // Start server
   // ========================================================================
+  // Container stop sends SIGTERM; without this the Nest lifecycle never runs,
+  // so PrismaService.$disconnect() and RedisThrottlerStorage's teardown (both
+  // OnModuleDestroy) would be skipped and connections dropped mid-flight.
+  // Must be registered before listen() so the hooks exist once requests flow.
+  app.enableShutdownHooks();
+
   const port = configService.get<number>("APP_PORT", 3000);
   const environment = configService.get<string>("APP_ENV", "development");
 
@@ -112,7 +116,8 @@ async function bootstrap() {
   logger.log(`🚀 Allinone Backend started on http://localhost:${port}`);
   logger.log(`📚 API Documentation: http://localhost:${port}/api`);
   logger.log(`Environment: ${environment}`);
-  logger.log(`Database: ${configService.get("DATABASE_URL")?.split("@")[1]}`);
+  const dbUrl = configService.get<string>("DATABASE_URL", "");
+  logger.log(`Database: ${dbUrl?.split("@").pop() || "not configured"}`);
 }
 
 bootstrap().catch((error) => {

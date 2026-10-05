@@ -48,6 +48,13 @@ export class AuthResponseDto {
   sessionId?: string;
 
   @ApiPropertyOptional({
+    example: "123e4567-e89b-12d3-a456-426614174000",
+    description:
+      "Device row the session belongs to. /sync/* only accepts this id.",
+  })
+  deviceId?: string;
+
+  @ApiPropertyOptional({
     example: true,
     description: "Indicates if 2FA authentication code is required",
   })

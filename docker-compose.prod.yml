@@ -25,7 +25,7 @@ services:
       DOMAIN=${DOMAIN:-app.example.com}
 
   # ============================================================================
-android   # MongoDB Database (Production)
+  # MongoDB Database (Production)
   # ============================================================================
   mongodb:
     image: mongo:7.0
@@ -106,6 +106,12 @@ android   # MongoDB Database (Production)
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      # `ConfigurationService` refuses to construct without this one (its
+      # `validateConfiguration()` lists it, and the Joi schema demands
+      # `.min(32)`), and the vault crypto reads it through `getOrThrow`. Without
+      # it the API exits during module init, so the container never takes
+      # traffic at all.
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       OBJECT_STORAGE_ENDPOINT: http://minio:9000
       OBJECT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER}
       OBJECT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
@@ -153,6 +159,15 @@ android   # MongoDB Database (Production)
       APP_ENV: production
       DATABASE_URL: mongodb://mongodb:27017/${DB_NAME:-allinone_prod}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      # Required, not optional. `WorkerModule` runs its own Joi `validationSchema`
+      # (`src/worker.module.ts:28-36`) over these three and `ConfigurationService`
+      # re-checks `ENCRYPTION_KEY` in its constructor, so an unset one aborts the
+      # process at boot — with `restart: unless-stopped` that is a crash-looping
+      # replica rather than a degraded one. The worker mints no tokens and opens no
+      # sessions, so it needs the values only to satisfy that shared validation.
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       OBJECT_STORAGE_ENDPOINT: http://minio:9000
       OBJECT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER}
       OBJECT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}

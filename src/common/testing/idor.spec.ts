@@ -3,10 +3,8 @@ import { NotFoundException } from "@nestjs/common";
 import { NotesService } from "@/notes/services/notes.service";
 import { TasksService } from "@/tasks/services/tasks.service";
 import { EventsService } from "@/calendar/services/events.service";
-import { VaultItemsService } from "@/vault/services/vault-items.service";
 import { DevicesService } from "@/devices/devices.service";
 import { SyncService } from "@/sync/sync.service";
-import { ConflictResolverService } from "@/sync/conflict-resolver.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
 
 describe("IDOR Security Tests (Cross-Tenant Access Prevention)", () => {
@@ -17,7 +15,6 @@ describe("IDOR Security Tests (Cross-Tenant Access Prevention)", () => {
   let notesService: NotesService;
   let tasksService: TasksService;
   let eventsService: EventsService;
-  let vaultItemsService: VaultItemsService;
   let devicesService: DevicesService;
   let syncService: SyncService;
 
@@ -56,25 +53,35 @@ describe("IDOR Security Tests (Cross-Tenant Access Prevention)", () => {
           });
         }),
       },
-      vaultItem: {
-        findFirst: jest.fn().mockImplementation(({ where }) => {
-          if (where.userId === userB) return Promise.resolve(null);
-          return Promise.resolve({
-            id: "vault-1",
-            userId: userA,
-            name: "Secret Vault Item A",
-          });
-        }),
-      },
       device: {
         findFirst: jest.fn().mockImplementation(({ where }) => {
-          if (where.userId === userB) return Promise.resolve(null);
+          if (where.userId === userB) {
+            // User B's own devices are reachable; user A's device stays invisible.
+            return Promise.resolve(
+              where.id === "device-1"
+                ? null
+                : { id: where.id, userId: userB, name: "Browser B" },
+            );
+          }
           return Promise.resolve({
             id: "device-1",
             userId: userA,
             name: "Phone A",
           });
         }),
+      },
+      change: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
+        create: jest.fn(),
+      },
+      syncCursor: {
+        upsert: jest.fn().mockResolvedValue({ seq: BigInt(1) }),
+        findUnique: jest.fn().mockResolvedValue({ seq: BigInt(1) }),
+      },
+      deviceSyncState: {
+        upsert: jest.fn().mockResolvedValue({ lastPushedSequence: 1 }),
+        findUnique: jest.fn().mockResolvedValue(null),
       },
       folder: {
         findFirst: jest.fn().mockImplementation(({ where }) => {
@@ -93,10 +100,8 @@ describe("IDOR Security Tests (Cross-Tenant Access Prevention)", () => {
         NotesService,
         TasksService,
         EventsService,
-        VaultItemsService,
         DevicesService,
         SyncService,
-        ConflictResolverService,
         { provide: PrismaService, useValue: prismaService },
       ],
     }).compile();
@@ -104,7 +109,6 @@ describe("IDOR Security Tests (Cross-Tenant Access Prevention)", () => {
     notesService = module.get<NotesService>(NotesService);
     tasksService = module.get<TasksService>(TasksService);
     eventsService = module.get<EventsService>(EventsService);
-    vaultItemsService = module.get<VaultItemsService>(VaultItemsService);
     devicesService = module.get<DevicesService>(DevicesService);
     syncService = module.get<SyncService>(SyncService);
   });
@@ -175,20 +179,41 @@ describe("IDOR Security Tests (Cross-Tenant Access Prevention)", () => {
     });
   });
 
-  describe("Vault Module IDOR Prevention", () => {
-    it("should prevent User B from reading User A's vault item", async () => {
-      await expect(
-        vaultItemsService.getItemById(userB, "vault-1"),
-      ).rejects.toThrow(NotFoundException);
-      expect(prismaService.vaultItem.findFirst).toHaveBeenCalledWith({
-        where: { id: "vault-1", userId: userB, deletedAt: null },
-      });
+  describe("Vault entries IDOR prevention (oplog path)", () => {
+    it("never replays another user's vault blobs", async () => {
+      // Vault entries exist only as Change rows now, so the per-user filter on
+      // the sync log is what keeps user A's ciphertext away from user B.
+      await syncService.pullChanges(userB, { deviceId: "device-B" });
+
+      expect(prismaService.change.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ userId: userB }),
+        }),
+      );
     });
 
-    it("should prevent User B from deleting User A's vault item", async () => {
+    it("refuses a push that tries to write into another user's log", async () => {
       await expect(
-        vaultItemsService.deleteItem(userB, "vault-1"),
+        syncService.pushChanges(userB, {
+          deviceId: "device-1",
+          changes: [
+            {
+              entityType: "vault_item",
+              entityId: "vault-1",
+              operation: "UPDATE",
+              version: 2,
+              payload: {
+                type: "LOGIN",
+                encryptedData: "x",
+                iv: "y",
+                authTag: "z",
+                isEncrypted: true,
+              },
+            },
+          ],
+        }),
       ).rejects.toThrow(NotFoundException);
+      expect(prismaService.change.create).not.toHaveBeenCalled();
     });
   });
 

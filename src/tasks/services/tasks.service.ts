@@ -2,16 +2,60 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  Optional,
 } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { SyncNotificationService } from "@/sync/sync-notification.service";
 import { CreateTaskDto } from "../dto/create-task.dto";
 import { UpdateTaskDto } from "../dto/update-task.dto";
 import { QueryTasksDto } from "../dto/query-tasks.dto";
+import { appendChange } from "@/sync/change-cursor";
 import { ChangeOperation, TaskStatus } from "@prisma/client";
+
+export function taskChangePayload(task: any): Record<string, any> {
+  return {
+    title: task.title ?? "",
+    description: task.description ?? null,
+    priority: task.priority ?? "P4_LOW",
+    status: task.status ?? "TODO",
+    dueDate:
+      task.dueDate instanceof Date
+        ? task.dueDate.toISOString()
+        : (task.dueDate ?? null),
+    dueTime: task.dueTime ?? null,
+    recurrenceRule: task.recurrenceRule ?? null,
+    completedAt:
+      task.completedAt instanceof Date
+        ? task.completedAt.toISOString()
+        : (task.completedAt ?? null),
+    sectionId: task.sectionId ?? null,
+    parentId: task.parentId ?? null,
+    projectId: task.projectId ?? null,
+    sortOrder: task.sortOrder ?? 0,
+    timeSpentSeconds: task.timeSpentSeconds ?? 0,
+    createdAt:
+      task.createdAt instanceof Date
+        ? task.createdAt.toISOString()
+        : (task.createdAt ?? null),
+    version: task.version ?? 1,
+  };
+}
 
 @Injectable()
 export class TasksService {
-  constructor(private readonly prisma: PrismaService) {}
+  /**
+   * `syncNotifications` wakes this account's other devices. Every write below
+   * appends its `Change` row inside its own `$transaction` and notifies only
+   * after that transaction resolves — a wake-up sent from inside it would point
+   * devices at a row a rollback can still take back — and the notifier is
+   * `@Optional()` and non-throwing, so a missing gateway costs latency and not
+   * the request. No REST write here carries a device id, so none is passed as
+   * the origin; `/sync/push` is the path that does.
+   */
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly syncNotifications?: SyncNotificationService,
+  ) {}
 
   async createTask(userId: string, dto: CreateTaskDto) {
     if (dto.projectId) {
@@ -36,7 +80,9 @@ export class TasksService {
       }
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    let highestCursor: bigint | undefined;
+
+    const created = await this.prisma.$transaction(async (tx) => {
       const task = await tx.task.create({
         data: {
           userId,
@@ -68,25 +114,22 @@ export class TasksService {
         },
       });
 
-      await tx.change.create({
-        data: {
-          userId,
-          entityType: "task",
-          entityId: task.id,
-          operation: ChangeOperation.CREATE,
-          version: task.version,
-          payload: {
-            title: task.title,
-            projectId: task.projectId,
-            priority: task.priority,
-            status: task.status,
-            dueDate: task.dueDate,
-          },
-        },
+      const logged = await appendChange(tx, {
+        userId,
+        entityType: "task",
+        entityId: task.id,
+        operation: ChangeOperation.CREATE,
+        version: task.version,
+        payload: taskChangePayload(task),
       });
+      highestCursor = logged.cursor;
 
       return this.formatTaskResponse(task);
     });
+
+    this.syncNotifications?.notifyMutation({ userId, highestCursor });
+
+    return created;
   }
 
   async getTasks(userId: string, query: QueryTasksDto) {
@@ -213,7 +256,9 @@ export class TasksService {
       }
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    let highestCursor: bigint | undefined;
+
+    const updated = await this.prisma.$transaction(async (tx) => {
       if (dto.tagIds !== undefined) {
         await tx.taskLabel.deleteMany({ where: { taskId: existing.id } });
         if (dto.tagIds.length > 0) {
@@ -265,24 +310,22 @@ export class TasksService {
         },
       });
 
-      await tx.change.create({
-        data: {
-          userId,
-          entityType: "task",
-          entityId: updatedTask.id,
-          operation: ChangeOperation.UPDATE,
-          version: updatedTask.version,
-          payload: {
-            title: updatedTask.title,
-            priority: updatedTask.priority,
-            status: updatedTask.status,
-            isCompleted: updatedTask.status === TaskStatus.COMPLETED,
-          },
-        },
+      const logged = await appendChange(tx, {
+        userId,
+        entityType: "task",
+        entityId: updatedTask.id,
+        operation: ChangeOperation.UPDATE,
+        version: updatedTask.version,
+        payload: taskChangePayload(updatedTask),
       });
+      highestCursor = logged.cursor;
 
       return this.formatTaskResponse(updatedTask);
     });
+
+    this.syncNotifications?.notifyMutation({ userId, highestCursor });
+
+    return updated;
   }
 
   async completeTask(userId: string, taskId: string) {
@@ -295,7 +338,9 @@ export class TasksService {
       throw new NotFoundException(`Task with ID '${taskId}' not found.`);
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    let highestCursor: bigint | undefined;
+
+    const result = await this.prisma.$transaction(async (tx) => {
       const completedTask = await tx.task.update({
         where: { id: taskId },
         data: {
@@ -310,20 +355,15 @@ export class TasksService {
         },
       });
 
-      await tx.change.create({
-        data: {
-          userId,
-          entityType: "task",
-          entityId: completedTask.id,
-          operation: ChangeOperation.UPDATE,
-          version: completedTask.version,
-          payload: {
-            id: completedTask.id,
-            isCompleted: true,
-            status: TaskStatus.COMPLETED,
-          },
-        },
+      const completionLogged = await appendChange(tx, {
+        userId,
+        entityType: "task",
+        entityId: completedTask.id,
+        operation: ChangeOperation.UPDATE,
+        version: completedTask.version,
+        payload: taskChangePayload(completedTask),
       });
+      highestCursor = completionLogged.cursor;
 
       let nextRecurringTask = null;
       if (task.recurrenceRule) {
@@ -362,20 +402,18 @@ export class TasksService {
           },
         });
 
-        await tx.change.create({
-          data: {
-            userId,
-            entityType: "task",
-            entityId: nextRecurringTask.id,
-            operation: ChangeOperation.CREATE,
-            version: nextRecurringTask.version,
-            payload: {
-              title: nextRecurringTask.title,
-              dueDate: nextRecurringTask.dueDate,
-              isRecurringInstance: true,
-            },
-          },
+        const instanceLogged = await appendChange(tx, {
+          userId,
+          entityType: "task",
+          entityId: nextRecurringTask.id,
+          operation: ChangeOperation.CREATE,
+          version: nextRecurringTask.version,
+          payload: taskChangePayload(nextRecurringTask),
         });
+        // The higher of the two, which is the one a device has not read: the
+        // completion above took the number before it, and both rows are inside
+        // this one transaction, so one wake-up covers both.
+        highestCursor = instanceLogged.cursor;
       }
 
       return {
@@ -385,6 +423,10 @@ export class TasksService {
           : null,
       };
     });
+
+    this.syncNotifications?.notifyMutation({ userId, highestCursor });
+
+    return result;
   }
 
   async deleteTask(userId: string, taskId: string) {
@@ -396,25 +438,33 @@ export class TasksService {
       throw new NotFoundException(`Task with ID '${taskId}' not found.`);
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    let highestCursor: bigint | undefined;
+
+    const result = await this.prisma.$transaction(async (tx) => {
       await tx.task.update({
         where: { id: taskId },
         data: { deletedAt: new Date(), version: { increment: 1 } },
       });
 
-      await tx.change.create({
-        data: {
-          userId,
-          entityType: "task",
-          entityId: taskId,
-          operation: ChangeOperation.DELETE,
-          version: existing.version + 1,
-          payload: { id: taskId },
-        },
+      const logged = await appendChange(tx, {
+        userId,
+        entityType: "task",
+        entityId: taskId,
+        operation: ChangeOperation.DELETE,
+        version: existing.version + 1,
+        payload: { version: existing.version + 1 },
       });
+      highestCursor = logged.cursor;
 
       return { success: true, message: "Task deleted successfully." };
     });
+
+    // A tombstone the other devices must hear about as carefully as an edit: a
+    // delete nobody woke them for is a task that comes back on the device that
+    // never pulled.
+    this.syncNotifications?.notifyMutation({ userId, highestCursor });
+
+    return result;
   }
 
   private calculateNextRecurrenceDate(baseDate: Date, rrule: string): Date {

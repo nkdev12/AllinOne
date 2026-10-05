@@ -9,6 +9,7 @@ import { JwtAuthGuard } from "@/auth/guards/jwt-auth.guard";
 import { TracingModule } from "@/common/tracing/tracing.module";
 import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
 import { ErrorHandlingModule } from "@/common/error-handling/error-handling.module";
+import { ConfigurationService } from "@/config/configuration.service";
 import { APP_INTERCEPTOR } from "@nestjs/core";
 import { UnauthorizedException } from "@nestjs/common";
 
@@ -83,6 +84,10 @@ describe("Authentication & User Lifecycle (E2E)", () => {
       providers: [
         { provide: AuthService, useValue: authServiceMock },
         { provide: UsersService, useValue: usersServiceMock },
+        {
+          provide: ConfigurationService,
+          useValue: { jwtRefreshExpiresInSeconds: 604800 },
+        },
         { provide: APP_INTERCEPTOR, useClass: TracingInterceptor },
       ],
     })

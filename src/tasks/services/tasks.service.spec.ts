@@ -47,8 +47,14 @@ describe("TasksService", () => {
   };
 
   beforeEach(async () => {
+    // `appendChange` numbers every log row from this counter, so the mock has to
+    // keep its place between calls the way the real document does.
+    let seq = BigInt(0);
     prismaService = {
       $transaction: jest.fn((cb) => cb(prismaService)),
+      syncCursor: {
+        upsert: jest.fn(async () => ({ seq: ++seq })),
+      },
       project: {
         findFirst: jest.fn().mockResolvedValue(mockProject),
       },
@@ -158,6 +164,19 @@ describe("TasksService", () => {
       expect(result.nextRecurringTask).toBeDefined();
       expect(prismaService.task.create).toHaveBeenCalled();
       expect(prismaService.change.create).toHaveBeenCalledTimes(2); // One for completion, one for new instance
+    });
+
+    it("numbers the completion and the instance it spawns separately", async () => {
+      // Two rows out of one request is where a shared cursor could go wrong:
+      // both would land on the same number, the pull filter is `cursor >`, and
+      // the recurring task this call just created would never appear on any
+      // other device — with nothing on either side able to tell it was skipped.
+      await service.completeTask(userId, taskId);
+
+      const cursors = prismaService.change.create.mock.calls.map(
+        ([arg]: any[]) => arg.data.cursor,
+      );
+      expect(cursors).toEqual([BigInt(1), BigInt(2)]);
     });
   });
 

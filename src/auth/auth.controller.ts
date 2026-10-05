@@ -7,8 +7,9 @@ import {
   Res,
   HttpCode,
   HttpStatus,
-  UnauthorizedException,
 } from "@nestjs/common";
+import { ErrorCode } from "@/common/errors/error-code";
+import { unauthorized } from "@/common/errors/http-errors";
 import {
   ApiTags,
   ApiOperation,
@@ -18,6 +19,7 @@ import {
 import { Throttle } from "@nestjs/throttler";
 import { Request, Response } from "express";
 import { AuthService } from "./auth.service";
+import { ConfigurationService } from "@/config/configuration.service";
 import { RegisterDto } from "./dto/register.dto";
 import { LoginDto } from "./dto/login.dto";
 import { RefreshTokenDto } from "./dto/refresh-token.dto";
@@ -38,7 +40,10 @@ import { GetUser } from "./decorators/get-user.decorator";
 @ApiTags("Auth")
 @Controller("auth")
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly configService: ConfigurationService,
+  ) {}
 
   private extractCookie(
     cookieHeader: string | undefined,
@@ -56,7 +61,11 @@ export class AuthController {
       secure: process.env.APP_ENV === "production",
       sameSite: "strict",
       path: "/auth/refresh",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
+      // The cookie and the token it carries expire together. A literal week
+      // here kept a browser holding a refresh token the server had already
+      // stopped accepting, which reads to a client as a session that ends
+      // silently rather than one that was configured to last seven days.
+      maxAge: this.configService.jwtRefreshExpiresInSeconds * 1000,
     });
   }
 
@@ -184,7 +193,7 @@ export class AuthController {
     const refreshToken = dto.refreshToken || cookieToken;
 
     if (!refreshToken) {
-      throw new UnauthorizedException("Refresh token is required");
+      throw unauthorized(ErrorCode.TOKEN_INVALID, "Refresh token is required");
     }
 
     const result = await this.authService.refreshTokens({ refreshToken });
@@ -219,7 +228,11 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: "Confirm email verification token" })
   async confirmEmailVerification(@Body() dto: ConfirmEmailDto) {
-    return this.authService.confirmEmailVerification(dto.token);
+    return this.authService.confirmEmailVerification(
+      dto.token,
+      dto.email,
+      dto.otp,
+    );
   }
 
   @Post("forgot-password")
@@ -233,9 +246,9 @@ export class AuthController {
   @Post("reset-password")
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: "Reset password using token" })
+  @ApiOperation({ summary: "Reset password using an emailed OTP" })
   async resetPassword(@Body() dto: ResetPasswordDto) {
-    return this.authService.resetPassword(dto.token, dto.newPassword);
+    return this.authService.resetPassword(dto.email, dto.otp, dto.newPassword);
   }
 
   // ========================================================================

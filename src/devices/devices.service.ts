@@ -1,9 +1,11 @@
-import { Injectable, NotFoundException, Optional } from "@nestjs/common";
+import { Injectable, Optional } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { AuditLogService } from "@/common/audit/audit-log.service";
 import { AuditAction } from "@prisma/client";
 import { CreateDeviceDto } from "./dto/create-device.dto";
 import { UpdateDeviceDto } from "./dto/update-device.dto";
+import { ErrorCode } from "@/common/errors/error-code";
+import { notFound } from "@/common/errors/http-errors";
 
 @Injectable()
 export class DevicesService {
@@ -34,7 +36,11 @@ export class DevicesService {
     });
 
     if (!device) {
-      throw new NotFoundException("Device not found or has been revoked");
+      throw notFound(
+        ErrorCode.DEVICE_NOT_REGISTERED,
+        "Device not found or has been revoked",
+        { deviceId },
+      );
     }
 
     return device;

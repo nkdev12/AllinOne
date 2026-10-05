@@ -54,8 +54,14 @@ describe("EventsService", () => {
   };
 
   beforeEach(async () => {
+    // `appendChange` numbers every log row from this counter, so the mock has to
+    // keep its place between calls the way the real document does.
+    let seq = BigInt(0);
     prismaService = {
       $transaction: jest.fn((cb) => cb(prismaService)),
+      syncCursor: {
+        upsert: jest.fn(async () => ({ seq: ++seq })),
+      },
       calendar: {
         findFirst: jest.fn().mockResolvedValue(mockCalendar),
       },
@@ -206,6 +212,31 @@ describe("EventsService", () => {
           data: expect.objectContaining({ operation: ChangeOperation.DELETE }),
         }),
       );
+    });
+  });
+
+  describe("the cursor a logged event change carries", () => {
+    const cursorOf = () =>
+      prismaService.change.create.mock.calls.at(-1)[0].data.cursor;
+
+    it("numbers a create above the schema default", async () => {
+      await service.createEvent(userId, {
+        calendarId,
+        title: "Sprint Planning Sync",
+        startAt,
+        endAt,
+      });
+
+      // These rows used to carry `cursor: 0` and a pull asks for
+      // `cursor > <this device's checkpoint>`, so an event made through the
+      // calendar API was readable by no device that had synced once already.
+      expect(cursorOf()).toEqual(BigInt(1));
+    });
+
+    it("numbers a delete the same way", async () => {
+      await service.deleteEvent(userId, eventId);
+
+      expect(cursorOf()).toEqual(BigInt(1));
     });
   });
 });

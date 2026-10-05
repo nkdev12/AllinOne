@@ -5,6 +5,7 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  IsUUID,
 } from "class-validator";
 import { Platform } from "@prisma/client";
 
@@ -21,6 +22,16 @@ export class LoginDto {
   @IsString()
   @IsNotEmpty()
   password!: string;
+
+  @ApiPropertyOptional({
+    example: "123e4567-e89b-12d3-a456-426614174000",
+    description:
+      "Device row an earlier sign-in handed this client. Ignored unless it " +
+      "belongs to this user and has not been revoked.",
+  })
+  @IsOptional()
+  @IsUUID()
+  deviceId?: string;
 
   @ApiPropertyOptional({
     example: "My Laptop",
