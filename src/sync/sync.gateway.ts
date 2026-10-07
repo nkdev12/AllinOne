@@ -49,22 +49,75 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @Optional() private readonly usersService?: UsersService,
   ) {}
 
+  /**
+   * Safely rejects an unauthenticated or unauthorized connection.
+   *
+   * In Socket.IO, `connect_error` is a reserved event name that throws a fatal
+   * exception when emitted via `socket.emit()`. We emit standard `error` event
+   * instead, which client-side listeners handle, wrapped in a try/catch so an emit
+   * failure never crashes the server process.
+   */
+  private rejectConnection(
+    client: AuthenticatedSocket,
+    payload: {
+      message: string;
+      code: string;
+      subCode?: string;
+      details?: any;
+    },
+  ): void {
+    try {
+      client.emit("error", payload);
+    } catch (err: any) {
+      this.logger.debug(
+        `[SyncGateway] Failed to emit error event to ${client.id}: ${err?.message || err}`,
+      );
+    }
+    client.disconnect(true);
+  }
+
+  /**
+   * Robustly extracts the bearer access token from auth payload, authorization headers,
+   * or query string.
+   */
+  private extractToken(client: AuthenticatedSocket): string | undefined {
+    const auth = client.handshake.auth;
+    if (auth && typeof auth === "object" && typeof auth.token === "string" && auth.token.trim()) {
+      return auth.token.trim();
+    }
+
+    const authHeader = client.handshake.headers?.authorization;
+    if (typeof authHeader === "string") {
+      const match = authHeader.match(/^Bearer\s+(.*?)$/i);
+      if (match && match[1]) {
+        return match[1].trim();
+      }
+      if (authHeader.trim()) {
+        return authHeader.trim();
+      }
+    }
+
+    const queryToken = client.handshake.query?.token;
+    if (typeof queryToken === "string" && queryToken.trim()) {
+      return queryToken.trim();
+    }
+
+    return undefined;
+  }
+
   async handleConnection(client: AuthenticatedSocket) {
     try {
-      const token =
-        client.handshake.auth?.token ||
-        client.handshake.headers?.authorization?.replace("Bearer ", "") ||
-        (client.handshake.query?.token as string);
+      const token = this.extractToken(client);
 
       if (!token) {
         this.logger.warn(
           `[SyncGateway] Connection rejected from ${client.id}: Missing access token.`,
         );
-        client.emit("connect_error", {
+        this.rejectConnection(client, {
           message: "Unauthorized: Missing access token",
           code: "UNAUTHORIZED",
+          subCode: "MISSING_TOKEN",
         });
-        client.disconnect(true);
         return;
       }
 
@@ -90,11 +143,11 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
         this.logger.warn(
           `[SyncGateway] Connection rejected from ${client.id} (User: ${userId || "unknown"}): ${rejection}.`,
         );
-        client.emit("connect_error", {
+        this.rejectConnection(client, {
           message: `Unauthorized: ${rejection}`,
           code: "UNAUTHORIZED",
+          subCode: "SESSION_REJECTED",
         });
-        client.disconnect(true);
         return;
       }
 
@@ -107,15 +160,21 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
         `[SyncGateway] Client connected: ${client.id} (User: ${userId}, Device: ${deviceId || "N/A"}) joined room ${userRoom}`,
       );
     } catch (error: any) {
+      const isExpired =
+        error?.name === "TokenExpiredError" ||
+        error?.message?.toLowerCase().includes("expired");
+
       this.logger.warn(
         `[SyncGateway] Connection authentication failed from ${client.id}: ${error?.message || error}`,
       );
-      client.emit("connect_error", {
-        message: "Unauthorized: Invalid or expired token",
+      this.rejectConnection(client, {
+        message: isExpired
+          ? "Unauthorized: Token expired"
+          : "Unauthorized: Invalid or expired token",
         code: "UNAUTHORIZED",
+        subCode: isExpired ? "TOKEN_EXPIRED" : "INVALID_TOKEN",
         details: error?.message,
       });
-      client.disconnect(true);
     }
   }
 

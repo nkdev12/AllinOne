@@ -117,19 +117,91 @@ describe("SyncGateway", () => {
       expect(mockClient.disconnect).not.toHaveBeenCalled();
     });
 
-    it("should disconnect client if access token is missing", async () => {
+    it("should authenticate client when token is in case-insensitive bearer authorization header", async () => {
+      mockClient.handshake.auth = {};
+      mockClient.handshake.headers.authorization = "bearer valid-header-token";
+
+      await gateway.handleConnection(mockClient);
+
+      expect(jwtService.verifyAsync).toHaveBeenCalledWith(
+        "valid-header-token",
+        { secret: "access-secret" },
+      );
+      expect(mockClient.join).toHaveBeenCalledWith("user:user-uuid-123");
+    });
+
+    it("should authenticate client when token is in query string", async () => {
+      mockClient.handshake.auth = {};
+      mockClient.handshake.headers = {};
+      mockClient.handshake.query.token = "valid-query-token";
+
+      await gateway.handleConnection(mockClient);
+
+      expect(jwtService.verifyAsync).toHaveBeenCalledWith(
+        "valid-query-token",
+        { secret: "access-secret" },
+      );
+      expect(mockClient.join).toHaveBeenCalledWith("user:user-uuid-123");
+    });
+
+    it("should emit error event and disconnect client if access token is missing", async () => {
       mockClient.handshake.auth.token = undefined;
 
       await gateway.handleConnection(mockClient);
 
+      expect(mockClient.emit).toHaveBeenCalledWith(
+        "error",
+        expect.objectContaining({
+          code: "UNAUTHORIZED",
+          subCode: "MISSING_TOKEN",
+          message: "Unauthorized: Missing access token",
+        }),
+      );
       expect(mockClient.disconnect).toHaveBeenCalledWith(true);
     });
 
-    it("should disconnect client if JWT verification fails", async () => {
+    it("should emit error event and disconnect client if JWT verification fails", async () => {
       jwtService.verifyAsync.mockRejectedValue(new Error("Invalid token"));
 
       await gateway.handleConnection(mockClient);
 
+      expect(mockClient.emit).toHaveBeenCalledWith(
+        "error",
+        expect.objectContaining({
+          code: "UNAUTHORIZED",
+          subCode: "INVALID_TOKEN",
+          message: "Unauthorized: Invalid or expired token",
+        }),
+      );
+      expect(mockClient.disconnect).toHaveBeenCalledWith(true);
+    });
+
+    it("should emit TOKEN_EXPIRED error if JWT has expired", async () => {
+      const expiredError = new Error("jwt expired");
+      expiredError.name = "TokenExpiredError";
+      jwtService.verifyAsync.mockRejectedValue(expiredError);
+
+      await gateway.handleConnection(mockClient);
+
+      expect(mockClient.emit).toHaveBeenCalledWith(
+        "error",
+        expect.objectContaining({
+          code: "UNAUTHORIZED",
+          subCode: "TOKEN_EXPIRED",
+          message: "Unauthorized: Token expired",
+          details: "jwt expired",
+        }),
+      );
+      expect(mockClient.disconnect).toHaveBeenCalledWith(true);
+    });
+
+    it("should safely disconnect even if client.emit throws an error", async () => {
+      mockClient.handshake.auth.token = undefined;
+      mockClient.emit.mockImplementationOnce(() => {
+        throw new Error("simulated socket emit error");
+      });
+
+      await expect(gateway.handleConnection(mockClient)).resolves.not.toThrow();
       expect(mockClient.disconnect).toHaveBeenCalledWith(true);
     });
   });
