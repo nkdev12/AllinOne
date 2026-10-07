@@ -244,7 +244,11 @@ export class SyncIoAdapter extends RedisIoAdapter {
         origin: string | undefined,
         callback: (error: Error | null, allow?: boolean | string) => void,
       ) => {
-        if (typeof origin === "string" && allowed.has(origin)) {
+        if (
+          typeof origin === "string" &&
+          (allowed.has(origin) ||
+            /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin))
+        ) {
           return callback(null, true);
         }
         if (

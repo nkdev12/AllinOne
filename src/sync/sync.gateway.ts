@@ -60,6 +60,10 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
         this.logger.warn(
           `[SyncGateway] Connection rejected from ${client.id}: Missing access token.`,
         );
+        client.emit("connect_error", {
+          message: "Unauthorized: Missing access token",
+          code: "UNAUTHORIZED",
+        });
         client.disconnect(true);
         return;
       }
@@ -86,6 +90,10 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
         this.logger.warn(
           `[SyncGateway] Connection rejected from ${client.id} (User: ${userId || "unknown"}): ${rejection}.`,
         );
+        client.emit("connect_error", {
+          message: `Unauthorized: ${rejection}`,
+          code: "UNAUTHORIZED",
+        });
         client.disconnect(true);
         return;
       }
@@ -102,6 +110,11 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.logger.warn(
         `[SyncGateway] Connection authentication failed from ${client.id}: ${error?.message || error}`,
       );
+      client.emit("connect_error", {
+        message: "Unauthorized: Invalid or expired token",
+        code: "UNAUTHORIZED",
+        details: error?.message,
+      });
       client.disconnect(true);
     }
   }

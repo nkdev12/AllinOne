@@ -829,6 +829,81 @@ describe("AuthService", () => {
     });
   });
 
+  describe("refreshTokens", () => {
+    const mockSession = {
+      id: "session-uuid-789",
+      userId: "user-uuid-123",
+      deviceId: "device-uuid-456",
+      accessToken: "old-access-token",
+      refreshToken: "valid-refresh-token",
+      accessExpiresAt: new Date(Date.now() + 3600000),
+      refreshExpiresAt: new Date(Date.now() + 86400000),
+      revokedAt: null,
+      user: mockUser,
+    };
+
+    it("should successfully refresh tokens and update session", async () => {
+      jwtService.verify.mockReturnValue({ sub: "user-uuid-123", type: "refresh" });
+      prismaService.session.findUnique.mockResolvedValue(mockSession);
+      prismaService.session.update.mockResolvedValue({
+        ...mockSession,
+        refreshToken: "new-refresh-token",
+      });
+
+      const result = await service.refreshTokens({
+        refreshToken: "valid-refresh-token",
+      });
+
+      expect(result.tokens).toBeDefined();
+      expect(result.deviceId).toBe("device-uuid-456");
+      expect(prismaService.session.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "session-uuid-789" },
+          data: expect.objectContaining({
+            accessToken: expect.any(String),
+            refreshToken: expect.any(String),
+          }),
+        }),
+      );
+    });
+
+    it("tolerates concurrent requests using rotated token within grace period", async () => {
+      jwtService.verify.mockReturnValue({ sub: "user-uuid-123", type: "refresh" });
+      prismaService.session.findUnique.mockResolvedValue(mockSession);
+      prismaService.session.update.mockResolvedValue(mockSession);
+
+      // First refresh
+      const firstResult = await service.refreshTokens({
+        refreshToken: "race-refresh-token",
+      });
+
+      // Second concurrent refresh with the same old token (findUnique for grace check)
+      prismaService.session.findUnique.mockResolvedValueOnce({
+        id: "session-uuid-789",
+        revokedAt: null,
+        refreshExpiresAt: new Date(Date.now() + 86400000),
+      });
+
+      const secondResult = await service.refreshTokens({
+        refreshToken: "race-refresh-token",
+      });
+
+      expect(secondResult.tokens.accessToken).toBe(firstResult.tokens.accessToken);
+      expect(secondResult.tokens.refreshToken).toBe(firstResult.tokens.refreshToken);
+      expect(secondResult.deviceId).toBe("device-uuid-456");
+    });
+
+    it("throws unauthorized when refresh token is invalid or expired", async () => {
+      jwtService.verify.mockImplementation(() => {
+        throw new Error("jwt expired");
+      });
+
+      await expect(
+        service.refreshTokens({ refreshToken: "expired-token" }),
+      ).rejects.toThrow(UnauthorizedException);
+    });
+  });
+
   describe("logout", () => {
     it("should revoke user session", async () => {
       const result = await service.logout("session-uuid-789");

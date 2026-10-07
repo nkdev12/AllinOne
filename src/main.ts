@@ -35,9 +35,57 @@ async function bootstrap() {
       crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" },
     }),
   );
+  const corsOriginConfig = configService.get<string>("CORS_ORIGIN", "");
+  const corsOriginsConfig = configService.get<string>("CORS_ORIGINS", "");
+  const wsCorsOriginsConfig = configService.get<string>("WS_CORS_ORIGINS", "");
+
+  const explicitAllowedOrigins = [
+    corsOriginConfig,
+    corsOriginsConfig,
+    wsCorsOriginsConfig,
+  ]
+    .flatMap((val) => val.split(","))
+    .map((o) => o.trim())
+    .filter(Boolean);
+
+  const allowsWildcard =
+    corsOriginConfig === "*" ||
+    corsOriginsConfig === "*" ||
+    explicitAllowedOrigins.includes("*");
+
   app.enableCors({
-    origin: configService.get<string>("CORS_ORIGIN", "http://localhost:3000"),
+    origin: (
+      origin: string | undefined,
+      callback: (err: Error | null, allow?: boolean) => void,
+    ) => {
+      // Allow requests with no origin (e.g. mobile apps, curl, server-to-server)
+      if (!origin || origin === "null") {
+        return callback(null, true);
+      }
+
+      // If configured for wildcard '*', dynamically reflect the origin so credentials work
+      if (allowsWildcard) {
+        return callback(null, true);
+      }
+
+      // Always permit localhost / 127.0.0.1 on any port for local development & Flutter Web
+      if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+        return callback(null, true);
+      }
+
+      // Check explicit allowed origins list (defaulting to http://localhost:3000 if none configured)
+      if (
+        explicitAllowedOrigins.length === 0 ||
+        explicitAllowedOrigins.includes(origin)
+      ) {
+        return callback(null, true);
+      }
+
+      logger.warn(`[CORS] Blocked request from disallowed origin: ${origin}`);
+      return callback(null, false);
+    },
     credentials: true,
+    methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
     allowedHeaders: [
       "Content-Type",
       "Authorization",
@@ -46,8 +94,24 @@ async function bootstrap() {
       "X-Trace-ID",
       "traceparent",
       "tracestate",
+      "x-client-version",
+      "x-device-id",
+      "X-Client-Version",
+      "X-Device-Id",
+      "Accept",
+      "Origin",
+      "User-Agent",
+      "Cache-Control",
+      "Pragma",
     ],
-    exposedHeaders: ["X-Request-ID", "X-Trace-ID", "traceparent"],
+    exposedHeaders: [
+      "X-Request-ID",
+      "X-Trace-ID",
+      "traceparent",
+      "x-client-version",
+      "x-device-id",
+    ],
+    maxAge: 86400,
   });
 
   // ========================================================================

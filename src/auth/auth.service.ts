@@ -1,5 +1,6 @@
 import {
   Injectable,
+  HttpException,
   UnauthorizedException,
   BadRequestException,
   Logger,
@@ -39,6 +40,14 @@ import {
 import { AuthType, Platform, AuditAction, OtpPurpose } from "@prisma/client";
 import { Session } from "@prisma/client";
 
+interface RotatedRefreshGraceRecord {
+  tokens: AuthTokenDataDto;
+  deviceId: string;
+  sessionId: string;
+  userId: string;
+  expiresAt: number;
+}
+
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
@@ -47,6 +56,14 @@ export class AuthService {
   private microsoftJwksCache: { keys: any[]; fetchedAt: number } | null = null;
   private readonly JWKS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
   private readonly RESET_OTP_TTL_MINUTES = 15;
+
+  /**
+   * Grace period window (30 seconds) during which a recently rotated refresh
+   * token is accepted to tolerate concurrent client requests or network retries
+   * without invalidating the session.
+   */
+  static readonly REFRESH_ROTATION_GRACE_MS = 30 * 1000;
+  private readonly rotatedTokensGraceMap = new Map<string, RotatedRefreshGraceRecord>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -766,6 +783,28 @@ export class AuthService {
         secret: this.configService.jwtRefreshSecret,
       });
 
+      this.pruneExpiredGraceTokens();
+
+      // If a recently rotated token arrives within the grace window (e.g. concurrent
+      // requests or network retries), return the already generated active tokens.
+      const graceRecord = this.rotatedTokensGraceMap.get(dto.refreshToken);
+      if (graceRecord && graceRecord.expiresAt > Date.now()) {
+        const session = await this.prisma.session.findUnique({
+          where: { id: graceRecord.sessionId },
+          select: { id: true, revokedAt: true, refreshExpiresAt: true },
+        });
+        if (
+          session &&
+          !session.revokedAt &&
+          session.refreshExpiresAt > new Date()
+        ) {
+          this.logger.log(
+            `[AuthService] Reused rotated refresh token within grace period for session ${graceRecord.sessionId}. Returning active tokens.`,
+          );
+          return { tokens: graceRecord.tokens, deviceId: graceRecord.deviceId };
+        }
+      }
+
       const session = await this.prisma.session.findUnique({
         where: { refreshToken: dto.refreshToken },
         include: { user: true },
@@ -807,16 +846,37 @@ export class AuthService {
         },
       });
 
+      // Keep previous refresh token in grace map for a short window to tolerate concurrent requests
+      this.rotatedTokensGraceMap.set(dto.refreshToken, {
+        tokens,
+        deviceId: session.deviceId,
+        sessionId: session.id,
+        userId: session.userId,
+        expiresAt: Date.now() + AuthService.REFRESH_ROTATION_GRACE_MS,
+      });
+
       // The session row knows which device it was opened on, so a client that
       // lost its saved device id gets it back here instead of having to sign in
       // again before /sync/* will accept it.
       return { tokens, deviceId: session.deviceId };
     } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
       this.logger.error("Failed to refresh tokens", error);
       throw unauthorized(
         ErrorCode.TOKEN_INVALID,
         "Invalid or expired refresh token",
       );
+    }
+  }
+
+  private pruneExpiredGraceTokens(): void {
+    const now = Date.now();
+    for (const [token, record] of this.rotatedTokensGraceMap.entries()) {
+      if (record.expiresAt <= now) {
+        this.rotatedTokensGraceMap.delete(token);
+      }
     }
   }
 
@@ -829,6 +889,13 @@ export class AuthService {
       where: { id: sessionId, revokedAt: null },
       data: { revokedAt: new Date() },
     });
+
+    // Invalidate any grace records associated with this session
+    for (const [token, record] of this.rotatedTokensGraceMap.entries()) {
+      if (record.sessionId === sessionId) {
+        this.rotatedTokensGraceMap.delete(token);
+      }
+    }
 
     return { success: true };
   }
