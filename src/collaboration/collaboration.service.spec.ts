@@ -822,4 +822,22 @@ describe("CollaborationService", () => {
       expect(mine).toEqual({ data: [], total: 0, page: 1, limit: 20 });
     });
   });
+  it("does not grant access through an orphaned share after the note is deleted", async () => {
+    await createShare();
+    store.note.findFirst.mockResolvedValue(null);
+    expect(
+      await service.checkAccess(COLLAB, undefined, "NOTE", "note-1"),
+    ).toEqual({
+      hasAccess: false,
+      isOwner: false,
+    });
+  });
+
+  it("does not fall through to grants when the resource lookup fails", async () => {
+    await createShare();
+    store.note.findFirst.mockRejectedValue(new Error("Database unavailable"));
+    await expect(
+      service.checkAccess(COLLAB, undefined, "NOTE", "note-1"),
+    ).rejects.toThrow("Database unavailable");
+  });
 });

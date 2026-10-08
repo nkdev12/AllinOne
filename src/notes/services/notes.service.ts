@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException, Optional } from "@nestjs/common";
+import {
+  Injectable,
+  NotFoundException,
+  Optional,
+  ConflictException,
+} from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { CollaborationService } from "@/collaboration/collaboration.service";
 import { SyncNotificationService } from "@/sync/sync-notification.service";
@@ -6,7 +11,7 @@ import { CreateNoteDto } from "../dto/create-note.dto";
 import { UpdateNoteDto } from "../dto/update-note.dto";
 import { QueryNotesDto } from "../dto/query-notes.dto";
 import { appendChange } from "@/sync/change-cursor";
-import { ChangeOperation } from "@prisma/client";
+import { ChangeOperation, Prisma } from "@prisma/client";
 
 @Injectable()
 export class NotesService {
@@ -216,9 +221,15 @@ export class NotesService {
       throw new NotFoundException(`Note with ID '${noteId}' not found.`);
     }
 
+    if (dto.version !== undefined && dto.version !== existing.version) {
+      throw new ConflictException(
+        "This note has changed. Reload it before saving your edits.",
+      );
+    }
+
     if (dto.folderId) {
       const folder = await this.prisma.folder.findFirst({
-        where: { id: dto.folderId, userId, deletedAt: null },
+        where: { id: dto.folderId, userId: existing.userId, deletedAt: null },
       });
       if (!folder) {
         throw new NotFoundException(
@@ -229,80 +240,98 @@ export class NotesService {
 
     let highestCursor: bigint | undefined;
 
-    const updated = await this.prisma.$transaction(async (tx) => {
-      // 1. Snapshot current version into history
-      await tx.noteHistory.create({
-        data: {
-          noteId: existing.id,
-          version: existing.version,
-          title: existing.title,
-          content: existing.content,
-        },
-      });
+    const updated = await this.prisma
+      .$transaction(async (tx) => {
+        // 1. Snapshot current version into history
+        await tx.noteHistory.create({
+          data: {
+            noteId: existing.id,
+            version: existing.version,
+            title: existing.title,
+            content: existing.content,
+          },
+        });
 
-      // 2. Update the tag relations if specified. The free-text `tags` list is
-      //    a separate column and is not touched by `tagIds`.
-      if (dto.tagIds !== undefined) {
-        await tx.noteTag.deleteMany({ where: { noteId: existing.id } });
-        if (dto.tagIds.length > 0) {
-          await tx.noteTag.createMany({
-            data: dto.tagIds.map((tagId) => ({ noteId: existing.id, tagId })),
-          });
+        // 2. Update the tag relations if specified. The free-text `tags` list is
+        //    a separate column and is not touched by `tagIds`.
+        if (dto.tagIds !== undefined) {
+          await tx.noteTag.deleteMany({ where: { noteId: existing.id } });
+          if (dto.tagIds.length > 0) {
+            await tx.noteTag.createMany({
+              data: dto.tagIds.map((tagId) => ({ noteId: existing.id, tagId })),
+            });
+          }
         }
-      }
 
-      // 3. Update note entity
-      const updatedNote = await tx.note.update({
-        where: { id: existing.id },
-        data: {
-          title: dto.title,
-          content: dto.content,
-          folderId: dto.folderId,
-          isPinned: dto.isPinned,
-          isArchived: dto.isArchived,
-          isEncrypted: dto.isEncrypted,
-          // `undefined` on this object is Prisma's "do not write the field",
-          // which is exactly the rule the two new columns need: an edit that
-          // PATCHes only `content` says nothing about the user's labels, and
-          // saying nothing must not read as clearing them. So `dto.tags` is never
-          // defaulted to `[]` here the way the create path defaults it — only a
-          // list the caller actually sent, or the `null` that means "none",
-          // reaches the column. `color` is nullable on the row, so a `null`
-          // clears it and an absent key leaves it standing.
-          tags: dto.tags === undefined ? undefined : (dto.tags ?? []),
-          color: dto.color,
-          // The format and its table are `color`'s rule exactly, and for the
-          // same reason: an absent key is Prisma's "do not write", so a REST
-          // edit of one field cannot rewrite the other, while an explicit
-          // `null` is a caller saying this note really has no table — a
-          // different statement from the client's `{"rows":[]}`, which is a
-          // table it has and has emptied.
-          noteType: dto.noteType,
-          structured: dto.structured,
-          version: { increment: 1 },
-        },
-        include: {
-          folder: true,
-          noteTags: { include: { tag: true } },
-          attachments: true,
-        },
+        // 3. Update note entity
+        const updatedNote = await tx.note.update({
+          where: {
+            id: existing.id,
+            ...(dto.version !== undefined ? { version: dto.version } : {}),
+          },
+          data: {
+            title: dto.title,
+            content: dto.content,
+            folderId: dto.folderId,
+            isPinned: dto.isPinned,
+            isArchived: dto.isArchived,
+            isEncrypted: dto.isEncrypted,
+            // `undefined` on this object is Prisma's "do not write the field",
+            // which is exactly the rule the two new columns need: an edit that
+            // PATCHes only `content` says nothing about the user's labels, and
+            // saying nothing must not read as clearing them. So `dto.tags` is never
+            // defaulted to `[]` here the way the create path defaults it — only a
+            // list the caller actually sent, or the `null` that means "none",
+            // reaches the column. `color` is nullable on the row, so a `null`
+            // clears it and an absent key leaves it standing.
+            tags: dto.tags === undefined ? undefined : (dto.tags ?? []),
+            color: dto.color,
+            // The format and its table are `color`'s rule exactly, and for the
+            // same reason: an absent key is Prisma's "do not write", so a REST
+            // edit of one field cannot rewrite the other, while an explicit
+            // `null` is a caller saying this note really has no table — a
+            // different statement from the client's `{"rows":[]}`, which is a
+            // table it has and has emptied.
+            noteType: dto.noteType,
+            structured: dto.structured,
+            version: { increment: 1 },
+          },
+          include: {
+            folder: true,
+            noteTags: { include: { tag: true } },
+            attachments: true,
+          },
+        });
+
+        // 4. Record sync change event
+        const logged = await appendChange(tx, {
+          userId: existing.userId,
+          entityType: "note",
+          entityId: updatedNote.id,
+          operation: ChangeOperation.UPDATE,
+          version: updatedNote.version,
+          payload: noteChangePayload(updatedNote, silentAbout(dto)),
+        });
+        highestCursor = logged.cursor;
+
+        return this.formatNoteResponse(updatedNote);
+      })
+      .catch((error: unknown) => {
+        if (
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          (error.code === "P2025" || error.code === "P2034")
+        ) {
+          throw new ConflictException(
+            "This note has changed. Reload it before saving your edits.",
+          );
+        }
+        throw error;
       });
 
-      // 4. Record sync change event
-      const logged = await appendChange(tx, {
-        userId,
-        entityType: "note",
-        entityId: updatedNote.id,
-        operation: ChangeOperation.UPDATE,
-        version: updatedNote.version,
-        payload: noteChangePayload(updatedNote, silentAbout(dto)),
-      });
-      highestCursor = logged.cursor;
-
-      return this.formatNoteResponse(updatedNote);
+    this.syncNotifications?.notifyMutation({
+      userId: existing.userId,
+      highestCursor,
     });
-
-    this.syncNotifications?.notifyMutation({ userId, highestCursor });
 
     return updated;
   }

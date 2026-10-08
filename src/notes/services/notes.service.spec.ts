@@ -2,8 +2,8 @@ import { Test, TestingModule } from "@nestjs/testing";
 import { NotesService } from "./notes.service";
 import { CollaborationService } from "@/collaboration/collaboration.service";
 import { PrismaService } from "@/common/prisma/prisma.service";
-import { NotFoundException } from "@nestjs/common";
-import { ChangeOperation } from "@prisma/client";
+import { NotFoundException, ConflictException } from "@nestjs/common";
+import { ChangeOperation, Prisma } from "@prisma/client";
 
 describe("NotesService", () => {
   let service: NotesService;
@@ -174,6 +174,48 @@ describe("NotesService", () => {
   });
 
   describe("updateNote", () => {
+    it("rejects a stale version without writing history or content", async () => {
+      await expect(
+        service.updateNote(userId, noteId, {
+          title: "Stale draft",
+          version: 99,
+        }),
+      ).rejects.toThrow(ConflictException);
+      expect(prismaService.note.update).not.toHaveBeenCalled();
+      expect(prismaService.noteHistory.create).not.toHaveBeenCalled();
+    });
+
+    it("checks the submitted version atomically on the update", async () => {
+      await service.updateNote(userId, noteId, {
+        title: "Current draft",
+        version: 1,
+      });
+      expect(prismaService.note.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: noteId, version: 1 },
+        }),
+      );
+    });
+
+    it.each(["P2025", "P2034"])(
+      "returns a conflict for a racing write (%s)",
+      async (code) => {
+        prismaService.note.update.mockRejectedValueOnce(
+          new Prisma.PrismaClientKnownRequestError("Concurrent write", {
+            code,
+            clientVersion: "5.22.0",
+          }),
+        );
+        await expect(
+          service.updateNote(userId, noteId, {
+            title: "Racing draft",
+            version: 1,
+          }),
+        ).rejects.toThrow(ConflictException);
+        expect(prismaService.change.create).not.toHaveBeenCalled();
+      },
+    );
+
     it("should snapshot history, update note, and record change", async () => {
       const result = await service.updateNote(userId, noteId, {
         title: "Updated Title",
@@ -529,6 +571,21 @@ describe("NotesService", () => {
       expect(
         prismaService.note.findFirst.mock.calls.at(-1)[0].where,
       ).not.toHaveProperty("userId");
+    });
+
+    it("records a collaborator edit in the owner's sync feed", async () => {
+      prismaService.note.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(mockNote);
+      await shared.updateNote("different-collaborator", noteId, {
+        title: "Shared edit",
+        version: 1,
+      });
+      expect(prismaService.change.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ userId, entityId: noteId }),
+        }),
+      );
     });
 
     it("asks for the EDITOR role before a write goes through the share", async () => {

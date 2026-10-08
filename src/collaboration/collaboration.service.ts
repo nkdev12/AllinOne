@@ -166,7 +166,7 @@ export class CollaborationService {
     // schema now requires `sharedWithUserId`, so a grant is refused here rather
     // than written as a lie; the invite can be re-sent once the account exists.
     const collaborator = await this.prisma.user.findFirst({
-      where: { email: dto.email.toLowerCase(), deletedAt: null },
+      where: { email: dto.email.trim().toLowerCase(), deletedAt: null },
     });
 
     if (!collaborator) {
@@ -432,8 +432,11 @@ export class CollaborationService {
       if (ownerId === userId) {
         return { hasAccess: true, role: "ADMIN", isOwner: true };
       }
-    } catch (_) {
-      // Resource may not exist or not be owned by caller
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        return { hasAccess: false, isOwner: false };
+      }
+      throw error;
     }
 
     const requiredWeight = this.getRoleWeight(requiredRole);
