@@ -1,5 +1,12 @@
-import { assertExpenseShares, validMembers } from "../finance/groups/group-validation";
-import { BadRequestException, ForbiddenException, Logger } from "@nestjs/common";
+import {
+  assertExpenseShares,
+  validMembers,
+} from "../finance/groups/group-validation";
+import {
+  BadRequestException,
+  ForbiddenException,
+  Logger,
+} from "@nestjs/common";
 import {
   ChangeOperation,
   EventStatus,
@@ -1467,7 +1474,8 @@ async function projectFinanceGroupChange(
     return;
   }
 
-  if (payload.members !== undefined && !validMembers(payload.members)) throw new BadRequestException("Invalid group friends.");
+  if (payload.members !== undefined && !validMembers(payload.members))
+    throw new BadRequestException("Invalid group friends.");
 
   if (!existing) {
     const createdAt = parsedCreatedAt(payload);
@@ -1521,14 +1529,36 @@ async function projectFinanceGroupChange(
   });
 }
 
-async function assertSharedScope(tx: ChangeProjectionClient, userId: string, refs: { groupId?: string | null; tripId?: string | null }, currency?: string): Promise<void> {
-  if (!refs.groupId && !refs.tripId) throw new BadRequestException("A group or trip is required.");
-  for (const [id, delegate] of [[refs.groupId, tx.financeGroup], [refs.tripId, tx.financeTrip]] as const) {
-    if (!id) continue;
-    const parent = await delegate?.findUnique({ where: { id } });
-    if (!parent || parent.ownerId !== userId || parent.deletedAt) throw new ForbiddenException("This group or trip is not available to you.");
-    const parentCurrency = 'currency' in parent ? parent.currency : parent.baseCurrency;
-    if (currency && parentCurrency !== currency) throw new BadRequestException("Use the group or trip currency.");
+async function assertSharedScope(
+  tx: ChangeProjectionClient,
+  userId: string,
+  refs: { groupId?: string | null; tripId?: string | null },
+  currency?: string,
+): Promise<void> {
+  if (!refs.groupId && !refs.tripId) {
+    throw new BadRequestException("A group or trip is required.");
+  }
+  if (refs.groupId) {
+    const parent = await tx.financeGroup?.findUnique({
+      where: { id: refs.groupId },
+    });
+    if (!parent || parent.ownerId !== userId || parent.deletedAt) {
+      throw new ForbiddenException("This group is not available to you.");
+    }
+    if (currency && parent.currency !== currency) {
+      throw new BadRequestException("Use the group currency.");
+    }
+  }
+  if (refs.tripId) {
+    const parent = await tx.financeTrip?.findUnique({
+      where: { id: refs.tripId },
+    });
+    if (!parent || parent.ownerId !== userId || parent.deletedAt) {
+      throw new ForbiddenException("This trip is not available to you.");
+    }
+    if (currency && parent.baseCurrency !== currency) {
+      throw new BadRequestException("Use the trip currency.");
+    }
   }
 }
 
@@ -1543,12 +1573,26 @@ async function projectFinanceSharedExpenseChange(
 
   const existing = await delegate.findUnique({
     where: { id: change.entityId },
-    select: { groupId: true, tripId: true, totalAmountMinor: true, deletedAt: true, version: true },
+    select: {
+      groupId: true,
+      tripId: true,
+      totalAmountMinor: true,
+      deletedAt: true,
+      version: true,
+    },
   });
 
   if (existing) await assertSharedScope(tx, userId, existing);
   if (change.operation !== ChangeOperation.DELETE) {
-    await assertSharedScope(tx, userId, { groupId: payload.groupId ?? existing?.groupId, tripId: payload.tripId ?? existing?.tripId }, payload.currency);
+    await assertSharedScope(
+      tx,
+      userId,
+      {
+        groupId: payload.groupId ?? existing?.groupId,
+        tripId: payload.tripId ?? existing?.tripId,
+      },
+      payload.currency,
+    );
   }
 
   if (change.operation === ChangeOperation.DELETE) {
@@ -1560,8 +1604,18 @@ async function projectFinanceSharedExpenseChange(
     return;
   }
 
-  if (payload.shares !== undefined || !existing) assertExpenseShares(Number(payload.totalAmountMinor ?? existing?.totalAmountMinor), payload.shares);
-  const shareData = Array.isArray(payload.shares) ? payload.shares.map((share: any) => ({ userId: share.userId, owedAmountMinor: BigInt(share.owedAmountMinor), shareUnits: share.shareUnits ?? null })) : undefined;
+  if (payload.shares !== undefined || !existing)
+    assertExpenseShares(
+      Number(payload.totalAmountMinor ?? existing?.totalAmountMinor),
+      payload.shares,
+    );
+  const shareData = Array.isArray(payload.shares)
+    ? payload.shares.map((share: any) => ({
+        userId: share.userId,
+        owedAmountMinor: BigInt(share.owedAmountMinor),
+        shareUnits: share.shareUnits ?? null,
+      }))
+    : undefined;
 
   const totalAmountMinor = BigInt(
     Math.round(Number(payload.totalAmountMinor ?? 0)),
@@ -1668,7 +1722,15 @@ async function projectFinanceSettlementChange(
 
   if (existing) await assertSharedScope(tx, userId, existing);
   if (change.operation !== ChangeOperation.DELETE) {
-    await assertSharedScope(tx, userId, { groupId: payload.groupId ?? existing?.groupId, tripId: payload.tripId ?? existing?.tripId }, payload.currency);
+    await assertSharedScope(
+      tx,
+      userId,
+      {
+        groupId: payload.groupId ?? existing?.groupId,
+        tripId: payload.tripId ?? existing?.tripId,
+      },
+      payload.currency,
+    );
   }
 
   if (change.operation === ChangeOperation.DELETE) {
@@ -1682,7 +1744,14 @@ async function projectFinanceSettlementChange(
 
   const from = payload.fromUserId ?? existing?.fromUserId;
   const to = payload.toUserId ?? existing?.toUserId;
-  if (!from || !to || from === to || (payload.amountMinor !== undefined && (!Number.isSafeInteger(payload.amountMinor) || payload.amountMinor <= 0))) throw new BadRequestException("Invalid payment.");
+  if (
+    !from ||
+    !to ||
+    from === to ||
+    (payload.amountMinor !== undefined &&
+      (!Number.isSafeInteger(payload.amountMinor) || payload.amountMinor <= 0))
+  )
+    throw new BadRequestException("Invalid payment.");
   const amountMinor = BigInt(Math.round(Number(payload.amountMinor ?? 0)));
   const date = payload.date ? new Date(payload.date) : new Date();
 

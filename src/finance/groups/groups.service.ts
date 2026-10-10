@@ -1,5 +1,10 @@
 import { assertExpenseShares, validMembers } from "./group-validation";
-import { BadRequestException, Injectable, NotFoundException, Optional } from "@nestjs/common";
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+  Optional,
+} from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { SyncNotificationService } from "@/sync/sync-notification.service";
 import { CreateGroupDto } from "./dto/create-group.dto";
@@ -51,7 +56,11 @@ export function groupChangePayload(group: any): Record<string, any> {
 
 export function sharedExpenseChangePayload(expense: any): Record<string, any> {
   return {
-    shares: (expense.shares ?? []).map((share: any) => ({ userId: share.userId, owedAmountMinor: Number(share.owedAmountMinor), shareUnits: share.shareUnits ?? null })),
+    shares: (expense.shares ?? []).map((share: any) => ({
+      userId: share.userId,
+      owedAmountMinor: Number(share.owedAmountMinor),
+      shareUnits: share.shareUnits ?? null,
+    })),
     groupId: expense.groupId ?? null,
     tripId: expense.tripId ?? null,
     paidByUserId: expense.paidByUserId,
@@ -114,7 +123,8 @@ export class GroupsService {
   // -------------------------------------------------------------
 
   async createGroup(userId: string, dto: CreateGroupDto) {
-    if (dto.members && !validMembers(dto.members)) throw new BadRequestException("Friends must have unique names and IDs.");
+    if (dto.members && !validMembers(dto.members))
+      throw new BadRequestException("Friends must have unique names and IDs.");
     let highestCursor: bigint | undefined;
 
     const created = await this.prisma.$transaction(async (tx) => {
@@ -122,7 +132,11 @@ export class GroupsService {
         data: {
           ownerId: userId,
           name: dto.name.trim(),
-          members: (dto.members ?? []).map((member) => ({ ...member, name: member.name.trim(), active: member.active !== false })),
+          members: (dto.members ?? []).map((member) => ({
+            ...member,
+            name: member.name.trim(),
+            active: member.active !== false,
+          })),
           description: dto.description,
           currency: dto.currency ?? "INR",
           iconKey: dto.iconKey,
@@ -178,16 +192,28 @@ export class GroupsService {
   }
 
   async updateGroup(userId: string, groupId: string, dto: UpdateGroupDto) {
-    if (dto.members && !validMembers(dto.members)) throw new BadRequestException("Friends must have unique names and IDs.");
+    if (dto.members && !validMembers(dto.members))
+      throw new BadRequestException("Friends must have unique names and IDs.");
     const existing = await this.getGroupById(userId, groupId);
-    if (dto.currency && dto.currency !== existing.currency) throw new BadRequestException("Group currency cannot be changed after creation.");
+    if (dto.currency && dto.currency !== existing.currency)
+      throw new BadRequestException(
+        "Group currency cannot be changed after creation.",
+      );
     let highestCursor: bigint | undefined;
 
     const updated = await this.prisma.$transaction(async (tx) => {
       const group = await tx.financeGroup.update({
         where: { id: existing.id },
         data: {
-          ...(dto.members !== undefined ? { members: dto.members.map((member) => ({ ...member, name: member.name.trim(), active: member.active !== false })) } : {}),
+          ...(dto.members !== undefined
+            ? {
+                members: dto.members.map((member) => ({
+                  ...member,
+                  name: member.name.trim(),
+                  active: member.active !== false,
+                })),
+              }
+            : {}),
           ...(dto.name !== undefined ? { name: dto.name.trim() } : {}),
           ...(dto.description !== undefined
             ? { description: dto.description }
@@ -259,7 +285,8 @@ export class GroupsService {
   ) {
     const group = await this.getGroupById(userId, groupId);
     assertExpenseShares(dto.totalAmountMinor, dto.shares);
-    if (dto.currency && dto.currency !== group.currency) throw new BadRequestException("Use the group currency.");
+    if (dto.currency && dto.currency !== group.currency)
+      throw new BadRequestException("Use the group currency.");
     const totalAmountMinor = BigInt(dto.totalAmountMinor);
     let highestCursor: bigint | undefined;
 
@@ -373,10 +400,25 @@ export class GroupsService {
     dto: CreateSettlementDto,
   ) {
     const group = await this.getGroupById(userId, groupId);
-    if (!Number.isSafeInteger(dto.amountMinor) || dto.amountMinor <= 0 || dto.fromUserId === dto.toUserId) throw new BadRequestException("Choose different friends and a positive payment amount.");
-    if (dto.currency && dto.currency !== group.currency) throw new BadRequestException("Use the group currency.");
-    const summary = await this.getGroupBalancesAndSimplifiedDebts(userId, groupId);
-    if (dto.amountMinor > -(summary.balances[dto.fromUserId] ?? 0) || dto.amountMinor > (summary.balances[dto.toUserId] ?? 0)) throw new BadRequestException("Payment exceeds the outstanding balance.");
+    if (
+      !Number.isSafeInteger(dto.amountMinor) ||
+      dto.amountMinor <= 0 ||
+      dto.fromUserId === dto.toUserId
+    )
+      throw new BadRequestException(
+        "Choose different friends and a positive payment amount.",
+      );
+    if (dto.currency && dto.currency !== group.currency)
+      throw new BadRequestException("Use the group currency.");
+    const summary = await this.getGroupBalancesAndSimplifiedDebts(
+      userId,
+      groupId,
+    );
+    if (
+      dto.amountMinor > -(summary.balances[dto.fromUserId] ?? 0) ||
+      dto.amountMinor > (summary.balances[dto.toUserId] ?? 0)
+    )
+      throw new BadRequestException("Payment exceeds the outstanding balance.");
     const amountMinor = BigInt(dto.amountMinor);
     let highestCursor: bigint | undefined;
 

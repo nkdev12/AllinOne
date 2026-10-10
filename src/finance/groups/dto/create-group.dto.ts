@@ -1,6 +1,15 @@
 import { Type } from "class-transformer";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { IsArray, IsBoolean, ArrayMaxSize, ValidateNested, IsNotEmpty, IsOptional, IsString, MaxLength } from "class-validator";
+import {
+  IsArray,
+  IsBoolean,
+  ArrayMaxSize,
+  ValidateNested,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  MaxLength,
+} from "class-validator";
 
 export class GroupMemberDto {
   @IsString() @IsNotEmpty() @MaxLength(100) id!: string;
@@ -10,7 +19,10 @@ export class GroupMemberDto {
 
 export class CreateGroupDto {
   @ApiPropertyOptional({ type: [GroupMemberDto] })
-  @IsOptional() @IsArray() @ArrayMaxSize(100) @ValidateNested({ each: true })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(100)
+  @ValidateNested({ each: true })
   @Type(() => GroupMemberDto)
   members?: GroupMemberDto[];
 
