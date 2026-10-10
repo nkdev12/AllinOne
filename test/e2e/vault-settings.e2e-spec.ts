@@ -47,6 +47,16 @@ describe("Vault settings endpoints (E2E)", () => {
     wrappedMasterTag: "dGFn",
   };
 
+  const recoveryBody = {
+    masterKeyHash: "new-verifier",
+    keySalt: Buffer.alloc(16, 1).toString("base64"),
+    passwordWrappedKey: Buffer.alloc(32, 2).toString("base64"),
+    passwordWrappedIv: Buffer.alloc(12, 3).toString("base64"),
+    passwordWrappedTag: Buffer.alloc(16, 4).toString("base64"),
+    kdfIterations: 3,
+    kdfMemory: 65536,
+  };
+
   beforeAll(async () => {
     prisma = {
       vaultSetting: {
@@ -54,6 +64,17 @@ describe("Vault settings endpoints (E2E)", () => {
         upsert: jest.fn().mockImplementation(async ({ create }) => {
           row = { id: "vault-row", ...create, updatedAt: new Date() };
           return row;
+        }),
+        updateMany: jest.fn().mockImplementation(async ({ where, data }) => {
+          if (
+            !row ||
+            row.masterKeyHash !== where.masterKeyHash ||
+            row.recoveryGrantedAt?.getTime() !==
+              where.recoveryGrantedAt?.getTime()
+          )
+            return { count: 0 };
+          row = { ...row, ...data };
+          return { count: 1 };
         }),
         update: jest.fn().mockImplementation(async ({ data }) => {
           row = { ...(row ?? {}), ...data };
@@ -283,11 +304,60 @@ describe("Vault settings endpoints (E2E)", () => {
       const response = await request(app.getHttpServer())
         .post("/vault/settings/recovery/complete")
         .set(auth())
-        .send(setupBody)
+        .send(recoveryBody)
         .expect(401);
 
       expect(response.body.code).toBe("VAULT_RECOVERY_NOT_PENDING");
       expect(row?.wrappedMasterKey).toBe(setupBody.wrappedMasterKey);
+    });
+
+    it("completes recovery atomically, preserves the old recovery blob, and supports retry", async () => {
+      await request(app.getHttpServer())
+        .post("/vault/settings/setup")
+        .set(auth())
+        .send(setupBody)
+        .expect(201);
+      await request(app.getHttpServer())
+        .post("/vault/settings/recovery/verify")
+        .set(auth())
+        .send({ otp: "246810" })
+        .expect(200);
+      const completed = await request(app.getHttpServer())
+        .post("/vault/settings/recovery/complete")
+        .set(auth())
+        .send(recoveryBody)
+        .expect(200);
+      expect(completed.body.passwordWrappedKey).toBe(
+        recoveryBody.passwordWrappedKey,
+      );
+      expect(row?.recoveryKey).toBe(setupBody.recoveryKey);
+      expect(row?.wrappedMasterKey).toBe(setupBody.wrappedMasterKey);
+      await request(app.getHttpServer())
+        .post("/vault/settings/recovery/complete")
+        .set(auth())
+        .send(recoveryBody)
+        .expect(200);
+      await request(app.getHttpServer())
+        .post("/vault/settings/unlock")
+        .set(auth())
+        .send({ masterKeyHash: recoveryBody.masterKeyHash })
+        .expect(400);
+      await request(app.getHttpServer())
+        .post("/vault/settings/unlock")
+        .set(auth())
+        .send({
+          masterKeyHash: recoveryBody.masterKeyHash,
+          keyEnvelopeVersion: 1,
+        })
+        .expect(200);
+    });
+
+    it("rejects old destructive recovery requests at validation", async () => {
+      await request(app.getHttpServer())
+        .post("/vault/settings/recovery/complete")
+        .set(auth())
+        .send(setupBody)
+        .expect(400);
     });
 
     it("spends a code and hands back the wrapped key, but not the verifier", async () => {

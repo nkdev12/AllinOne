@@ -14,7 +14,10 @@ import {
   notFound,
   unauthorized,
 } from "@/common/errors/http-errors";
-import { SetupVaultDto } from "../dto/setup-vault.dto";
+import {
+  SetupVaultDto,
+  CompleteVaultRecoveryDto,
+} from "../dto/setup-vault.dto";
 import { UnlockVaultDto } from "../dto/unlock-vault.dto";
 
 const RECOVERY_OTP_TTL_MINUTES = 15;
@@ -163,6 +166,9 @@ export class VaultSettingsService {
       keySalt: setting.keySalt,
       kdfIterations: setting.kdfIterations,
       kdfMemory: setting.kdfMemory,
+      passwordWrappedKey: setting.passwordWrappedKey ?? null,
+      passwordWrappedIv: setting.passwordWrappedIv ?? null,
+      passwordWrappedTag: setting.passwordWrappedTag ?? null,
       updatedAt: setting.updatedAt,
     };
   }
@@ -176,6 +182,13 @@ export class VaultSettingsService {
       throw notFound(
         ErrorCode.VAULT_NOT_CONFIGURED,
         "Password vault has not been configured yet.",
+      );
+    }
+
+    if (setting.passwordWrappedKey && dto.keyEnvelopeVersion !== 1) {
+      throw badRequest(
+        ErrorCode.VALIDATION_ERROR,
+        "Update this app to unlock the recovered vault safely.",
       );
     }
 
@@ -375,60 +388,80 @@ export class VaultSettingsService {
     };
   }
 
-  /** Stores the re-keyed vault settings once the client has re-encrypted. */
-  async completeRecovery(userId: string, dto: SetupVaultDto) {
-    // A rotation without new recovery material would leave the previous
-    // wrappedMasterKey in place: it wraps the *old* master key under the old
-    // recoveryKey, so the next recovery would hand back a key that opens
-    // nothing. Refuse instead of silently storing a stale wrap.
-    assertRecoveryMaterialComplete(
-      dto,
-      "Completing a vault recovery requires the new recovery material.",
-    );
-
+  /** Atomically changes the password wrapper; all entry ciphertext stays valid. */
+  async completeRecovery(userId: string, dto: CompleteVaultRecoveryDto) {
+    if (
+      !dto.passwordWrappedKey ||
+      !dto.passwordWrappedIv ||
+      !dto.passwordWrappedTag
+    ) {
+      throw badRequest(
+        ErrorCode.VALIDATION_ERROR,
+        "Update this app to recover the vault without re-encrypting entries.",
+      );
+    }
     const existing = await this.prisma.vaultSetting.findUnique({
       where: { userId },
     });
-    const grantedAt = existing?.recoveryGrantedAt?.getTime() ?? 0;
-    const grantExpires = grantedAt + RECOVERY_OTP_TTL_MINUTES * 60 * 1000;
-    if (!existing || Date.now() > grantExpires) {
+    if (!existing) {
+      throw unauthorized(
+        ErrorCode.VAULT_RECOVERY_NOT_PENDING,
+        "Verify a recovery code first.",
+      );
+    }
+    // Retrying after a lost response must not require a second recovery code.
+    if (
+      existing.keySalt === dto.keySalt &&
+      this.matchesVerifier(existing.masterKeyHash, dto.masterKeyHash) &&
+      existing.passwordWrappedKey === dto.passwordWrappedKey &&
+      existing.passwordWrappedIv === dto.passwordWrappedIv &&
+      existing.passwordWrappedTag === dto.passwordWrappedTag
+    ) {
+      return this.getVaultSettings(userId);
+    }
+    const grantedAt = existing.recoveryGrantedAt;
+    if (
+      !grantedAt ||
+      Date.now() > grantedAt.getTime() + RECOVERY_OTP_TTL_MINUTES * 60 * 1000
+    ) {
       throw unauthorized(
         ErrorCode.VAULT_RECOVERY_NOT_PENDING,
         "Recovery grant has expired. Verify a recovery code again.",
       );
     }
-
-    const vaultSetting = await this.prisma.vaultSetting.update({
-      where: { userId },
+    const result = await this.prisma.vaultSetting.updateMany({
+      where: {
+        userId,
+        recoveryGrantedAt: grantedAt,
+        masterKeyHash: existing.masterKeyHash,
+      },
       data: {
         masterKeyHash: this.pepperedVerifier(dto.masterKeyHash),
         keySalt: dto.keySalt,
-        // The shipped client's parameters, not `existing`'s: this write follows
-        // a fresh salt and a freshly derived key, so inheriting the old row
-        // would keep a placeholder alive forever on every vault that recovers.
-        kdfIterations: dto.kdfIterations ?? DEFAULT_KDF_ITERATIONS,
-        kdfMemory: dto.kdfMemory ?? DEFAULT_KDF_MEMORY_KIB,
-        recoveryKey: dto.recoveryKey,
-        wrappedMasterKey: dto.wrappedMasterKey,
-        wrappedMasterIv: dto.wrappedMasterIv,
-        wrappedMasterTag: dto.wrappedMasterTag,
+        kdfIterations: dto.kdfIterations,
+        kdfMemory: dto.kdfMemory,
+        passwordWrappedKey: dto.passwordWrappedKey,
+        passwordWrappedIv: dto.passwordWrappedIv,
+        passwordWrappedTag: dto.passwordWrappedTag,
         recoveryGrantedAt: null,
+        unlockFailedAttempts: 0,
+        unlockLockedUntil: null,
+        // Keep the existing recovery key and wrap: they still wrap the SAME
+        // data key, including entries absent from this client's local cache.
       },
     });
-
+    if (result.count !== 1) {
+      throw conflict(
+        ErrorCode.VAULT_RECOVERY_NOT_PENDING,
+        "Vault recovery changed. Verify a new recovery code.",
+      );
+    }
     await this.auditLogService?.recordAuditLog({
       userId,
       action: AuditAction.PASSWORD_CHANGED,
       resourceType: "vault",
     });
-
-    return {
-      isVaultConfigured: vaultSetting.isVaultConfigured,
-      keySalt: vaultSetting.keySalt,
-      kdfIterations: vaultSetting.kdfIterations,
-      kdfMemory: vaultSetting.kdfMemory,
-      updatedAt: vaultSetting.updatedAt,
-    };
+    return this.getVaultSettings(userId);
   }
 }
 

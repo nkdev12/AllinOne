@@ -6,6 +6,8 @@ import {
   IsString,
   Min,
   Length,
+  IsBase64,
+  Equals,
 } from "class-validator";
 
 export class SetupVaultDto {
@@ -83,4 +85,33 @@ export class VerifyVaultRecoveryDto {
   @IsString()
   @Length(6, 6)
   otp!: string;
+}
+
+/** Recovery changes the password wrapper, never the entry encryption key. */
+export class CompleteVaultRecoveryDto {
+  @IsString()
+  @IsNotEmpty()
+  masterKeyHash!: string;
+
+  @IsBase64()
+  @Length(24, 24)
+  keySalt!: string;
+
+  @IsBase64()
+  @Length(44, 44)
+  passwordWrappedKey!: string;
+
+  @IsBase64()
+  @Length(16, 16)
+  passwordWrappedIv!: string;
+
+  @IsBase64()
+  @Length(24, 24)
+  passwordWrappedTag!: string;
+
+  @Equals(3)
+  kdfIterations!: number;
+
+  @Equals(65536)
+  kdfMemory!: number;
 }

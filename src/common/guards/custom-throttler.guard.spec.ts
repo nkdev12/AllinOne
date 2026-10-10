@@ -109,13 +109,13 @@ describe("CustomThrottlerGuard", () => {
       );
     });
 
-    it("falls back to the client address from the proxy chain", async () => {
+    it("ignores spoofed forwarding headers and uses the resolved address", async () => {
       expect(
         await getTracker({
           headers: { "x-forwarded-for": "203.0.113.7, 10.0.0.1" },
           ip: "10.0.0.1",
         }),
-      ).toBe("ip:203.0.113.7");
+      ).toBe("ip:10.0.0.1");
     });
   });
 });

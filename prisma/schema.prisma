@@ -753,14 +753,19 @@ model VaultSetting {
   isVaultConfigured Boolean  @default(true)
 
   // Master-password recovery: recoveryKey wraps the master key so an
-  // OTP-verified reset can decrypt and re-encrypt the vault instead of
+  // OTP-verified reset can rewrap the stable data key instead of
   // destroying it. The trade-off is that the server now holds material that
   // can recover any vault, so this is no longer zero-knowledge.
   recoveryKey       String?
   wrappedMasterKey  String?
   wrappedMasterIv   String?
   wrappedMasterTag  String?
-  // Set when a recovery OTP is spent; the re-encryption upload must land
+  // Password-derived key wraps the stable data key after password recovery.
+  // Missing fields denote the legacy password-derived data key format.
+  passwordWrappedKey String?
+  passwordWrappedIv  String?
+  passwordWrappedTag String?
+  // Set when a recovery OTP is spent; the password wrapper must be stored
   // before this deadline, otherwise the recovery grant expires.
   recoveryGrantedAt DateTime?
   // Failed master-password verifications, counted here and never on `User`: a

@@ -43,10 +43,11 @@ describe("VaultSettingsService recovery", () => {
   const newKeyMaterial = {
     masterKeyHash: "new-hash",
     keySalt: "new-salt",
-    recoveryKey: "new-recovery-key",
-    wrappedMasterKey: "new-wrapped",
-    wrappedMasterIv: "new-iv",
-    wrappedMasterTag: "new-tag",
+    passwordWrappedKey: "new-password-wrap",
+    passwordWrappedIv: "new-iv",
+    passwordWrappedTag: "new-tag",
+    kdfIterations: 3,
+    kdfMemory: 65536,
   };
 
   beforeEach(async () => {
@@ -58,6 +59,13 @@ describe("VaultSettingsService recovery", () => {
           .mockImplementation(({ data }) =>
             Promise.resolve({ ...setting, ...data }),
           ),
+        updateMany: jest.fn().mockImplementation(async ({ data }) => {
+          prisma.vaultSetting.findUnique.mockResolvedValue({
+            ...setting,
+            ...data,
+          });
+          return { count: 1 };
+        }),
         upsert: jest.fn(),
       },
     };
@@ -152,7 +160,7 @@ describe("VaultSettingsService recovery", () => {
     } as any);
 
     expect(result.keySalt).toBe("new-salt");
-    expect(prisma.vaultSetting.update).toHaveBeenCalledWith(
+    expect(prisma.vaultSetting.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           masterKeyHash: peppered("new-hash"),
@@ -195,6 +203,55 @@ describe("VaultSettingsService recovery", () => {
       } as any),
     ).rejects.toThrow(BadRequestException);
     expect(prisma.vaultSetting.update).not.toHaveBeenCalled();
+  });
+
+  it("preserves recovery material and never touches entry ciphertext", async () => {
+    prisma.vaultSetting.findUnique.mockResolvedValue({
+      ...setting,
+      recoveryGrantedAt: new Date(),
+    });
+    await service.completeRecovery("user-1", newKeyMaterial);
+    const { data } = prisma.vaultSetting.updateMany.mock.calls[0][0];
+    expect(data).not.toHaveProperty("recoveryKey");
+    expect(data).not.toHaveProperty("wrappedMasterKey");
+    expect(data.passwordWrappedKey).toBe(newKeyMaterial.passwordWrappedKey);
+  });
+
+  it("allows an identical completion retry after a lost response", async () => {
+    prisma.vaultSetting.findUnique.mockResolvedValue({
+      ...setting,
+      recoveryGrantedAt: new Date(),
+    });
+    await service.completeRecovery("user-1", newKeyMaterial);
+    await service.completeRecovery("user-1", newKeyMaterial);
+    expect(prisma.vaultSetting.updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a recovery grant consumed by a concurrent request", async () => {
+    prisma.vaultSetting.findUnique.mockResolvedValue({
+      ...setting,
+      recoveryGrantedAt: new Date(),
+    });
+    prisma.vaultSetting.updateMany.mockResolvedValue({ count: 0 });
+    await expect(
+      service.completeRecovery("user-1", newKeyMaterial),
+    ).rejects.toThrow("Vault recovery changed");
+  });
+
+  it("refuses legacy clients access to the wrapped-key format", async () => {
+    prisma.vaultSetting.findUnique.mockResolvedValue({
+      ...setting,
+      passwordWrappedKey: "wrapped-data-key",
+    });
+    await expect(
+      service.unlockVault("user-1", { masterKeyHash: "old-hash" }),
+    ).rejects.toThrow("Update this app");
+    await expect(
+      service.unlockVault("user-1", {
+        masterKeyHash: "old-hash",
+        keyEnvelopeVersion: 1,
+      }),
+    ).resolves.toHaveProperty("success", true);
   });
 
   it("accepts the stored master-key verifier", async () => {
@@ -321,7 +378,7 @@ describe("VaultSettingsService recovery", () => {
 
     await service.completeRecovery("user-1", newKeyMaterial as any);
 
-    const { data } = prisma.vaultSetting.update.mock.calls.at(-1)[0];
+    const { data } = prisma.vaultSetting.updateMany.mock.calls.at(-1)[0];
     expect(data.kdfIterations).toBe(3);
     expect(data.kdfMemory).toBe(65536);
   });

@@ -1,5 +1,5 @@
 import { ApiProperty } from "@nestjs/swagger";
-import { IsNotEmpty, IsString } from "class-validator";
+import { IsNotEmpty, IsString, IsOptional, Equals } from "class-validator";
 
 export class UnlockVaultDto {
   @ApiProperty({
@@ -10,4 +10,8 @@ export class UnlockVaultDto {
   @IsString()
   @IsNotEmpty()
   masterKeyHash!: string;
+
+  @IsOptional()
+  @Equals(1)
+  keyEnvelopeVersion?: number;
 }

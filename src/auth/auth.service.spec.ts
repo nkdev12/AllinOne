@@ -81,6 +81,9 @@ describe("AuthService", () => {
       authentication: {
         create: jest.fn().mockResolvedValue({ id: "auth-1" }),
         findFirst: jest.fn(),
+        findMany: jest
+          .fn()
+          .mockResolvedValue([{ id: "oauth-1", userId: "user-uuid-123" }]),
         findUnique: jest.fn().mockResolvedValue({ id: "auth-1" }),
         update: jest.fn().mockResolvedValue({ id: "auth-1" }),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
@@ -155,7 +158,7 @@ describe("AuthService", () => {
 
     (generateSecret as jest.Mock).mockReturnValue("MOCKSECRET123");
     (generateURI as jest.Mock).mockReturnValue("otpauth://totp/mock");
-    (verify as jest.Mock).mockReturnValue(true);
+    (verify as jest.Mock).mockResolvedValue({ valid: true });
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -555,7 +558,7 @@ describe("AuthService", () => {
     });
 
     it("completes the sign-in the challenge started", async () => {
-      (verify as jest.Mock).mockReturnValue(true);
+      (verify as jest.Mock).mockResolvedValue({ valid: true });
 
       const result = await service.verifyMfaLogin({
         mfaToken: "mfa-token",
@@ -567,7 +570,7 @@ describe("AuthService", () => {
     });
 
     it("refuses a code the authenticator did not produce", async () => {
-      (verify as jest.Mock).mockReturnValue(false);
+      (verify as jest.Mock).mockResolvedValue({ valid: false });
 
       const thrown = (await service
         .verifyMfaLogin({ mfaToken: "mfa-token", totpCode: "000000" })
@@ -580,7 +583,7 @@ describe("AuthService", () => {
     });
 
     it("locks account when 5 failed MFA attempts occur", async () => {
-      (verify as jest.Mock).mockReturnValue(false);
+      (verify as jest.Mock).mockResolvedValue({ valid: false });
       usersService.getUserById.mockResolvedValue({
         ...mockUser,
         failedLoginAttempts: 4,
@@ -625,10 +628,12 @@ describe("AuthService", () => {
   describe("MFA secret encryption", () => {
     it("stores encrypted totpSecret and verifies successfully with decrypted secret", async () => {
       let storedSecret: string | null = null;
-      prismaService.mFASetting.upsert.mockImplementation(async ({ create }: any) => {
-        storedSecret = create.totpSecret;
-        return { ...mockMfaSetting, totpSecret: storedSecret };
-      });
+      prismaService.mFASetting.upsert.mockImplementation(
+        async ({ create }: any) => {
+          storedSecret = create.totpSecret;
+          return { ...mockMfaSetting, totpSecret: storedSecret };
+        },
+      );
 
       const genResult = await service.generateMfaSecret("user-uuid-123");
       expect(genResult.secret).toBe("MOCKSECRET123");
@@ -646,6 +651,84 @@ describe("AuthService", () => {
           secret: "MOCKSECRET123",
         }),
       );
+    });
+  });
+
+  describe("security regressions", () => {
+    it("refuses to replace enabled MFA even with a valid session", async () => {
+      prismaService.mFASetting.findUnique.mockResolvedValue(mockMfaSetting);
+      await expect(service.generateMfaSecret(mockUser.id)).rejects.toThrow(
+        "Disable existing MFA",
+      );
+      expect(prismaService.mFASetting.upsert).not.toHaveBeenCalled();
+    });
+
+    it("accepts a real asynchronous otplib verification result", async () => {
+      const actual = jest.requireActual("otplib");
+      const secret = actual.generateSecret();
+      const token = await actual.generate({ secret });
+      (verify as jest.Mock).mockImplementation(actual.verify);
+      prismaService.mFASetting.findUnique.mockResolvedValue({
+        ...mockMfaSetting,
+        totpEnabled: false,
+        totpSecret: secret,
+      });
+      await expect(
+        service.enableMfa(mockUser.id, { totpCode: token }),
+      ).resolves.toHaveProperty("recoveryCodes");
+    });
+
+    it("never attaches an unbound provider identity to an existing email", async () => {
+      prismaService.authentication.findMany.mockResolvedValue([]);
+      await expect(
+        (service as any).processOAuthLogin(
+          "GOOGLE",
+          "unbound-sub",
+          mockUser.email,
+        ),
+      ).rejects.toMatchObject({
+        response: { code: ErrorCode.EMAIL_ALREADY_REGISTERED },
+      });
+      expect(prismaService.authentication.create).not.toHaveBeenCalled();
+      expect(prismaService.session.create).not.toHaveBeenCalled();
+    });
+
+    it("uses the bound provider subject even after its email changes", async () => {
+      const result = await (service as any).processOAuthLogin(
+        "GOOGLE",
+        "bound-sub",
+        "changed@example.com",
+      );
+      expect(usersService.getUserById).toHaveBeenCalledWith(mockUser.id);
+      expect(prismaService.user.findFirst).not.toHaveBeenCalled();
+      expect(result.user.id).toBe(mockUser.id);
+    });
+
+    it("requires account MFA after OAuth instead of issuing session tokens", async () => {
+      prismaService.mFASetting.findUnique.mockResolvedValue(mockMfaSetting);
+      const result = await (service as any).processOAuthLogin(
+        "GOOGLE",
+        "bound-sub",
+        mockUser.email,
+      );
+      expect(result.mfaRequired).toBe(true);
+      expect(result.tokens).toBeUndefined();
+      expect(prismaService.session.create).not.toHaveBeenCalled();
+    });
+
+    it("rejects ambiguous legacy provider bindings", async () => {
+      prismaService.authentication.findMany.mockResolvedValue([
+        { userId: "a" },
+        { userId: "b" },
+      ]);
+      await expect(
+        (service as any).processOAuthLogin(
+          "GOOGLE",
+          "duplicate-sub",
+          mockUser.email,
+        ),
+      ).rejects.toThrow("Ambiguous OAuth identity");
+      expect(prismaService.session.create).not.toHaveBeenCalled();
     });
   });
 
@@ -693,9 +776,9 @@ describe("AuthService", () => {
 
     it("fails closed if Apple client ID is not configured", async () => {
       (configService as any).appleClientId = undefined;
-      await expect(
-        service.verifyAppleToken("some-id-token"),
-      ).rejects.toThrow(UnauthorizedException);
+      await expect(service.verifyAppleToken("some-id-token")).rejects.toThrow(
+        UnauthorizedException,
+      );
     });
 
     it("fails closed if Microsoft client ID is not configured", async () => {
@@ -706,7 +789,7 @@ describe("AuthService", () => {
     });
 
     it("rejects OAuth login if user account is deleted or inactive", async () => {
-      prismaService.user.findFirst.mockResolvedValue({
+      usersService.getUserById.mockResolvedValue({
         ...mockUser,
         deletedAt: new Date(),
       });
@@ -843,7 +926,10 @@ describe("AuthService", () => {
     };
 
     it("should successfully refresh tokens and update session", async () => {
-      jwtService.verify.mockReturnValue({ sub: "user-uuid-123", type: "refresh" });
+      jwtService.verify.mockReturnValue({
+        sub: "user-uuid-123",
+        type: "refresh",
+      });
       prismaService.session.findUnique.mockResolvedValue(mockSession);
       prismaService.session.update.mockResolvedValue({
         ...mockSession,
@@ -868,7 +954,10 @@ describe("AuthService", () => {
     });
 
     it("tolerates concurrent requests using rotated token within grace period", async () => {
-      jwtService.verify.mockReturnValue({ sub: "user-uuid-123", type: "refresh" });
+      jwtService.verify.mockReturnValue({
+        sub: "user-uuid-123",
+        type: "refresh",
+      });
       prismaService.session.findUnique.mockResolvedValue(mockSession);
       prismaService.session.update.mockResolvedValue(mockSession);
 
@@ -888,8 +977,12 @@ describe("AuthService", () => {
         refreshToken: "race-refresh-token",
       });
 
-      expect(secondResult.tokens.accessToken).toBe(firstResult.tokens.accessToken);
-      expect(secondResult.tokens.refreshToken).toBe(firstResult.tokens.refreshToken);
+      expect(secondResult.tokens.accessToken).toBe(
+        firstResult.tokens.accessToken,
+      );
+      expect(secondResult.tokens.refreshToken).toBe(
+        firstResult.tokens.refreshToken,
+      );
       expect(secondResult.deviceId).toBe("device-uuid-456");
     });
 

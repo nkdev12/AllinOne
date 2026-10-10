@@ -17,7 +17,11 @@ import {
 import { VaultSettingsService } from "../services/vault-settings.service";
 import { JwtAuthGuard } from "@/auth/guards/jwt-auth.guard";
 import { GetUser } from "@/auth/decorators/get-user.decorator";
-import { SetupVaultDto, VerifyVaultRecoveryDto } from "../dto/setup-vault.dto";
+import {
+  CompleteVaultRecoveryDto,
+  SetupVaultDto,
+  VerifyVaultRecoveryDto,
+} from "../dto/setup-vault.dto";
 import { UnlockVaultDto } from "../dto/unlock-vault.dto";
 
 @ApiTags("Vault Settings")
@@ -114,8 +118,7 @@ export class VaultSettingsController {
   @HttpCode(HttpStatus.OK)
   @Throttle({ default: { limit: 3, ttl: 60000 } })
   @ApiOperation({
-    summary:
-      "Store the re-keyed master password parameters after re-encryption",
+    summary: "Wrap the existing vault key with the new master password",
   })
   @ApiResponse({ status: 200, description: "Vault master password rotated" })
   @ApiResponse({
@@ -127,13 +130,11 @@ export class VaultSettingsController {
   @ApiResponse({
     status: 400,
     description:
-      "Recovery material is incomplete (`VALIDATION_ERROR` with the missing " +
-      "fields) — a rotation that stores no new wrap would leave the previous, " +
-      "now useless one in place.",
+      "A complete password wrapper and supported KDF parameters are required.",
   })
   async completeRecovery(
     @GetUser("id") userId: string,
-    @Body() dto: SetupVaultDto,
+    @Body() dto: CompleteVaultRecoveryDto,
   ) {
     return this.settingsService.completeRecovery(userId, dto);
   }

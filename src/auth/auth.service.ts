@@ -63,7 +63,10 @@ export class AuthService {
    * without invalidating the session.
    */
   static readonly REFRESH_ROTATION_GRACE_MS = 30 * 1000;
-  private readonly rotatedTokensGraceMap = new Map<string, RotatedRefreshGraceRecord>();
+  private readonly rotatedTokensGraceMap = new Map<
+    string,
+    RotatedRefreshGraceRecord
+  >();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -540,7 +543,9 @@ export class AuthService {
 
       const appleClientId = this.configService.appleClientId;
       if (!appleClientId) {
-        throw new UnauthorizedException("Apple OAuth is not configured on this server");
+        throw new UnauthorizedException(
+          "Apple OAuth is not configured on this server",
+        );
       }
       const verifyOptions: jwt.VerifyOptions = {
         algorithms: ["RS256"],
@@ -549,7 +554,12 @@ export class AuthService {
       };
 
       const payload = jwt.verify(idToken, publicKey, verifyOptions) as any;
-      if (!payload || !payload.sub || !payload.email) {
+      if (
+        !payload ||
+        !payload.sub ||
+        !payload.email ||
+        ![true, "true"].includes(payload.email_verified)
+      ) {
         throw new UnauthorizedException("Invalid Apple ID token claims");
       }
       return {
@@ -586,7 +596,9 @@ export class AuthService {
 
       const microsoftClientId = this.configService.microsoftClientId;
       if (!microsoftClientId) {
-        throw new UnauthorizedException("Microsoft OAuth is not configured on this server");
+        throw new UnauthorizedException(
+          "Microsoft OAuth is not configured on this server",
+        );
       }
       const verifyOptions: jwt.VerifyOptions = {
         algorithms: ["RS256"],
@@ -623,7 +635,9 @@ export class AuthService {
   private async verifyGoogleToken(idToken: string) {
     const googleClientId = this.configService.googleClientId;
     if (!googleClientId) {
-      throw new UnauthorizedException("Google OAuth is not configured on this server");
+      throw new UnauthorizedException(
+        "Google OAuth is not configured on this server",
+      );
     }
     try {
       const ticket = await this.googleClient.verifyIdToken({
@@ -631,7 +645,7 @@ export class AuthService {
         audience: googleClientId,
       });
       const payload = ticket.getPayload();
-      if (!payload || !payload.email) {
+      if (!payload || !payload.email || !payload.email_verified) {
         throw new UnauthorizedException("Invalid Google ID token payload");
       }
       return {
@@ -661,53 +675,64 @@ export class AuthService {
   ): Promise<AuthResponseDto> {
     const normalizedEmail = email.toLowerCase();
 
-    let user = await this.prisma.user.findFirst({
-      where: { email: normalizedEmail },
+    // Provider subjects, not mutable email claims, identify returning users.
+    // Fail closed for ambiguous legacy links rather than choosing an account.
+    const links = await this.prisma.authentication.findMany({
+      where: { type: authType, identifier },
+      take: 2,
     });
-
-    if (user) {
-      if (user.deletedAt || user.status !== "ACTIVE") {
+    if (links.length > 1) {
+      throw new UnauthorizedException(
+        "Ambiguous OAuth identity; contact support",
+      );
+    }
+    let user;
+    if (links.length === 1) {
+      user = await this.usersService.getUserById(links[0].userId);
+      if (!user || user.deletedAt || user.status !== "ACTIVE") {
         throw unauthorized(
           ErrorCode.ACCOUNT_DISABLED,
           "User account is inactive or deleted",
         );
       }
-    } else {
-      user = await this.prisma.user.create({
-        data: {
-          email: normalizedEmail,
-          displayName: displayName || null,
-          avatar: avatar || null,
-          emailVerifiedAt: new Date(),
-          status: "ACTIVE",
-        },
-      });
-    }
-
-    let authRecord = await this.prisma.authentication.findUnique({
-      where: {
-        userId_type_identifier: {
-          userId: user.id,
-          type: authType,
-          identifier,
-        },
-      },
-    });
-
-    if (!authRecord) {
-      authRecord = await this.prisma.authentication.create({
-        data: {
-          userId: user.id,
-          type: authType,
-          identifier,
-          emailVerified: true,
-          lastUsedAt: new Date(),
-        },
-      });
-    } else {
       await this.prisma.authentication.update({
-        where: { id: authRecord.id },
+        where: { id: links[0].id },
         data: { lastUsedAt: new Date() },
+      });
+    } else {
+      const existing = await this.prisma.user.findFirst({
+        where: { email: normalizedEmail },
+      });
+      if (existing) {
+        throw conflict(
+          ErrorCode.EMAIL_ALREADY_REGISTERED,
+          "An account already uses this email. Sign in with its existing sign-in method.",
+        );
+      }
+      // Create the account and its provider binding together. An existing account
+      // can never acquire a new login identity through this unauthenticated path.
+      user = await this.prisma.$transaction(async (tx) => {
+        const created = await tx.user.create({
+          data: {
+            email: normalizedEmail,
+            displayName: displayName || null,
+            avatar: avatar || null,
+            status: "ACTIVE",
+            // Microsoft email/username claims are not proof of mailbox ownership.
+            emailVerifiedAt:
+              authType === AuthType.MICROSOFT ? null : new Date(),
+          },
+        });
+        await tx.authentication.create({
+          data: {
+            userId: created.id,
+            type: authType,
+            identifier,
+            emailVerified: authType !== AuthType.MICROSOFT,
+            lastUsedAt: new Date(),
+          },
+        });
+        return created;
       });
     }
 
@@ -730,6 +755,28 @@ export class AuthService {
           publicKey: dto?.publicKey || "",
         },
       });
+    }
+
+    const mfaSetting = await this.prisma.mFASetting.findUnique({
+      where: { userId: user.id },
+    });
+
+    if (mfaSetting && mfaSetting.totpEnabled && mfaSetting.totpSecret) {
+      const mfaToken = this.jwtService.sign(
+        {
+          sub: user.id,
+          email: user.email,
+          deviceId: device.id,
+          purpose: "MFA_CHALLENGE",
+          type: "mfa_challenge",
+        },
+        { secret: this.configService.jwtMfaSecret, expiresIn: "5m" },
+      );
+
+      return {
+        mfaRequired: true,
+        mfaToken,
+      };
     }
 
     const { tokens, session } = await this.issueSession({
@@ -1175,17 +1222,25 @@ export class AuthService {
     });
     const qrCodeDataUrl = await qrcode.toDataURL(otpauthUrl);
 
-    await this.prisma.mFASetting.upsert({
-      where: { userId },
-      create: {
-        userId,
-        totpSecret: this.encryptTotpSecret(secret),
-        totpEnabled: false,
-      },
-      update: {
-        totpSecret: this.encryptTotpSecret(secret),
-        totpEnabled: false,
-      },
+    await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.mFASetting.findUnique({ where: { userId } });
+      if (existing?.totpEnabled) {
+        throw new BadRequestException(
+          "Disable existing MFA with your password and current code before replacing it",
+        );
+      }
+      await tx.mFASetting.upsert({
+        where: { userId },
+        create: {
+          userId,
+          totpSecret: this.encryptTotpSecret(secret),
+          totpEnabled: false,
+        },
+        update: {
+          totpSecret: this.encryptTotpSecret(secret),
+          totpEnabled: false,
+        },
+      });
     });
 
     return {
@@ -1209,7 +1264,7 @@ export class AuthService {
       );
     }
 
-    const verifyRes = verify({
+    const verifyRes = await verify({
       token: dto.totpCode,
       secret: this.decryptTotpSecret(mfaSetting.totpSecret),
     });
@@ -1342,7 +1397,7 @@ export class AuthService {
     let isSecondFactorValid = false;
 
     if (dto.totpCode) {
-      const verifyRes = verify({
+      const verifyRes = await verify({
         token: dto.totpCode,
         secret: this.decryptTotpSecret(mfaSetting.totpSecret),
       });
@@ -1442,7 +1497,7 @@ export class AuthService {
     let isCodeValid = false;
 
     if (dto.totpCode) {
-      const verifyRes = verify({
+      const verifyRes = await verify({
         token: dto.totpCode,
         secret: this.decryptTotpSecret(mfaSetting.totpSecret),
       });
@@ -1557,7 +1612,11 @@ export class AuthService {
     email: string,
     sessionId?: string,
   ): Promise<AuthTokenDataDto> {
-    const basePayload = { sub: userId, email, ...(sessionId ? { sessionId } : {}) };
+    const basePayload = {
+      sub: userId,
+      email,
+      ...(sessionId ? { sessionId } : {}),
+    };
 
     // The seconds form, not the `JWT_*_EXPIRATION` string, goes to `sign()`:
     // then the `exp` stamped into the token and the `expiresIn` handed back for
