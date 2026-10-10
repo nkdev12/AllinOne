@@ -17,6 +17,7 @@ import { GetUser } from "@/auth/decorators/get-user.decorator";
 export class AnalyticsController {
   constructor(private readonly analyticsService: AnalyticsService) {}
 
+  @ApiQuery({ name: "currency", required: false, example: "INR" })
   @Get("spending-by-category")
   @ApiOperation({
     summary: "Get spending breakdown by category for a date range",
@@ -28,14 +29,17 @@ export class AnalyticsController {
     @GetUser("id") userId: string,
     @Query("startDate") startDate?: string,
     @Query("endDate") endDate?: string,
+    @Query("currency") currency = "INR",
   ) {
     return this.analyticsService.getSpendingByCategory(
       userId,
       startDate,
       endDate,
+      currency,
     );
   }
 
+  @ApiQuery({ name: "currency", required: false, example: "INR" })
   @Get("cash-flow")
   @ApiOperation({
     summary: "Get monthly income, expense, and net savings for a year",
@@ -45,16 +49,21 @@ export class AnalyticsController {
   async getCashFlow(
     @GetUser("id") userId: string,
     @Query("year") year?: string,
+    @Query("currency") currency = "INR",
   ) {
     const parsedYear = year ? parseInt(year, 10) : undefined;
-    return this.analyticsService.getCashFlow(userId, parsedYear);
+    return this.analyticsService.getCashFlow(userId, parsedYear, currency);
   }
 
+  @ApiQuery({ name: "currency", required: false, example: "INR" })
   @Get("net-worth")
   @ApiOperation({ summary: "Get total net worth, assets, and liabilities" })
   @ApiResponse({ status: 200, description: "Net worth breakdown" })
-  async getNetWorth(@GetUser("id") userId: string) {
-    return this.analyticsService.getNetWorth(userId);
+  async getNetWorth(
+    @GetUser("id") userId: string,
+    @Query("currency") currency = "INR",
+  ) {
+    return this.analyticsService.getNetWorth(userId, currency);
   }
 
   @Get("export")

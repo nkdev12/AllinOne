@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
-import { FinanceAccountType, FinanceTransactionType } from "@prisma/client";
+import { FinanceTransactionType } from "@prisma/client";
 
 export interface CategorySpending {
   categoryId: string | null;
@@ -34,6 +34,7 @@ export class AnalyticsService {
     userId: string,
     startDateStr?: string,
     endDateStr?: string,
+    currency = "INR",
   ) {
     const now = new Date();
     const start = startDateStr
@@ -46,6 +47,7 @@ export class AnalyticsService {
         where: {
           userId,
           type: FinanceTransactionType.EXPENSE,
+          currency: currency.toUpperCase(),
           deletedAt: null,
           transactionDate: {
             gte: start,
@@ -107,6 +109,7 @@ export class AnalyticsService {
     return {
       startDate: start.toISOString(),
       endDate: end.toISOString(),
+      currency: currency.toUpperCase(),
       totalSpendingMinor,
       categories: resultCategories,
     };
@@ -116,7 +119,7 @@ export class AnalyticsService {
   // Cash Flow (Income vs Expense over 12 Months)
   // -------------------------------------------------------------
 
-  async getCashFlow(userId: string, year?: number) {
+  async getCashFlow(userId: string, year?: number, currency = "INR") {
     const targetYear = year ?? new Date().getFullYear();
     const start = new Date(targetYear, 0, 1);
     const end = new Date(targetYear, 11, 31, 23, 59, 59, 999);
@@ -124,6 +127,7 @@ export class AnalyticsService {
     const transactions = await this.prisma.financeTransaction.findMany({
       where: {
         userId,
+        currency: currency.toUpperCase(),
         deletedAt: null,
         transactionDate: {
           gte: start,
@@ -192,6 +196,7 @@ export class AnalyticsService {
       totalIncomeMinor,
       totalExpenseMinor,
       totalNetSavingsMinor,
+      currency: currency.toUpperCase(),
       overallSavingsRate,
       months,
     };
@@ -201,45 +206,52 @@ export class AnalyticsService {
   // Net Worth (Assets vs Liabilities)
   // -------------------------------------------------------------
 
-  async getNetWorth(userId: string) {
-    const accounts = await this.prisma.financeAccount.findMany({
-      where: {
-        userId,
-        deletedAt: null,
-        isArchived: false,
-      },
-    });
-
+  async getNetWorth(userId: string, currency = "INR") {
+    currency = currency.toUpperCase();
+    const [accounts, loans] = await Promise.all([
+      this.prisma.financeAccount.findMany({
+        where: { userId, deletedAt: null, isArchived: false, currency },
+      }),
+      // Loan records currently use INR; they have no currency field.
+      currency === "INR"
+        ? this.prisma.financeLoan.findMany({
+            where: { userId, deletedAt: null, isSettled: false },
+          })
+        : Promise.resolve([]),
+    ]);
     let totalAssetsMinor = 0;
     let totalLiabilitiesMinor = 0;
-
     const formattedAccounts = accounts.map((acc) => {
       const balance = Number(acc.currentBalanceMinor);
-      const isLiability = acc.type === FinanceAccountType.CREDIT;
-
-      if (isLiability) {
-        totalLiabilitiesMinor += Math.abs(balance);
-      } else {
-        totalAssetsMinor += balance;
-      }
-
+      // All account balances are signed, including credit and overdrafts.
+      if (balance >= 0) totalAssetsMinor += balance;
+      else totalLiabilitiesMinor -= balance;
       return {
         id: acc.id,
         name: acc.name,
         type: acc.type,
         currency: acc.currency,
         currentBalanceMinor: balance,
-        isLiability,
+        isLiability: balance < 0,
       };
     });
-
-    const netWorthMinor = totalAssetsMinor - totalLiabilitiesMinor;
-
+    let remainingLentMinor = 0;
+    let remainingBorrowedMinor = 0;
+    for (const loan of loans) {
+      if (loan.deletedAt || loan.isSettled) continue;
+      const remaining = Math.max(0, Number(loan.remainingAmountMinor));
+      if (loan.type === "LENT") remainingLentMinor += remaining;
+      if (loan.type === "BORROWED") remainingBorrowedMinor += remaining;
+    }
+    totalAssetsMinor += remainingLentMinor;
+    totalLiabilitiesMinor += remainingBorrowedMinor;
     return {
       totalAssetsMinor,
       totalLiabilitiesMinor,
-      netWorthMinor,
-      currency: accounts[0]?.currency ?? "INR",
+      netWorthMinor: totalAssetsMinor - totalLiabilitiesMinor,
+      remainingLentMinor,
+      remainingBorrowedMinor,
+      currency,
       accounts: formattedAccounts,
     };
   }

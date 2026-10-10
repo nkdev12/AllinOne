@@ -94,6 +94,17 @@ export class TransactionsService {
       );
     }
 
+    if (
+      (dto.currency ?? account.currency).toUpperCase() !==
+      account.currency.toUpperCase()
+    ) {
+      throw new BadRequestException(
+        "Transaction currency must match the account.",
+      );
+    }
+    if (account.isArchived)
+      throw new BadRequestException("Account is archived.");
+
     if (dto.type === FinanceTransactionType.TRANSFER) {
       if (!dto.toAccountId) {
         throw new BadRequestException("Transfer requires toAccountId.");
@@ -109,8 +120,24 @@ export class TransactionsService {
           `Destination account with ID '${dto.toAccountId}' not found.`,
         );
       }
+      if (
+        toAccount.isArchived ||
+        toAccount.currency.toUpperCase() !== account.currency.toUpperCase()
+      ) {
+        throw new BadRequestException(
+          "Transfers require active accounts in the same currency.",
+        );
+      }
     }
 
+    if (dto.type !== FinanceTransactionType.TRANSFER && dto.toAccountId) {
+      throw new BadRequestException(
+        "Only transfers can have a destination account.",
+      );
+    }
+    if (!Number.isSafeInteger(dto.amountMinor)) {
+      throw new BadRequestException("amountMinor must be a safe integer.");
+    }
     const amountMinor = BigInt(Math.round(dto.amountMinor));
     if (amountMinor <= BigInt(0)) {
       throw new BadRequestException("amountMinor must be greater than zero.");
@@ -127,7 +154,7 @@ export class TransactionsService {
           categoryId: dto.categoryId,
           type: dto.type,
           amountMinor,
-          currency: dto.currency ?? account.currency,
+          currency: account.currency,
           title: dto.title,
           notes: dto.notes,
           tags: dto.tags ?? [],
@@ -256,6 +283,12 @@ export class TransactionsService {
       );
     }
 
+    if (
+      dto.amountMinor !== undefined &&
+      !Number.isSafeInteger(dto.amountMinor)
+    ) {
+      throw new BadRequestException("amountMinor must be a safe integer.");
+    }
     const targetAccountId = dto.accountId ?? oldTx.accountId;
     const targetToAccountId =
       dto.toAccountId !== undefined ? dto.toAccountId : oldTx.toAccountId;
@@ -275,6 +308,39 @@ export class TransactionsService {
       }
       if (targetToAccountId === targetAccountId) {
         throw new BadRequestException("Cannot transfer to the same account.");
+      }
+    }
+
+    const account = await this.prisma.financeAccount.findFirst({
+      where: {
+        id: targetAccountId,
+        userId,
+        deletedAt: null,
+        isArchived: false,
+      },
+    });
+    if (!account) throw new NotFoundException("Source account not found.");
+    const currency = (dto.currency ?? oldTx.currency).toUpperCase();
+    if (currency !== account.currency.toUpperCase()) {
+      throw new BadRequestException(
+        "Transaction currency must match the account.",
+      );
+    }
+    if (targetType === FinanceTransactionType.TRANSFER) {
+      const destination = await this.prisma.financeAccount.findFirst({
+        where: {
+          id: targetToAccountId!,
+          userId,
+          deletedAt: null,
+          isArchived: false,
+        },
+      });
+      if (!destination)
+        throw new NotFoundException("Destination account not found.");
+      if (destination.currency.toUpperCase() !== currency) {
+        throw new BadRequestException(
+          "Transfers require accounts in the same currency.",
+        );
       }
     }
 
@@ -352,12 +418,15 @@ export class TransactionsService {
         where: { id },
         data: {
           accountId: targetAccountId,
-          toAccountId: targetToAccountId,
+          toAccountId:
+            targetType === FinanceTransactionType.TRANSFER
+              ? targetToAccountId
+              : null,
           categoryId:
             dto.categoryId !== undefined ? dto.categoryId : oldTx.categoryId,
           type: targetType,
           amountMinor: targetAmountMinor,
-          currency: dto.currency ?? oldTx.currency,
+          currency,
           title: dto.title ?? oldTx.title,
           notes: dto.notes !== undefined ? dto.notes : oldTx.notes,
           tags: dto.tags ?? oldTx.tags,
@@ -469,8 +538,13 @@ export class TransactionsService {
     userId: string,
     startDate?: string,
     endDate?: string,
+    currency = "INR",
   ) {
-    const where: any = { userId, deletedAt: null };
+    const where: any = {
+      userId,
+      deletedAt: null,
+      currency: currency.toUpperCase(),
+    };
     if (startDate || endDate) {
       where.transactionDate = {};
       if (startDate) where.transactionDate.gte = new Date(startDate);
@@ -498,6 +572,7 @@ export class TransactionsService {
     }
 
     return {
+      currency: currency.toUpperCase(),
       incomeMinor,
       expenseMinor,
       netMinor: incomeMinor - expenseMinor,

@@ -1,3 +1,4 @@
+import { validMembers, validShares } from "../finance/groups/group-validation";
 import { ChangeOperation } from "@prisma/client";
 import { ErrorCode } from "@/common/errors/error-code";
 import { badRequest } from "@/common/errors/http-errors";
@@ -1168,6 +1169,7 @@ const FINANCE_LOAN_FIELDS: ReadonlyArray<DocumentField> = [
 ];
 
 const FINANCE_GROUP_FIELDS: ReadonlyArray<DocumentField> = [
+  { key: "members", required: false, accepts: validMembers, expected: "up to 100 friends with unique IDs and names" },
   {
     key: "name",
     required: true,
@@ -1207,6 +1209,7 @@ const FINANCE_GROUP_FIELDS: ReadonlyArray<DocumentField> = [
 ];
 
 const FINANCE_SHARED_EXPENSE_FIELDS: ReadonlyArray<DocumentField> = [
+  { key: "shares", required: false, accepts: validShares, expected: "unique participants with non-negative integer shares" },
   {
     key: "groupId",
     required: false,

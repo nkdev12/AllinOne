@@ -1,4 +1,5 @@
-import { Logger } from "@nestjs/common";
+import { assertExpenseShares, validMembers } from "../finance/groups/group-validation";
+import { BadRequestException, ForbiddenException, Logger } from "@nestjs/common";
 import {
   ChangeOperation,
   EventStatus,
@@ -1466,12 +1467,15 @@ async function projectFinanceGroupChange(
     return;
   }
 
+  if (payload.members !== undefined && !validMembers(payload.members)) throw new BadRequestException("Invalid group friends.");
+
   if (!existing) {
     const createdAt = parsedCreatedAt(payload);
     await delegate.create({
       data: {
         id: change.entityId,
         ownerId: userId,
+        members: payload.members ?? [],
         name: typeof payload.name === "string" ? payload.name : "New Group",
         description: isTextOrNull(payload.description)
           ? payload.description
@@ -1493,6 +1497,7 @@ async function projectFinanceGroupChange(
   await delegate.update({
     where: { id: change.entityId },
     data: {
+      ...(payload.members !== undefined ? { members: payload.members } : {}),
       ...(typeof payload.name === "string" ? { name: payload.name } : {}),
       ...(payload.description !== undefined
         ? {
@@ -1516,6 +1521,17 @@ async function projectFinanceGroupChange(
   });
 }
 
+async function assertSharedScope(tx: ChangeProjectionClient, userId: string, refs: { groupId?: string | null; tripId?: string | null }, currency?: string): Promise<void> {
+  if (!refs.groupId && !refs.tripId) throw new BadRequestException("A group or trip is required.");
+  for (const [id, delegate] of [[refs.groupId, tx.financeGroup], [refs.tripId, tx.financeTrip]] as const) {
+    if (!id) continue;
+    const parent = await delegate?.findUnique({ where: { id } });
+    if (!parent || parent.ownerId !== userId || parent.deletedAt) throw new ForbiddenException("This group or trip is not available to you.");
+    const parentCurrency = 'currency' in parent ? parent.currency : parent.baseCurrency;
+    if (currency && parentCurrency !== currency) throw new BadRequestException("Use the group or trip currency.");
+  }
+}
+
 async function projectFinanceSharedExpenseChange(
   tx: ChangeProjectionClient,
   userId: string,
@@ -1527,8 +1543,13 @@ async function projectFinanceSharedExpenseChange(
 
   const existing = await delegate.findUnique({
     where: { id: change.entityId },
-    select: { paidByUserId: true, deletedAt: true, version: true },
+    select: { groupId: true, tripId: true, totalAmountMinor: true, deletedAt: true, version: true },
   });
+
+  if (existing) await assertSharedScope(tx, userId, existing);
+  if (change.operation !== ChangeOperation.DELETE) {
+    await assertSharedScope(tx, userId, { groupId: payload.groupId ?? existing?.groupId, tripId: payload.tripId ?? existing?.tripId }, payload.currency);
+  }
 
   if (change.operation === ChangeOperation.DELETE) {
     if (!existing) return;
@@ -1538,6 +1559,9 @@ async function projectFinanceSharedExpenseChange(
     });
     return;
   }
+
+  if (payload.shares !== undefined || !existing) assertExpenseShares(Number(payload.totalAmountMinor ?? existing?.totalAmountMinor), payload.shares);
+  const shareData = Array.isArray(payload.shares) ? payload.shares.map((share: any) => ({ userId: share.userId, owedAmountMinor: BigInt(share.owedAmountMinor), shareUnits: share.shareUnits ?? null })) : undefined;
 
   const totalAmountMinor = BigInt(
     Math.round(Number(payload.totalAmountMinor ?? 0)),
@@ -1558,6 +1582,7 @@ async function projectFinanceSharedExpenseChange(
         title:
           typeof payload.title === "string" ? payload.title : "Shared Expense",
         totalAmountMinor,
+        ...(shareData ? { shares: { create: shareData } } : {}),
         currency: payload.currency ?? "INR",
         splitType: (payload.splitType as any) ?? "EQUAL",
         date,
@@ -1596,6 +1621,7 @@ async function projectFinanceSharedExpenseChange(
         : {}),
       ...(typeof payload.title === "string" ? { title: payload.title } : {}),
       ...(payload.totalAmountMinor !== undefined ? { totalAmountMinor } : {}),
+      ...(shareData ? { shares: { deleteMany: {}, create: shareData } } : {}),
       ...(typeof payload.currency === "string"
         ? { currency: payload.currency }
         : {}),
@@ -1631,12 +1657,19 @@ async function projectFinanceSettlementChange(
   const existing = await delegate.findUnique({
     where: { id: change.entityId },
     select: {
+      groupId: true,
+      tripId: true,
       fromUserId: true,
       toUserId: true,
       deletedAt: true,
       version: true,
     },
   });
+
+  if (existing) await assertSharedScope(tx, userId, existing);
+  if (change.operation !== ChangeOperation.DELETE) {
+    await assertSharedScope(tx, userId, { groupId: payload.groupId ?? existing?.groupId, tripId: payload.tripId ?? existing?.tripId }, payload.currency);
+  }
 
   if (change.operation === ChangeOperation.DELETE) {
     if (!existing) return;
@@ -1647,6 +1680,9 @@ async function projectFinanceSettlementChange(
     return;
   }
 
+  const from = payload.fromUserId ?? existing?.fromUserId;
+  const to = payload.toUserId ?? existing?.toUserId;
+  if (!from || !to || from === to || (payload.amountMinor !== undefined && (!Number.isSafeInteger(payload.amountMinor) || payload.amountMinor <= 0))) throw new BadRequestException("Invalid payment.");
   const amountMinor = BigInt(Math.round(Number(payload.amountMinor ?? 0)));
   const date = payload.date ? new Date(payload.date) : new Date();
 

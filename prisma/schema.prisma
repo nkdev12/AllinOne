@@ -1074,6 +1074,7 @@ model FinanceLoan {
 }
 
 model FinanceGroup {
+  members     Json      @default("[]")
   id          String    @id @default(uuid()) @map("_id")
   ownerId     String
   name        String

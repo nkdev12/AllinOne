@@ -119,6 +119,7 @@ export class BudgetsService {
           account: { userId },
           type: FinanceTransactionType.EXPENSE,
           isExcludedFromBudget: false,
+          currency: "INR",
           deletedAt: null,
           transactionDate: {
             gte: startOfMonth,

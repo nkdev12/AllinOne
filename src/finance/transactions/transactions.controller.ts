@@ -53,6 +53,7 @@ export class TransactionsController {
     return this.transactionsService.getTransactions(userId, query);
   }
 
+  @ApiQuery({ name: "currency", required: false, example: "INR" })
   @Get("summary/cashflow")
   @ApiOperation({ summary: "Get cash flow summary for a date range" })
   @ApiQuery({ name: "startDate", required: false })
@@ -65,11 +66,13 @@ export class TransactionsController {
     @GetUser("id") userId: string,
     @Query("startDate") startDate?: string,
     @Query("endDate") endDate?: string,
+    @Query("currency") currency = "INR",
   ) {
     return this.transactionsService.getCashFlowSummary(
       userId,
       startDate,
       endDate,
+      currency,
     );
   }
 
