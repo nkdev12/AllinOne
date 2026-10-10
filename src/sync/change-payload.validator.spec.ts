@@ -694,6 +694,69 @@ describe("change-payload validator", () => {
     });
   });
 
+  describe("finance payloads", () => {
+    it("accepts valid finance_account, finance_category, and finance_transaction changes", () => {
+      expect(() =>
+        assertPushableChanges([
+          {
+            entityType: "finance_account",
+            operation: ChangeOperation.CREATE,
+            payload: {
+              name: "Checking",
+              type: "BANK",
+              currency: "INR",
+              openingBalanceMinor: 50000,
+              currentBalanceMinor: 50000,
+            },
+          },
+          {
+            entityType: "finance_category",
+            operation: ChangeOperation.CREATE,
+            payload: {
+              name: "Food",
+              type: "EXPENSE",
+            },
+          },
+          {
+            entityType: "finance_transaction",
+            operation: ChangeOperation.CREATE,
+            payload: {
+              accountId: "acc-1",
+              type: "EXPENSE",
+              amountMinor: 2500,
+              currency: "INR",
+              title: "Lunch",
+              transactionDate: "2026-10-10T12:00:00.000Z",
+            },
+          },
+        ]),
+      ).not.toThrow();
+    });
+
+    it("refuses finance payloads missing required fields", () => {
+      const violations = collectChangeViolations([
+        {
+          entityType: "finance_account",
+          operation: ChangeOperation.CREATE,
+          payload: { type: "BANK" },
+        },
+        {
+          entityType: "finance_transaction",
+          operation: ChangeOperation.CREATE,
+          payload: { title: "Lunch" },
+        },
+      ]);
+
+      const fields = violations.map((v) => v.field);
+      expect(fields).toContain("changes[0].payload.name");
+      expect(fields).toContain("changes[0].payload.currency");
+      expect(fields).toContain("changes[0].payload.openingBalanceMinor");
+      expect(fields).toContain("changes[1].payload.accountId");
+      expect(fields).toContain("changes[1].payload.type");
+      expect(fields).toContain("changes[1].payload.amountMinor");
+    });
+  });
+
   describe("blob size", () => {
     it("refuses a fixed-size blob field that has outgrown its name", () => {
       const fields = collectChangeViolations([

@@ -57,6 +57,54 @@ export type ChangeProjectionClient = {
     Prisma.TransactionClient["calendar"],
     "findUnique" | "findFirst" | "create" | "update"
   >;
+  financeAccount?: Pick<
+    Prisma.TransactionClient["financeAccount"],
+    "findUnique" | "create" | "update"
+  >;
+  financeCategory?: Pick<
+    Prisma.TransactionClient["financeCategory"],
+    "findUnique" | "create" | "update"
+  >;
+  financeTransaction?: Pick<
+    Prisma.TransactionClient["financeTransaction"],
+    "findUnique" | "create" | "update"
+  >;
+  financeBudget?: Pick<
+    Prisma.TransactionClient["financeBudget"],
+    "findUnique" | "create" | "update"
+  >;
+  financeSavingsGoal?: Pick<
+    Prisma.TransactionClient["financeSavingsGoal"],
+    "findUnique" | "create" | "update"
+  >;
+  financeRecurringRule?: Pick<
+    Prisma.TransactionClient["financeRecurringRule"],
+    "findUnique" | "create" | "update"
+  >;
+  financeLoan?: Pick<
+    Prisma.TransactionClient["financeLoan"],
+    "findUnique" | "create" | "update"
+  >;
+  financeGroup?: Pick<
+    Prisma.TransactionClient["financeGroup"],
+    "findUnique" | "create" | "update"
+  >;
+  financeSharedExpense?: Pick<
+    Prisma.TransactionClient["financeSharedExpense"],
+    "findUnique" | "create" | "update"
+  >;
+  financeSettlement?: Pick<
+    Prisma.TransactionClient["financeSettlement"],
+    "findUnique" | "create" | "update"
+  >;
+  financeTrip?: Pick<
+    Prisma.TransactionClient["financeTrip"],
+    "findUnique" | "create" | "update"
+  >;
+  financeTripItinerary?: Pick<
+    Prisma.TransactionClient["financeTripItinerary"],
+    "findUnique" | "create" | "update"
+  >;
 };
 
 /** One accepted change, as much of it as a projection can use. */
@@ -109,6 +157,42 @@ export async function projectAcceptedChange(
   }
   if (change.entityType === "calendar" && tx?.calendar) {
     return projectCalendarChange(tx, userId, change, payloadOf(change));
+  }
+  if (change.entityType === "finance_account" && tx?.financeAccount) {
+    return projectFinanceAccountChange(tx, userId, change, payloadOf(change));
+  }
+  if (change.entityType === "finance_category" && tx?.financeCategory) {
+    return projectFinanceCategoryChange(tx, userId, change, payloadOf(change));
+  }
+  if (change.entityType === "finance_transaction" && tx?.financeTransaction) {
+    return projectFinanceTransactionChange(tx, userId, change, payloadOf(change));
+  }
+  if (change.entityType === "finance_budget" && tx?.financeBudget) {
+    return projectFinanceBudgetChange(tx, userId, change, payloadOf(change));
+  }
+  if (change.entityType === "finance_savings_goal" && tx?.financeSavingsGoal) {
+    return projectFinanceSavingsGoalChange(tx, userId, change, payloadOf(change));
+  }
+  if (change.entityType === "finance_recurring_rule" && tx?.financeRecurringRule) {
+    return projectFinanceRecurringRuleChange(tx, userId, change, payloadOf(change));
+  }
+  if (change.entityType === "finance_loan" && tx?.financeLoan) {
+    return projectFinanceLoanChange(tx, userId, change, payloadOf(change));
+  }
+  if (change.entityType === "finance_group" && tx?.financeGroup) {
+    return projectFinanceGroupChange(tx, userId, change, payloadOf(change));
+  }
+  if (change.entityType === "finance_shared_expense" && tx?.financeSharedExpense) {
+    return projectFinanceSharedExpenseChange(tx, userId, change, payloadOf(change));
+  }
+  if (change.entityType === "finance_settlement" && tx?.financeSettlement) {
+    return projectFinanceSettlementChange(tx, userId, change, payloadOf(change));
+  }
+  if (change.entityType === "finance_trip" && tx?.financeTrip) {
+    return projectFinanceTripChange(tx, userId, change, payloadOf(change));
+  }
+  if (change.entityType === "finance_trip_itinerary" && tx?.financeTripItinerary) {
+    return projectFinanceTripItineraryChange(tx, userId, change, payloadOf(change));
   }
 }
 
@@ -608,4 +692,1140 @@ function calendarColumns(payload: Record<string, any>): Record<string, any> {
 
   return columns;
 }
+
+async function projectFinanceAccountChange(
+  tx: ChangeProjectionClient,
+  userId: string,
+  change: ProjectableChange,
+  payload: Record<string, any>,
+): Promise<void> {
+  const delegate = tx.financeAccount;
+  if (!delegate) return;
+
+  const existing = await delegate.findUnique({
+    where: { id: change.entityId },
+    select: { userId: true, deletedAt: true },
+  });
+
+  if (existing && existing.userId !== userId) {
+    logger.warn(
+      `Ignored a ${String(change.operation)} change for finance_account ${change.entityId} pushed by ${userId}: the account belongs to ${existing.userId}.`,
+    );
+    return;
+  }
+
+  if (change.operation === ChangeOperation.DELETE) {
+    if (!existing) return;
+    await delegate.update({
+      where: { id: change.entityId },
+      data: { deletedAt: new Date(), version: change.version },
+    });
+    return;
+  }
+
+  const openingMinor = BigInt(
+    Math.round(Number(payload.openingBalanceMinor ?? 0)),
+  );
+  const currentMinor =
+    payload.currentBalanceMinor !== undefined
+      ? BigInt(Math.round(Number(payload.currentBalanceMinor)))
+      : openingMinor;
+
+  if (!existing) {
+    const createdAt = parsedCreatedAt(payload);
+    await delegate.create({
+      data: {
+        id: change.entityId,
+        userId,
+        name: payload.name ?? "New Account",
+        type: payload.type ?? "BANK",
+        currency: payload.currency ?? "INR",
+        openingBalanceMinor: openingMinor,
+        currentBalanceMinor: currentMinor,
+        color: isTextOrNull(payload.color) ? payload.color : null,
+        iconKey: isTextOrNull(payload.iconKey) ? payload.iconKey : null,
+        isArchived:
+          typeof payload.isArchived === "boolean" ? payload.isArchived : false,
+        sortOrder:
+          typeof payload.sortOrder === "number" ? payload.sortOrder : 0,
+        version: change.version,
+        ...(createdAt ? { createdAt } : {}),
+      },
+    });
+    return;
+  }
+
+  await delegate.update({
+    where: { id: change.entityId },
+    data: {
+      ...(typeof payload.name === "string" ? { name: payload.name } : {}),
+      ...(typeof payload.type === "string"
+        ? { type: payload.type as any }
+        : {}),
+      ...(typeof payload.currency === "string"
+        ? { currency: payload.currency }
+        : {}),
+      ...(payload.currentBalanceMinor !== undefined
+        ? { currentBalanceMinor: currentMinor }
+        : {}),
+      ...(isTextOrNull(payload.color) ? { color: payload.color } : {}),
+      ...(isTextOrNull(payload.iconKey) ? { iconKey: payload.iconKey } : {}),
+      ...(typeof payload.isArchived === "boolean"
+        ? { isArchived: payload.isArchived }
+        : {}),
+      ...(typeof payload.sortOrder === "number"
+        ? { sortOrder: payload.sortOrder }
+        : {}),
+      version: change.version,
+      deletedAt: null,
+    },
+  });
+}
+
+async function projectFinanceCategoryChange(
+  tx: ChangeProjectionClient,
+  userId: string,
+  change: ProjectableChange,
+  payload: Record<string, any>,
+): Promise<void> {
+  const delegate = tx.financeCategory;
+  if (!delegate) return;
+
+  const existing = await delegate.findUnique({
+    where: { id: change.entityId },
+    select: { userId: true, deletedAt: true },
+  });
+
+  if (existing && existing.userId !== userId) {
+    logger.warn(
+      `Ignored a ${String(change.operation)} change for finance_category ${change.entityId} pushed by ${userId}.`,
+    );
+    return;
+  }
+
+  if (change.operation === ChangeOperation.DELETE) {
+    if (!existing) return;
+    await delegate.update({
+      where: { id: change.entityId },
+      data: { deletedAt: new Date(), version: change.version },
+    });
+    return;
+  }
+
+  if (!existing) {
+    const createdAt = parsedCreatedAt(payload);
+    await delegate.create({
+      data: {
+        id: change.entityId,
+        userId,
+        name: payload.name ?? "New Category",
+        type: payload.type ?? "EXPENSE",
+        iconKey: isTextOrNull(payload.iconKey) ? payload.iconKey : null,
+        color: isTextOrNull(payload.color) ? payload.color : null,
+        parentId: isTextOrNull(payload.parentId) ? payload.parentId : null,
+        isSystem:
+          typeof payload.isSystem === "boolean" ? payload.isSystem : false,
+        version: change.version,
+        ...(createdAt ? { createdAt } : {}),
+      },
+    });
+    return;
+  }
+
+  await delegate.update({
+    where: { id: change.entityId },
+    data: {
+      ...(typeof payload.name === "string" ? { name: payload.name } : {}),
+      ...(typeof payload.type === "string"
+        ? { type: payload.type as any }
+        : {}),
+      ...(isTextOrNull(payload.iconKey) ? { iconKey: payload.iconKey } : {}),
+      ...(isTextOrNull(payload.color) ? { color: payload.color } : {}),
+      ...(isTextOrNull(payload.parentId)
+        ? { parentId: payload.parentId }
+        : {}),
+      version: change.version,
+      deletedAt: null,
+    },
+  });
+}
+
+async function projectFinanceTransactionChange(
+  tx: ChangeProjectionClient,
+  userId: string,
+  change: ProjectableChange,
+  payload: Record<string, any>,
+): Promise<void> {
+  const delegate = tx.financeTransaction;
+  if (!delegate) return;
+
+  const existing = await delegate.findUnique({
+    where: { id: change.entityId },
+    select: {
+      userId: true,
+      deletedAt: true,
+    },
+  });
+
+  if (existing && existing.userId !== userId) {
+    logger.warn(
+      `Ignored a ${String(change.operation)} change for finance_transaction ${change.entityId} pushed by ${userId}.`,
+    );
+    return;
+  }
+
+  if (change.operation === ChangeOperation.DELETE) {
+    if (!existing || existing.deletedAt) return;
+    await delegate.update({
+      where: { id: change.entityId },
+      data: { deletedAt: new Date(), version: change.version },
+    });
+    return;
+  }
+
+  const amountMinor = BigInt(Math.round(Number(payload.amountMinor ?? 0)));
+  const txDate = payload.transactionDate
+    ? new Date(payload.transactionDate)
+    : new Date();
+
+  if (!existing) {
+    const createdAt = parsedCreatedAt(payload);
+    await delegate.create({
+      data: {
+        id: change.entityId,
+        userId,
+        accountId: payload.accountId,
+        toAccountId: isTextOrNull(payload.toAccountId)
+          ? payload.toAccountId
+          : null,
+        categoryId: isTextOrNull(payload.categoryId)
+          ? payload.categoryId
+          : null,
+        type: payload.type ?? "EXPENSE",
+        amountMinor,
+        currency: payload.currency ?? "INR",
+        title: payload.title ?? "Transaction",
+        notes: isTextOrNull(payload.notes) ? payload.notes : null,
+        tags: Array.isArray(payload.tags) ? payload.tags : [],
+        transactionDate: txDate,
+        receiptAttachmentId: isTextOrNull(payload.receiptAttachmentId)
+          ? payload.receiptAttachmentId
+          : null,
+        recurringRuleId: isTextOrNull(payload.recurringRuleId)
+          ? payload.recurringRuleId
+          : null,
+        sharedExpenseId: isTextOrNull(payload.sharedExpenseId)
+          ? payload.sharedExpenseId
+          : null,
+        isExcludedFromBudget:
+          typeof payload.isExcludedFromBudget === "boolean"
+            ? payload.isExcludedFromBudget
+            : false,
+        version: change.version,
+        ...(createdAt ? { createdAt } : {}),
+      },
+    });
+    return;
+  }
+
+  await delegate.update({
+    where: { id: change.entityId },
+    data: {
+      ...(typeof payload.accountId === "string"
+        ? { accountId: payload.accountId }
+        : {}),
+      ...(payload.toAccountId !== undefined
+        ? {
+            toAccountId: isTextOrNull(payload.toAccountId)
+              ? payload.toAccountId
+              : null,
+          }
+        : {}),
+      ...(payload.categoryId !== undefined
+        ? {
+            categoryId: isTextOrNull(payload.categoryId)
+              ? payload.categoryId
+              : null,
+          }
+        : {}),
+      ...(typeof payload.type === "string"
+        ? { type: payload.type as any }
+        : {}),
+      ...(payload.amountMinor !== undefined ? { amountMinor } : {}),
+      ...(typeof payload.currency === "string"
+        ? { currency: payload.currency }
+        : {}),
+      ...(typeof payload.title === "string" ? { title: payload.title } : {}),
+      ...(payload.notes !== undefined
+        ? { notes: isTextOrNull(payload.notes) ? payload.notes : null }
+        : {}),
+      ...(Array.isArray(payload.tags) ? { tags: payload.tags } : {}),
+      ...(payload.transactionDate ? { transactionDate: txDate } : {}),
+      ...(payload.receiptAttachmentId !== undefined
+        ? {
+            receiptAttachmentId: isTextOrNull(payload.receiptAttachmentId)
+              ? payload.receiptAttachmentId
+              : null,
+          }
+        : {}),
+      ...(payload.isExcludedFromBudget !== undefined
+        ? { isExcludedFromBudget: payload.isExcludedFromBudget }
+        : {}),
+      version: change.version,
+      deletedAt: null,
+    },
+  });
+}
+
+async function projectFinanceBudgetChange(
+  tx: any,
+  userId: string,
+  change: ProjectableChange,
+  payload: Record<string, any>,
+): Promise<void> {
+  const delegate = tx.financeBudget;
+  const existing = await delegate.findUnique({
+    where: { id: change.entityId },
+    select: {
+      userId: true,
+      deletedAt: true,
+      version: true,
+    },
+  });
+
+  if (existing && existing.userId !== userId) {
+    logger.warn(
+      `Ignored a ${String(change.operation)} change for finance_budget ${change.entityId} pushed by ${userId}.`,
+    );
+    return;
+  }
+
+  if (change.operation === ChangeOperation.DELETE) {
+    if (!existing || existing.deletedAt) return;
+    await delegate.update({
+      where: { id: change.entityId },
+      data: { deletedAt: new Date(), version: change.version },
+    });
+    return;
+  }
+
+  const amountMinor = BigInt(Math.round(Number(payload.amountMinor ?? 0)));
+
+  if (!existing) {
+    const createdAt = parsedCreatedAt(payload);
+    await delegate.create({
+      data: {
+        id: change.entityId,
+        userId,
+        categoryId: isTextOrNull(payload.categoryId)
+          ? payload.categoryId
+          : null,
+        amountMinor,
+        period: (payload.period as any) ?? "MONTHLY",
+        startDate: payload.startDate ? new Date(payload.startDate) : null,
+        endDate: payload.endDate ? new Date(payload.endDate) : null,
+        alertAt80: payload.alertAt80 ?? true,
+        alertAt100: payload.alertAt100 ?? true,
+        version: change.version,
+        deletedAt: null,
+        ...(createdAt ? { createdAt } : {}),
+      },
+    });
+    return;
+  }
+
+  if (losesToWhatTheRowHolds(change, existing)) return;
+
+  await delegate.update({
+    where: { id: change.entityId },
+    data: {
+      ...(payload.categoryId !== undefined
+        ? {
+            categoryId: isTextOrNull(payload.categoryId)
+              ? payload.categoryId
+              : null,
+          }
+        : {}),
+      ...(payload.amountMinor !== undefined ? { amountMinor } : {}),
+      ...(payload.period !== undefined ? { period: payload.period as any } : {}),
+      ...(payload.startDate !== undefined
+        ? { startDate: payload.startDate ? new Date(payload.startDate) : null }
+        : {}),
+      ...(payload.endDate !== undefined
+        ? { endDate: payload.endDate ? new Date(payload.endDate) : null }
+        : {}),
+      ...(payload.alertAt80 !== undefined
+        ? { alertAt80: payload.alertAt80 }
+        : {}),
+      ...(payload.alertAt100 !== undefined
+        ? { alertAt100: payload.alertAt100 }
+        : {}),
+      version: change.version,
+      deletedAt: null,
+    },
+  });
+}
+
+async function projectFinanceSavingsGoalChange(
+  tx: any,
+  userId: string,
+  change: ProjectableChange,
+  payload: Record<string, any>,
+): Promise<void> {
+  const delegate = tx.financeSavingsGoal;
+  const existing = await delegate.findUnique({
+    where: { id: change.entityId },
+    select: {
+      userId: true,
+      deletedAt: true,
+      version: true,
+    },
+  });
+
+  if (existing && existing.userId !== userId) {
+    logger.warn(
+      `Ignored a ${String(change.operation)} change for finance_savings_goal ${change.entityId} pushed by ${userId}.`,
+    );
+    return;
+  }
+
+  if (change.operation === ChangeOperation.DELETE) {
+    if (!existing || existing.deletedAt) return;
+    await delegate.update({
+      where: { id: change.entityId },
+      data: { deletedAt: new Date(), version: change.version },
+    });
+    return;
+  }
+
+  const targetAmountMinor = BigInt(
+    Math.round(Number(payload.targetAmountMinor ?? 0)),
+  );
+  const currentAmountMinor = BigInt(
+    Math.round(Number(payload.currentAmountMinor ?? 0)),
+  );
+
+  if (!existing) {
+    const createdAt = parsedCreatedAt(payload);
+    await delegate.create({
+      data: {
+        id: change.entityId,
+        userId,
+        name: typeof payload.name === "string" ? payload.name : "Savings Goal",
+        targetAmountMinor,
+        currentAmountMinor,
+        targetDate: payload.targetDate ? new Date(payload.targetDate) : null,
+        color: isTextOrNull(payload.color) ? payload.color : null,
+        iconKey: isTextOrNull(payload.iconKey) ? payload.iconKey : null,
+        isCompleted: payload.isCompleted ?? false,
+        version: change.version,
+        deletedAt: null,
+        ...(createdAt ? { createdAt } : {}),
+      },
+    });
+    return;
+  }
+
+  if (losesToWhatTheRowHolds(change, existing)) return;
+
+  await delegate.update({
+    where: { id: change.entityId },
+    data: {
+      ...(typeof payload.name === "string" ? { name: payload.name } : {}),
+      ...(payload.targetAmountMinor !== undefined ? { targetAmountMinor } : {}),
+      ...(payload.currentAmountMinor !== undefined
+        ? { currentAmountMinor }
+        : {}),
+      ...(payload.targetDate !== undefined
+        ? {
+            targetDate: payload.targetDate ? new Date(payload.targetDate) : null,
+          }
+        : {}),
+      ...(payload.color !== undefined
+        ? { color: isTextOrNull(payload.color) ? payload.color : null }
+        : {}),
+      ...(payload.iconKey !== undefined
+        ? { iconKey: isTextOrNull(payload.iconKey) ? payload.iconKey : null }
+        : {}),
+      ...(payload.isCompleted !== undefined
+        ? { isCompleted: payload.isCompleted }
+        : {}),
+      version: change.version,
+      deletedAt: null,
+    },
+  });
+}
+
+async function projectFinanceRecurringRuleChange(
+  tx: any,
+  userId: string,
+  change: ProjectableChange,
+  payload: Record<string, any>,
+): Promise<void> {
+  const delegate = tx.financeRecurringRule;
+  const existing = await delegate.findUnique({
+    where: { id: change.entityId },
+    select: {
+      userId: true,
+      deletedAt: true,
+      version: true,
+    },
+  });
+
+  if (existing && existing.userId !== userId) {
+    logger.warn(
+      `Ignored a ${String(change.operation)} change for finance_recurring_rule ${change.entityId} pushed by ${userId}.`,
+    );
+    return;
+  }
+
+  if (change.operation === ChangeOperation.DELETE) {
+    if (!existing || existing.deletedAt) return;
+    await delegate.update({
+      where: { id: change.entityId },
+      data: { deletedAt: new Date(), version: change.version },
+    });
+    return;
+  }
+
+  const amountMinor = BigInt(Math.round(Number(payload.amountMinor ?? 0)));
+  const startDate = payload.startDate
+    ? new Date(payload.startDate)
+    : new Date();
+  const nextDueDate = payload.nextDueDate
+    ? new Date(payload.nextDueDate)
+    : startDate;
+
+  if (!existing) {
+    const createdAt = parsedCreatedAt(payload);
+    await delegate.create({
+      data: {
+        id: change.entityId,
+        userId,
+        accountId: payload.accountId,
+        categoryId: isTextOrNull(payload.categoryId)
+          ? payload.categoryId
+          : null,
+        type: (payload.type as any) ?? "EXPENSE",
+        amountMinor,
+        title:
+          typeof payload.title === "string"
+            ? payload.title
+            : "Recurring Transaction",
+        frequency: (payload.frequency as any) ?? "MONTHLY",
+        interval: typeof payload.interval === "number" ? payload.interval : 1,
+        startDate,
+        endDate: payload.endDate ? new Date(payload.endDate) : null,
+        nextDueDate,
+        lastGeneratedAt: payload.lastGeneratedAt
+          ? new Date(payload.lastGeneratedAt)
+          : null,
+        autoGenerate: payload.autoGenerate ?? true,
+        version: change.version,
+        deletedAt: null,
+        ...(createdAt ? { createdAt } : {}),
+      },
+    });
+    return;
+  }
+
+  if (losesToWhatTheRowHolds(change, existing)) return;
+
+  await delegate.update({
+    where: { id: change.entityId },
+    data: {
+      ...(typeof payload.accountId === "string"
+        ? { accountId: payload.accountId }
+        : {}),
+      ...(payload.categoryId !== undefined
+        ? {
+            categoryId: isTextOrNull(payload.categoryId)
+              ? payload.categoryId
+              : null,
+          }
+        : {}),
+      ...(payload.type !== undefined ? { type: payload.type as any } : {}),
+      ...(payload.amountMinor !== undefined ? { amountMinor } : {}),
+      ...(typeof payload.title === "string" ? { title: payload.title } : {}),
+      ...(payload.frequency !== undefined
+        ? { frequency: payload.frequency as any }
+        : {}),
+      ...(typeof payload.interval === "number"
+        ? { interval: payload.interval }
+        : {}),
+      ...(payload.startDate !== undefined ? { startDate } : {}),
+      ...(payload.endDate !== undefined
+        ? { endDate: payload.endDate ? new Date(payload.endDate) : null }
+        : {}),
+      ...(payload.nextDueDate !== undefined ? { nextDueDate } : {}),
+      ...(payload.lastGeneratedAt !== undefined
+        ? {
+            lastGeneratedAt: payload.lastGeneratedAt
+              ? new Date(payload.lastGeneratedAt)
+              : null,
+          }
+        : {}),
+      ...(payload.autoGenerate !== undefined
+        ? { autoGenerate: payload.autoGenerate }
+        : {}),
+      version: change.version,
+      deletedAt: null,
+    },
+  });
+}
+
+async function projectFinanceLoanChange(
+  tx: any,
+  userId: string,
+  change: ProjectableChange,
+  payload: Record<string, any>,
+): Promise<void> {
+  const delegate = tx.financeLoan;
+  const existing = await delegate.findUnique({
+    where: { id: change.entityId },
+    select: {
+      userId: true,
+      deletedAt: true,
+      version: true,
+    },
+  });
+
+  if (existing && existing.userId !== userId) {
+    logger.warn(
+      `Ignored a ${String(change.operation)} change for finance_loan ${change.entityId} pushed by ${userId}.`,
+    );
+    return;
+  }
+
+  if (change.operation === ChangeOperation.DELETE) {
+    if (!existing || existing.deletedAt) return;
+    await delegate.update({
+      where: { id: change.entityId },
+      data: { deletedAt: new Date(), version: change.version },
+    });
+    return;
+  }
+
+  const principalAmountMinor = BigInt(
+    Math.round(Number(payload.principalAmountMinor ?? 0)),
+  );
+  const remainingAmountMinor = BigInt(
+    Math.round(
+      Number(payload.remainingAmountMinor ?? payload.principalAmountMinor ?? 0),
+    ),
+  );
+  const isSettled =
+    payload.isSettled !== undefined
+      ? Boolean(payload.isSettled)
+      : remainingAmountMinor <= 0n;
+
+  if (!existing) {
+    const createdAt = parsedCreatedAt(payload);
+    await delegate.create({
+      data: {
+        id: change.entityId,
+        userId,
+        type: (payload.type as any) ?? "LENT",
+        counterpartyName:
+          typeof payload.counterpartyName === "string"
+            ? payload.counterpartyName
+            : "Contact",
+        counterpartyContact: isTextOrNull(payload.counterpartyContact)
+          ? payload.counterpartyContact
+          : null,
+        principalAmountMinor,
+        remainingAmountMinor,
+        dueDate: payload.dueDate ? new Date(payload.dueDate) : null,
+        notes: isTextOrNull(payload.notes) ? payload.notes : null,
+        isSettled,
+        version: change.version,
+        deletedAt: null,
+        ...(createdAt ? { createdAt } : {}),
+      },
+    });
+    return;
+  }
+
+  if (losesToWhatTheRowHolds(change, existing)) return;
+
+  await delegate.update({
+    where: { id: change.entityId },
+    data: {
+      ...(typeof payload.type === "string"
+        ? { type: payload.type as any }
+        : {}),
+      ...(typeof payload.counterpartyName === "string"
+        ? { counterpartyName: payload.counterpartyName }
+        : {}),
+      ...(payload.counterpartyContact !== undefined
+        ? {
+            counterpartyContact: isTextOrNull(payload.counterpartyContact)
+              ? payload.counterpartyContact
+              : null,
+          }
+        : {}),
+      ...(payload.principalAmountMinor !== undefined
+        ? { principalAmountMinor }
+        : {}),
+      ...(payload.remainingAmountMinor !== undefined
+        ? { remainingAmountMinor }
+        : {}),
+      ...(payload.dueDate !== undefined
+        ? { dueDate: payload.dueDate ? new Date(payload.dueDate) : null }
+        : {}),
+      ...(payload.notes !== undefined
+        ? { notes: isTextOrNull(payload.notes) ? payload.notes : null }
+        : {}),
+      ...(payload.isSettled !== undefined
+        ? { isSettled: Boolean(payload.isSettled) }
+        : payload.remainingAmountMinor !== undefined
+          ? { isSettled: remainingAmountMinor <= 0n }
+          : {}),
+      version: change.version,
+      deletedAt: null,
+    },
+  });
+}
+
+async function projectFinanceGroupChange(
+  tx: ChangeProjectionClient,
+  userId: string,
+  change: ProjectableChange,
+  payload: Record<string, any>,
+): Promise<void> {
+  const delegate = tx.financeGroup;
+  if (!delegate) return;
+
+  const existing = await delegate.findUnique({
+    where: { id: change.entityId },
+    select: { ownerId: true, deletedAt: true, version: true },
+  });
+
+  if (existing && existing.ownerId !== userId) {
+    logger.warn(
+      `Ignored a ${String(change.operation)} change for finance_group ${change.entityId} pushed by ${userId}: the group belongs to ${existing.ownerId}.`,
+    );
+    return;
+  }
+
+  if (change.operation === ChangeOperation.DELETE) {
+    if (!existing) return;
+    await delegate.update({
+      where: { id: change.entityId },
+      data: { deletedAt: new Date(), version: change.version },
+    });
+    return;
+  }
+
+  if (!existing) {
+    const createdAt = parsedCreatedAt(payload);
+    await delegate.create({
+      data: {
+        id: change.entityId,
+        ownerId: userId,
+        name: typeof payload.name === "string" ? payload.name : "New Group",
+        description: isTextOrNull(payload.description)
+          ? payload.description
+          : null,
+        currency: payload.currency ?? "INR",
+        iconKey: isTextOrNull(payload.iconKey) ? payload.iconKey : null,
+        isArchived:
+          typeof payload.isArchived === "boolean" ? payload.isArchived : false,
+        version: change.version,
+        deletedAt: null,
+        ...(createdAt ? { createdAt } : {}),
+      },
+    });
+    return;
+  }
+
+  if (losesToWhatTheRowHolds(change, existing)) return;
+
+  await delegate.update({
+    where: { id: change.entityId },
+    data: {
+      ...(typeof payload.name === "string" ? { name: payload.name } : {}),
+      ...(payload.description !== undefined
+        ? {
+            description: isTextOrNull(payload.description)
+              ? payload.description
+              : null,
+          }
+        : {}),
+      ...(typeof payload.currency === "string"
+        ? { currency: payload.currency }
+        : {}),
+      ...(payload.iconKey !== undefined
+        ? { iconKey: isTextOrNull(payload.iconKey) ? payload.iconKey : null }
+        : {}),
+      ...(typeof payload.isArchived === "boolean"
+        ? { isArchived: payload.isArchived }
+        : {}),
+      version: change.version,
+      deletedAt: null,
+    },
+  });
+}
+
+async function projectFinanceSharedExpenseChange(
+  tx: ChangeProjectionClient,
+  userId: string,
+  change: ProjectableChange,
+  payload: Record<string, any>,
+): Promise<void> {
+  const delegate = tx.financeSharedExpense;
+  if (!delegate) return;
+
+  const existing = await delegate.findUnique({
+    where: { id: change.entityId },
+    select: { paidByUserId: true, deletedAt: true, version: true },
+  });
+
+  if (change.operation === ChangeOperation.DELETE) {
+    if (!existing) return;
+    await delegate.update({
+      where: { id: change.entityId },
+      data: { deletedAt: new Date(), version: change.version },
+    });
+    return;
+  }
+
+  const totalAmountMinor = BigInt(
+    Math.round(Number(payload.totalAmountMinor ?? 0)),
+  );
+  const date = payload.date ? new Date(payload.date) : new Date();
+
+  if (!existing) {
+    const createdAt = parsedCreatedAt(payload);
+    await delegate.create({
+      data: {
+        id: change.entityId,
+        groupId: isTextOrNull(payload.groupId) ? payload.groupId : null,
+        tripId: isTextOrNull(payload.tripId) ? payload.tripId : null,
+        paidByUserId: payload.paidByUserId ?? userId,
+        payerAccountId: isTextOrNull(payload.payerAccountId)
+          ? payload.payerAccountId
+          : null,
+        title:
+          typeof payload.title === "string"
+            ? payload.title
+            : "Shared Expense",
+        totalAmountMinor,
+        currency: payload.currency ?? "INR",
+        splitType: (payload.splitType as any) ?? "EQUAL",
+        date,
+        notes: isTextOrNull(payload.notes) ? payload.notes : null,
+        receiptAttachmentId: isTextOrNull(payload.receiptAttachmentId)
+          ? payload.receiptAttachmentId
+          : null,
+        version: change.version,
+        deletedAt: null,
+        ...(createdAt ? { createdAt } : {}),
+      },
+    });
+    return;
+  }
+
+  if (losesToWhatTheRowHolds(change, existing)) return;
+
+  await delegate.update({
+    where: { id: change.entityId },
+    data: {
+      ...(payload.groupId !== undefined
+        ? { groupId: isTextOrNull(payload.groupId) ? payload.groupId : null }
+        : {}),
+      ...(payload.tripId !== undefined
+        ? { tripId: isTextOrNull(payload.tripId) ? payload.tripId : null }
+        : {}),
+      ...(typeof payload.paidByUserId === "string"
+        ? { paidByUserId: payload.paidByUserId }
+        : {}),
+      ...(payload.payerAccountId !== undefined
+        ? {
+            payerAccountId: isTextOrNull(payload.payerAccountId)
+              ? payload.payerAccountId
+              : null,
+          }
+        : {}),
+      ...(typeof payload.title === "string" ? { title: payload.title } : {}),
+      ...(payload.totalAmountMinor !== undefined ? { totalAmountMinor } : {}),
+      ...(typeof payload.currency === "string"
+        ? { currency: payload.currency }
+        : {}),
+      ...(payload.splitType !== undefined
+        ? { splitType: payload.splitType as any }
+        : {}),
+      ...(payload.date !== undefined ? { date } : {}),
+      ...(payload.notes !== undefined
+        ? { notes: isTextOrNull(payload.notes) ? payload.notes : null }
+        : {}),
+      ...(payload.receiptAttachmentId !== undefined
+        ? {
+            receiptAttachmentId: isTextOrNull(payload.receiptAttachmentId)
+              ? payload.receiptAttachmentId
+              : null,
+          }
+        : {}),
+      version: change.version,
+      deletedAt: null,
+    },
+  });
+}
+
+async function projectFinanceSettlementChange(
+  tx: ChangeProjectionClient,
+  userId: string,
+  change: ProjectableChange,
+  payload: Record<string, any>,
+): Promise<void> {
+  const delegate = tx.financeSettlement;
+  if (!delegate) return;
+
+  const existing = await delegate.findUnique({
+    where: { id: change.entityId },
+    select: { fromUserId: true, toUserId: true, deletedAt: true, version: true },
+  });
+
+  if (change.operation === ChangeOperation.DELETE) {
+    if (!existing) return;
+    await delegate.update({
+      where: { id: change.entityId },
+      data: { deletedAt: new Date(), version: change.version },
+    });
+    return;
+  }
+
+  const amountMinor = BigInt(
+    Math.round(Number(payload.amountMinor ?? 0)),
+  );
+  const date = payload.date ? new Date(payload.date) : new Date();
+
+  if (!existing) {
+    const createdAt = parsedCreatedAt(payload);
+    await delegate.create({
+      data: {
+        id: change.entityId,
+        groupId: isTextOrNull(payload.groupId) ? payload.groupId : null,
+        tripId: isTextOrNull(payload.tripId) ? payload.tripId : null,
+        fromUserId: payload.fromUserId ?? userId,
+        toUserId: payload.toUserId ?? "",
+        amountMinor,
+        currency: payload.currency ?? "INR",
+        date,
+        notes: isTextOrNull(payload.notes) ? payload.notes : null,
+        paymentMethod: isTextOrNull(payload.paymentMethod)
+          ? payload.paymentMethod
+          : null,
+        version: change.version,
+        deletedAt: null,
+        ...(createdAt ? { createdAt } : {}),
+      },
+    });
+    return;
+  }
+
+  if (losesToWhatTheRowHolds(change, existing)) return;
+
+  await delegate.update({
+    where: { id: change.entityId },
+    data: {
+      ...(payload.groupId !== undefined
+        ? { groupId: isTextOrNull(payload.groupId) ? payload.groupId : null }
+        : {}),
+      ...(payload.tripId !== undefined
+        ? { tripId: isTextOrNull(payload.tripId) ? payload.tripId : null }
+        : {}),
+      ...(typeof payload.fromUserId === "string"
+        ? { fromUserId: payload.fromUserId }
+        : {}),
+      ...(typeof payload.toUserId === "string"
+        ? { toUserId: payload.toUserId }
+        : {}),
+      ...(payload.amountMinor !== undefined ? { amountMinor } : {}),
+      ...(typeof payload.currency === "string"
+        ? { currency: payload.currency }
+        : {}),
+      ...(payload.date !== undefined ? { date } : {}),
+      ...(payload.notes !== undefined
+        ? { notes: isTextOrNull(payload.notes) ? payload.notes : null }
+        : {}),
+      ...(payload.paymentMethod !== undefined
+        ? {
+            paymentMethod: isTextOrNull(payload.paymentMethod)
+              ? payload.paymentMethod
+              : null,
+          }
+        : {}),
+      version: change.version,
+      deletedAt: null,
+    },
+  });
+}
+
+async function projectFinanceTripChange(
+  tx: ChangeProjectionClient,
+  userId: string,
+  change: ProjectableChange,
+  payload: Record<string, any>,
+): Promise<void> {
+  const delegate = tx.financeTrip;
+  if (!delegate) return;
+
+  const existing = await delegate.findUnique({
+    where: { id: change.entityId },
+    select: { ownerId: true, deletedAt: true, version: true },
+  });
+
+  if (existing && existing.ownerId !== userId) {
+    logger.warn(
+      `Ignored a ${String(change.operation)} change for finance_trip ${change.entityId} pushed by ${userId}: the trip belongs to ${existing.ownerId}.`,
+    );
+    return;
+  }
+
+  if (change.operation === ChangeOperation.DELETE) {
+    if (!existing) return;
+    await delegate.update({
+      where: { id: change.entityId },
+      data: { deletedAt: new Date(), version: change.version },
+    });
+    return;
+  }
+
+  const startDate = payload.startDate ? new Date(payload.startDate) : new Date();
+  const endDate = payload.endDate ? new Date(payload.endDate) : startDate;
+  const totalBudgetMinor =
+    payload.totalBudgetMinor !== undefined && payload.totalBudgetMinor !== null
+      ? BigInt(Math.round(Number(payload.totalBudgetMinor)))
+      : null;
+
+  if (!existing) {
+    const createdAt = parsedCreatedAt(payload);
+    await delegate.create({
+      data: {
+        id: change.entityId,
+        ownerId: userId,
+        title: typeof payload.title === "string" ? payload.title : "New Trip",
+        destinations: Array.isArray(payload.destinations)
+          ? payload.destinations
+          : [],
+        startDate,
+        endDate,
+        baseCurrency: payload.baseCurrency ?? "INR",
+        totalBudgetMinor,
+        notes: isTextOrNull(payload.notes) ? payload.notes : null,
+        isArchived:
+          typeof payload.isArchived === "boolean" ? payload.isArchived : false,
+        version: change.version,
+        deletedAt: null,
+        ...(createdAt ? { createdAt } : {}),
+      },
+    });
+    return;
+  }
+
+  if (losesToWhatTheRowHolds(change, existing)) return;
+
+  await delegate.update({
+    where: { id: change.entityId },
+    data: {
+      ...(typeof payload.title === "string" ? { title: payload.title } : {}),
+      ...(Array.isArray(payload.destinations)
+        ? { destinations: payload.destinations }
+        : {}),
+      ...(payload.startDate !== undefined ? { startDate } : {}),
+      ...(payload.endDate !== undefined ? { endDate } : {}),
+      ...(typeof payload.baseCurrency === "string"
+        ? { baseCurrency: payload.baseCurrency }
+        : {}),
+      ...(payload.totalBudgetMinor !== undefined ? { totalBudgetMinor } : {}),
+      ...(payload.notes !== undefined
+        ? { notes: isTextOrNull(payload.notes) ? payload.notes : null }
+        : {}),
+      ...(typeof payload.isArchived === "boolean"
+        ? { isArchived: payload.isArchived }
+        : {}),
+      version: change.version,
+      deletedAt: null,
+    },
+  });
+}
+
+async function projectFinanceTripItineraryChange(
+  tx: ChangeProjectionClient,
+  _userId: string,
+  change: ProjectableChange,
+  payload: Record<string, any>,
+): Promise<void> {
+  const delegate = tx.financeTripItinerary;
+  if (!delegate) return;
+
+  const existing = await delegate.findUnique({
+    where: { id: change.entityId },
+    select: { tripId: true, deletedAt: true, version: true },
+  });
+
+  if (change.operation === ChangeOperation.DELETE) {
+    if (!existing) return;
+    await delegate.update({
+      where: { id: change.entityId },
+      data: { deletedAt: new Date(), version: change.version },
+    });
+    return;
+  }
+
+  const plannedCostMinor =
+    payload.plannedCostMinor !== undefined && payload.plannedCostMinor !== null
+      ? BigInt(Math.round(Number(payload.plannedCostMinor)))
+      : null;
+  const date = payload.date ? new Date(payload.date) : null;
+
+  if (!existing) {
+    const createdAt = parsedCreatedAt(payload);
+    await delegate.create({
+      data: {
+        id: change.entityId,
+        tripId: payload.tripId,
+        dayIndex: typeof payload.dayIndex === "number" ? payload.dayIndex : 1,
+        date,
+        title:
+          typeof payload.title === "string"
+            ? payload.title
+            : "Itinerary item",
+        plannedCostMinor,
+        notes: isTextOrNull(payload.notes) ? payload.notes : null,
+        sortOrder:
+          typeof payload.sortOrder === "number" ? payload.sortOrder : 0,
+        version: change.version,
+        deletedAt: null,
+        ...(createdAt ? { createdAt } : {}),
+      },
+    });
+    return;
+  }
+
+  if (losesToWhatTheRowHolds(change, existing)) return;
+
+  await delegate.update({
+    where: { id: change.entityId },
+    data: {
+      ...(typeof payload.dayIndex === "number"
+        ? { dayIndex: payload.dayIndex }
+        : {}),
+      ...(payload.date !== undefined ? { date } : {}),
+      ...(typeof payload.title === "string" ? { title: payload.title } : {}),
+      ...(payload.plannedCostMinor !== undefined ? { plannedCostMinor } : {}),
+      ...(payload.notes !== undefined
+        ? { notes: isTextOrNull(payload.notes) ? payload.notes : null }
+        : {}),
+      ...(typeof payload.sortOrder === "number"
+        ? { sortOrder: payload.sortOrder }
+        : {}),
+      version: change.version,
+      deletedAt: null,
+    },
+  });
+}
+
+
 

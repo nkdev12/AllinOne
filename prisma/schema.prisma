@@ -53,6 +53,17 @@ model User {
   ownedShares       ResourceShare[] @relation("ResourceShareOwner")
   receivedShares    ResourceShare[] @relation("ResourceShareGrantee")
 
+  // Finance relations
+  financeAccounts        FinanceAccount[]
+  financeCategories      FinanceCategory[]
+  financeTransactions    FinanceTransaction[]
+  financeBudgets         FinanceBudget[]
+  financeSavingsGoals    FinanceSavingsGoal[]
+  financeRecurringRules  FinanceRecurringRule[]
+  financeLoans           FinanceLoan[]
+  financeOwnedGroups     FinanceGroup[]
+  financeOwnedTrips      FinanceTrip[]
+
   @@index([status])
   @@index([createdAt])
 }
@@ -797,6 +808,8 @@ enum ShareResourceType {
   NOTE
   PROJECT
   CALENDAR
+  EXPENSE_GROUP
+  TRIP
 }
 
 // One role granted on one resource to one recipient.
@@ -837,4 +850,359 @@ model ResourceShare {
   @@index([sharedWithUserId])
   @@index([sharedWithEmail])
   @@index([ownerId])
+}
+
+// ============================================================================
+// Finance & Money Manager Module
+// ============================================================================
+
+enum FinanceAccountType {
+  CASH
+  BANK
+  WALLET
+  CREDIT
+  INVESTMENT
+  SAVINGS
+  OTHER
+}
+
+enum FinanceTransactionType {
+  INCOME
+  EXPENSE
+  TRANSFER
+}
+
+enum FinanceBudgetPeriod {
+  WEEKLY
+  MONTHLY
+  QUARTERLY
+  YEARLY
+  CUSTOM
+}
+
+enum FinanceRecurringFrequency {
+  DAILY
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+  QUARTERLY
+  YEARLY
+}
+
+enum FinanceLoanType {
+  LENT
+  BORROWED
+}
+
+enum FinanceSplitType {
+  EQUAL
+  EXACT
+  PERCENTAGE
+  SHARES
+  ITEMIZED
+}
+
+model FinanceAccount {
+  id                  String             @id @default(uuid()) @map("_id")
+  userId              String
+  name                String
+  type                FinanceAccountType @default(BANK)
+  currency            String             @default("INR")
+  openingBalanceMinor BigInt             @default(0)
+  currentBalanceMinor BigInt             @default(0)
+  color               String?
+  iconKey             String?
+  isArchived          Boolean            @default(false)
+  sortOrder           Int                @default(0)
+  deletedAt           DateTime?
+  version             Int                @default(1)
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+
+  user         User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions FinanceTransaction[] @relation("AccountTransactions")
+  transfersIn  FinanceTransaction[] @relation("TransferToAccount")
+
+  @@index([userId, deletedAt])
+  @@map("finance_accounts")
+}
+
+model FinanceCategory {
+  id        String                 @id @default(uuid()) @map("_id")
+  userId    String?
+  name      String
+  type      FinanceTransactionType @default(EXPENSE)
+  iconKey   String?
+  color     String?
+  parentId  String?
+  isSystem  Boolean                @default(false)
+  deletedAt DateTime?
+  version   Int                    @default(1)
+  createdAt DateTime               @default(now())
+  updatedAt DateTime               @updatedAt
+
+  user         User?                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions FinanceTransaction[]
+  budgets      FinanceBudget[]
+
+  @@index([userId, type, deletedAt])
+  @@map("finance_categories")
+}
+
+model FinanceTransaction {
+  id                   String                 @id @default(uuid()) @map("_id")
+  userId               String
+  accountId            String
+  toAccountId          String?
+  categoryId           String?
+  type                 FinanceTransactionType
+  amountMinor          BigInt
+  currency             String                 @default("INR")
+  title                String
+  notes                String?
+  tags                 String[]               @default([])
+  transactionDate      DateTime
+  receiptAttachmentId  String?
+  recurringRuleId      String?
+  sharedExpenseId      String?
+  isExcludedFromBudget Boolean                @default(false)
+  deletedAt            DateTime?
+  version              Int                    @default(1)
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+
+  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account     FinanceAccount   @relation("AccountTransactions", fields: [accountId], references: [id], onDelete: Cascade)
+  toAccount   FinanceAccount?  @relation("TransferToAccount", fields: [toAccountId], references: [id], onDelete: SetNull)
+  category    FinanceCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  @@index([userId, transactionDate])
+  @@index([accountId, deletedAt])
+  @@map("finance_transactions")
+}
+
+model FinanceBudget {
+  id              String              @id @default(uuid()) @map("_id")
+  userId          String
+  categoryId      String?
+  amountMinor     BigInt
+  period          FinanceBudgetPeriod @default(MONTHLY)
+  startDate       DateTime?
+  endDate         DateTime?
+  alertAt80       Boolean             @default(true)
+  alertAt100      Boolean             @default(true)
+  alertSentAt     DateTime?
+  deletedAt       DateTime?
+  version         Int                 @default(1)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category FinanceCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  @@index([userId, deletedAt])
+  @@map("finance_budgets")
+}
+
+model FinanceSavingsGoal {
+  id                 String    @id @default(uuid()) @map("_id")
+  userId             String
+  name               String
+  targetAmountMinor  BigInt
+  currentAmountMinor BigInt    @default(0)
+  targetDate         DateTime?
+  color              String?
+  iconKey            String?
+  isCompleted        Boolean   @default(false)
+  deletedAt          DateTime?
+  version            Int       @default(1)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, deletedAt])
+  @@map("finance_savings_goals")
+}
+
+model FinanceRecurringRule {
+  id              String                    @id @default(uuid()) @map("_id")
+  userId          String
+  accountId       String
+  categoryId      String?
+  type            FinanceTransactionType
+  amountMinor     BigInt
+  title           String
+  frequency       FinanceRecurringFrequency @default(MONTHLY)
+  interval        Int                       @default(1)
+  startDate       DateTime
+  endDate         DateTime?
+  nextDueDate     DateTime
+  lastGeneratedAt DateTime?
+  autoGenerate    Boolean                   @default(true)
+  deletedAt       DateTime?
+  version         Int                       @default(1)
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, nextDueDate, deletedAt])
+  @@map("finance_recurring_rules")
+}
+
+model FinanceLoan {
+  id                   String          @id @default(uuid()) @map("_id")
+  userId               String
+  type                 FinanceLoanType
+  counterpartyName     String
+  counterpartyContact  String?
+  principalAmountMinor BigInt
+  remainingAmountMinor BigInt
+  dueDate              DateTime?
+  notes                String?
+  isSettled            Boolean         @default(false)
+  deletedAt            DateTime?
+  version              Int             @default(1)
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isSettled, deletedAt])
+  @@map("finance_loans")
+}
+
+model FinanceGroup {
+  id          String    @id @default(uuid()) @map("_id")
+  ownerId     String
+  name        String
+  description String?
+  currency    String    @default("INR")
+  iconKey     String?
+  isArchived  Boolean   @default(false)
+  deletedAt   DateTime?
+  version     Int       @default(1)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  owner          User                   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  sharedExpenses FinanceSharedExpense[]
+  settlements    FinanceSettlement[]
+
+  @@index([ownerId, deletedAt])
+  @@map("finance_groups")
+}
+
+model FinanceSharedExpense {
+  id                  String           @id @default(uuid()) @map("_id")
+  groupId             String?
+  tripId              String?
+  paidByUserId        String
+  payerAccountId      String?
+  title               String
+  totalAmountMinor    BigInt
+  currency            String           @default("INR")
+  splitType           FinanceSplitType @default(EQUAL)
+  date                DateTime
+  notes               String?
+  receiptAttachmentId String?
+  deletedAt           DateTime?
+  version             Int              @default(1)
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+
+  group  FinanceGroup?         @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  trip   FinanceTrip?          @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  shares FinanceExpenseShare[]
+
+  @@index([groupId, deletedAt])
+  @@index([tripId, deletedAt])
+  @@map("finance_shared_expenses")
+}
+
+model FinanceExpenseShare {
+  id              String    @id @default(uuid()) @map("_id")
+  sharedExpenseId String
+  userId          String
+  owedAmountMinor BigInt
+  shareUnits      Float?
+  isSettled       Boolean   @default(false)
+  settledAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  sharedExpense FinanceSharedExpense @relation(fields: [sharedExpenseId], references: [id], onDelete: Cascade)
+
+  @@index([sharedExpenseId, userId])
+  @@map("finance_expense_shares")
+}
+
+model FinanceSettlement {
+  id            String    @id @default(uuid()) @map("_id")
+  groupId       String?
+  tripId        String?
+  fromUserId    String
+  toUserId      String
+  amountMinor   BigInt
+  currency      String    @default("INR")
+  date          DateTime
+  notes         String?
+  paymentMethod String?
+  deletedAt     DateTime?
+  version       Int       @default(1)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  group FinanceGroup? @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  trip  FinanceTrip?  @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@index([groupId, deletedAt])
+  @@index([tripId, deletedAt])
+  @@map("finance_settlements")
+}
+
+model FinanceTrip {
+  id               String    @id @default(uuid()) @map("_id")
+  ownerId          String
+  title            String
+  destinations     String[]  @default([])
+  startDate        DateTime
+  endDate          DateTime
+  baseCurrency     String    @default("INR")
+  totalBudgetMinor BigInt?
+  notes            String?
+  isArchived       Boolean   @default(false)
+  deletedAt        DateTime?
+  version          Int       @default(1)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  owner          User                   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  itineraryItems FinanceTripItinerary[]
+  sharedExpenses FinanceSharedExpense[]
+  settlements    FinanceSettlement[]
+
+  @@index([ownerId, deletedAt])
+  @@map("finance_trips")
+}
+
+model FinanceTripItinerary {
+  id               String    @id @default(uuid()) @map("_id")
+  tripId           String
+  dayIndex         Int
+  date             DateTime?
+  title            String
+  plannedCostMinor BigInt?
+  notes            String?
+  sortOrder        Int       @default(0)
+  deletedAt        DateTime?
+  version          Int       @default(1)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  trip FinanceTrip @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@index([tripId, dayIndex])
+  @@map("finance_trip_itineraries")
 }

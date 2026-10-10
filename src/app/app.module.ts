@@ -21,6 +21,7 @@ import { VaultModule } from "@/vault/vault.module";
 import { AdminModule } from "@/admin/admin.module";
 import { CollaborationModule } from "@/collaboration/collaboration.module";
 import { AiModule } from "@/ai/ai.module";
+import { FinanceModule } from "@/finance/finance.module";
 import { PasskeysModule } from "@/auth/passkeys/passkeys.module";
 import { ErrorHandlingModule } from "@/common/error-handling/error-handling.module";
 import { AuditLogModule } from "@/common/audit/audit-log.module";
@@ -195,6 +196,7 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
     AdminModule,
     CollaborationModule,
     AiModule,
+    FinanceModule,
   ],
   controllers: [AppController],
   providers: [

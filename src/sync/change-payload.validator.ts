@@ -28,6 +28,18 @@ export const SYNC_ENTITY_TYPES = [
   "habit",
   "habit_log",
   "vault_item",
+  "finance_account",
+  "finance_category",
+  "finance_transaction",
+  "finance_budget",
+  "finance_savings_goal",
+  "finance_recurring_rule",
+  "finance_loan",
+  "finance_group",
+  "finance_shared_expense",
+  "finance_settlement",
+  "finance_trip",
+  "finance_trip_itinerary",
 ] as const;
 
 export type SyncEntityType = (typeof SYNC_ENTITY_TYPES)[number];
@@ -698,6 +710,759 @@ const CALENDAR_FIELDS: ReadonlyArray<DocumentField> = [
   },
 ];
 
+const FINANCE_ACCOUNT_FIELDS: ReadonlyArray<DocumentField> = [
+  {
+    key: "name",
+    required: true,
+    accepts: (value) => isNonEmptyString(value),
+    expected: "a non-empty string",
+  },
+  {
+    key: "type",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "currency",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "openingBalanceMinor",
+    required: true,
+    accepts: (value) =>
+      typeof value === "number" || typeof value === "string",
+    expected: "a number or string representation of integer",
+  },
+  {
+    key: "currentBalanceMinor",
+    required: false,
+    accepts: (value) =>
+      typeof value === "number" || typeof value === "string",
+    expected: "a number or string representation of integer",
+  },
+  {
+    key: "color",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "iconKey",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "isArchived",
+    required: false,
+    accepts: (value) => typeof value === "boolean",
+    expected: "a boolean",
+  },
+  {
+    key: "sortOrder",
+    required: false,
+    accepts: (value) => Number.isInteger(value),
+    expected: "an integer",
+  },
+  {
+    key: "createdAt",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+];
+
+const FINANCE_CATEGORY_FIELDS: ReadonlyArray<DocumentField> = [
+  {
+    key: "name",
+    required: true,
+    accepts: (value) => isNonEmptyString(value),
+    expected: "a non-empty string",
+  },
+  {
+    key: "type",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "iconKey",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "color",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "parentId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "isSystem",
+    required: false,
+    accepts: (value) => typeof value === "boolean",
+    expected: "a boolean",
+  },
+  {
+    key: "createdAt",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+];
+
+const FINANCE_TRANSACTION_FIELDS: ReadonlyArray<DocumentField> = [
+  {
+    key: "accountId",
+    required: true,
+    accepts: (value) => isNonEmptyString(value),
+    expected: "a non-empty string",
+  },
+  {
+    key: "toAccountId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "categoryId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "type",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "amountMinor",
+    required: true,
+    accepts: (value) =>
+      (typeof value === "number" && value > 0) ||
+      (typeof value === "string" && Number(value) > 0),
+    expected: "a positive number or string integer",
+  },
+  {
+    key: "currency",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "title",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "notes",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "tags",
+    required: false,
+    accepts: (value) =>
+      value === null ||
+      (Array.isArray(value) && value.every((t) => typeof t === "string")),
+    expected: "null or a list of strings",
+  },
+  {
+    key: "transactionDate",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "an ISO date string",
+  },
+  {
+    key: "receiptAttachmentId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "recurringRuleId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "sharedExpenseId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "isExcludedFromBudget",
+    required: false,
+    accepts: (value) => typeof value === "boolean",
+    expected: "a boolean",
+  },
+  {
+    key: "createdAt",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+];
+
+const FINANCE_BUDGET_FIELDS: ReadonlyArray<DocumentField> = [
+  {
+    key: "categoryId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "amountMinor",
+    required: true,
+    accepts: (value) =>
+      typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
+    expected: "a non-negative integer",
+  },
+  {
+    key: "period",
+    required: false,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "startDate",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or an ISO date string",
+  },
+  {
+    key: "endDate",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or an ISO date string",
+  },
+  {
+    key: "alertAt80",
+    required: false,
+    accepts: (value) => typeof value === "boolean",
+    expected: "a boolean",
+  },
+  {
+    key: "alertAt100",
+    required: false,
+    accepts: (value) => typeof value === "boolean",
+    expected: "a boolean",
+  },
+  {
+    key: "alertSentAt",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or an ISO date string",
+  },
+  {
+    key: "createdAt",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+];
+
+const FINANCE_SAVINGS_GOAL_FIELDS: ReadonlyArray<DocumentField> = [
+  {
+    key: "name",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "targetAmountMinor",
+    required: true,
+    accepts: (value) =>
+      typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
+    expected: "a non-negative integer",
+  },
+  {
+    key: "currentAmountMinor",
+    required: false,
+    accepts: (value) =>
+      typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
+    expected: "a non-negative integer",
+  },
+  {
+    key: "targetDate",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or an ISO date string",
+  },
+  {
+    key: "color",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "iconKey",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "isCompleted",
+    required: false,
+    accepts: (value) => typeof value === "boolean",
+    expected: "a boolean",
+  },
+  {
+    key: "createdAt",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+];
+
+const FINANCE_RECURRING_RULE_FIELDS: ReadonlyArray<DocumentField> = [
+  {
+    key: "accountId",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string uuid",
+  },
+  {
+    key: "categoryId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "type",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a transaction type string",
+  },
+  {
+    key: "amountMinor",
+    required: true,
+    accepts: (value) =>
+      typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
+    expected: "a non-negative integer",
+  },
+  {
+    key: "title",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "frequency",
+    required: false,
+    accepts: (value) => typeof value === "string",
+    expected: "a frequency string",
+  },
+  {
+    key: "interval",
+    required: false,
+    accepts: (value) => typeof value === "number" && value >= 1,
+    expected: "a positive integer",
+  },
+  {
+    key: "startDate",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "an ISO date string",
+  },
+  {
+    key: "endDate",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or an ISO date string",
+  },
+  {
+    key: "nextDueDate",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "an ISO date string",
+  },
+  {
+    key: "lastGeneratedAt",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or an ISO date string",
+  },
+  {
+    key: "autoGenerate",
+    required: false,
+    accepts: (value) => typeof value === "boolean",
+    expected: "a boolean",
+  },
+  {
+    key: "createdAt",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+];
+
+const FINANCE_LOAN_FIELDS: ReadonlyArray<DocumentField> = [
+  {
+    key: "type",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "counterpartyName",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "counterpartyContact",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "principalAmountMinor",
+    required: true,
+    accepts: (value) =>
+      typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
+    expected: "a non-negative integer",
+  },
+  {
+    key: "remainingAmountMinor",
+    required: true,
+    accepts: (value) =>
+      typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
+    expected: "a non-negative integer",
+  },
+  {
+    key: "dueDate",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or an ISO date string",
+  },
+  {
+    key: "notes",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "isSettled",
+    required: false,
+    accepts: (value) => typeof value === "boolean",
+    expected: "a boolean",
+  },
+  {
+    key: "createdAt",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+];
+
+const FINANCE_GROUP_FIELDS: ReadonlyArray<DocumentField> = [
+  {
+    key: "name",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "description",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "currency",
+    required: false,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "iconKey",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "isArchived",
+    required: false,
+    accepts: (value) => typeof value === "boolean",
+    expected: "a boolean",
+  },
+  {
+    key: "createdAt",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+];
+
+const FINANCE_SHARED_EXPENSE_FIELDS: ReadonlyArray<DocumentField> = [
+  {
+    key: "groupId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "tripId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "paidByUserId",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "payerAccountId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "title",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "totalAmountMinor",
+    required: true,
+    accepts: (value) =>
+      typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
+    expected: "a non-negative integer",
+  },
+  {
+    key: "currency",
+    required: false,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "splitType",
+    required: false,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "date",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "an ISO date string",
+  },
+  {
+    key: "notes",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "receiptAttachmentId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "createdAt",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+];
+
+const FINANCE_SETTLEMENT_FIELDS: ReadonlyArray<DocumentField> = [
+  {
+    key: "groupId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "tripId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "fromUserId",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "toUserId",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "amountMinor",
+    required: true,
+    accepts: (value) =>
+      typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
+    expected: "a non-negative integer",
+  },
+  {
+    key: "currency",
+    required: false,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "date",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "an ISO date string",
+  },
+  {
+    key: "notes",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "paymentMethod",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "createdAt",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+];
+
+const FINANCE_TRIP_FIELDS: ReadonlyArray<DocumentField> = [
+  {
+    key: "title",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "destinations",
+    required: false,
+    accepts: (value) =>
+      value === null ||
+      (Array.isArray(value) && value.every((d) => typeof d === "string")),
+    expected: "null or a list of strings",
+  },
+  {
+    key: "startDate",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "an ISO date string",
+  },
+  {
+    key: "endDate",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "an ISO date string",
+  },
+  {
+    key: "baseCurrency",
+    required: false,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "totalBudgetMinor",
+    required: false,
+    accepts: (value) =>
+      value === null ||
+      (typeof value === "number" && Number.isSafeInteger(value) && value >= 0),
+    expected: "null or a non-negative integer",
+  },
+  {
+    key: "notes",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "isArchived",
+    required: false,
+    accepts: (value) => typeof value === "boolean",
+    expected: "a boolean",
+  },
+  {
+    key: "createdAt",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+];
+
+const FINANCE_TRIP_ITINERARY_FIELDS: ReadonlyArray<DocumentField> = [
+  {
+    key: "tripId",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string uuid",
+  },
+  {
+    key: "dayIndex",
+    required: true,
+    accepts: (value) =>
+      typeof value === "number" && Number.isSafeInteger(value),
+    expected: "an integer",
+  },
+  {
+    key: "date",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or an ISO date string",
+  },
+  {
+    key: "title",
+    required: true,
+    accepts: (value) => typeof value === "string",
+    expected: "a string",
+  },
+  {
+    key: "plannedCostMinor",
+    required: false,
+    accepts: (value) =>
+      value === null ||
+      (typeof value === "number" && Number.isSafeInteger(value) && value >= 0),
+    expected: "null or a non-negative integer",
+  },
+  {
+    key: "notes",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "sortOrder",
+    required: false,
+    accepts: (value) => typeof value === "number",
+    expected: "a number",
+  },
+  {
+    key: "createdAt",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+];
+
 /**
  * The columns a device reads off one plaintext type, and the ceiling that type's
  * payload has.
@@ -713,6 +1478,54 @@ const DOCUMENT_SHAPES: Record<
   task: { fields: TASK_FIELDS, maxBytes: MAX_NOTE_PAYLOAD_BYTES },
   event: { fields: EVENT_FIELDS, maxBytes: MAX_NOTE_PAYLOAD_BYTES },
   calendar: { fields: CALENDAR_FIELDS, maxBytes: MAX_HABIT_PAYLOAD_BYTES },
+  finance_account: {
+    fields: FINANCE_ACCOUNT_FIELDS,
+    maxBytes: MAX_NOTE_PAYLOAD_BYTES,
+  },
+  finance_category: {
+    fields: FINANCE_CATEGORY_FIELDS,
+    maxBytes: MAX_NOTE_PAYLOAD_BYTES,
+  },
+  finance_transaction: {
+    fields: FINANCE_TRANSACTION_FIELDS,
+    maxBytes: MAX_NOTE_PAYLOAD_BYTES,
+  },
+  finance_budget: {
+    fields: FINANCE_BUDGET_FIELDS,
+    maxBytes: MAX_NOTE_PAYLOAD_BYTES,
+  },
+  finance_savings_goal: {
+    fields: FINANCE_SAVINGS_GOAL_FIELDS,
+    maxBytes: MAX_NOTE_PAYLOAD_BYTES,
+  },
+  finance_recurring_rule: {
+    fields: FINANCE_RECURRING_RULE_FIELDS,
+    maxBytes: MAX_NOTE_PAYLOAD_BYTES,
+  },
+  finance_loan: {
+    fields: FINANCE_LOAN_FIELDS,
+    maxBytes: MAX_NOTE_PAYLOAD_BYTES,
+  },
+  finance_group: {
+    fields: FINANCE_GROUP_FIELDS,
+    maxBytes: MAX_NOTE_PAYLOAD_BYTES,
+  },
+  finance_shared_expense: {
+    fields: FINANCE_SHARED_EXPENSE_FIELDS,
+    maxBytes: MAX_NOTE_PAYLOAD_BYTES,
+  },
+  finance_settlement: {
+    fields: FINANCE_SETTLEMENT_FIELDS,
+    maxBytes: MAX_NOTE_PAYLOAD_BYTES,
+  },
+  finance_trip: {
+    fields: FINANCE_TRIP_FIELDS,
+    maxBytes: MAX_NOTE_PAYLOAD_BYTES,
+  },
+  finance_trip_itinerary: {
+    fields: FINANCE_TRIP_ITINERARY_FIELDS,
+    maxBytes: MAX_NOTE_PAYLOAD_BYTES,
+  },
 };
 
 function violationsForChange(

@@ -7,6 +7,7 @@ import { MailProcessor } from "@/queues/processors/mail.processor";
 import { NotificationProcessor } from "@/queues/processors/notification.processor";
 import { ExportProcessor } from "@/queues/processors/export.processor";
 import { MaintenanceProcessor } from "@/queues/processors/maintenance.processor";
+import { FinanceProcessor } from "@/queues/processors/finance.processor";
 
 /**
  * Compile-time wiring test for the background worker.
@@ -27,7 +28,13 @@ import { MaintenanceProcessor } from "@/queues/processors/maintenance.processor"
  * verify SMTP. No Redis, no MongoDB, no network.
  */
 
-const QUEUE_NAMES = ["maintenance", "mail", "notification", "export"] as const;
+const QUEUE_NAMES = [
+  "maintenance",
+  "mail",
+  "notification",
+  "export",
+  "finance",
+] as const;
 type QueueName = (typeof QUEUE_NAMES)[number];
 
 /**
@@ -127,6 +134,7 @@ describe("WorkerModule (queue wiring)", () => {
       mail: createFakeQueue("mail"),
       notification: createFakeQueue("notification"),
       export: createFakeQueue("export"),
+      finance: createFakeQueue("finance"),
     } as Record<QueueName, FakeQueue>;
 
     const builder = Test.createTestingModule({ imports: [WorkerModule] })
@@ -145,7 +153,7 @@ describe("WorkerModule (queue wiring)", () => {
     return { module: await builder.compile(), queues };
   }
 
-  it("registers all four Bull queue tokens in the worker graph", async () => {
+  it("registers all five Bull queue tokens in the worker graph", async () => {
     const { module, queues } = await compileWorkerModule();
 
     QUEUE_NAMES.forEach((name) => {
@@ -166,6 +174,7 @@ describe("WorkerModule (queue wiring)", () => {
     expect(module.get(MaintenanceProcessor)).toBeInstanceOf(
       MaintenanceProcessor,
     );
+    expect(module.get(FinanceProcessor)).toBeInstanceOf(FinanceProcessor);
 
     await module.close();
   });

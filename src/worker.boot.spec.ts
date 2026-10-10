@@ -10,6 +10,7 @@ import { MailProcessor } from "@/queues/processors/mail.processor";
 import { NotificationProcessor } from "@/queues/processors/notification.processor";
 import { ExportProcessor } from "@/queues/processors/export.processor";
 import { MaintenanceProcessor } from "@/queues/processors/maintenance.processor";
+import { FinanceProcessor } from "@/queues/processors/finance.processor";
 
 /**
  * Boot tests for the background worker.
@@ -28,7 +29,13 @@ import { MaintenanceProcessor } from "@/queues/processors/maintenance.processor"
  * file needs neither Redis nor MongoDB.
  */
 
-const QUEUE_NAMES = ["maintenance", "mail", "notification", "export"] as const;
+const QUEUE_NAMES = [
+  "maintenance",
+  "mail",
+  "notification",
+  "export",
+  "finance",
+] as const;
 type QueueName = (typeof QUEUE_NAMES)[number];
 
 /** See the note in worker.module.spec.ts: process.env shadows any `.env` file. */
@@ -75,6 +82,7 @@ function createFakeQueues(): Record<QueueName, FakeQueue> {
     mail: createFakeQueue("mail"),
     notification: createFakeQueue("notification"),
     export: createFakeQueue("export"),
+    finance: createFakeQueue("finance"),
   };
 }
 
@@ -259,7 +267,7 @@ describe("Worker graph lifecycle (queue/processor binding)", () => {
     // @nestjs/bull registers handlers during onModuleInit.
     await module.init();
 
-    // All four processors are live instances of this container...
+    // All five processors are live instances of this container...
     expect(module.get(MailProcessor)).toBeInstanceOf(MailProcessor);
     expect(module.get(NotificationProcessor)).toBeInstanceOf(
       NotificationProcessor,
@@ -268,17 +276,20 @@ describe("Worker graph lifecycle (queue/processor binding)", () => {
     expect(module.get(MaintenanceProcessor)).toBeInstanceOf(
       MaintenanceProcessor,
     );
+    expect(module.get(FinanceProcessor)).toBeInstanceOf(FinanceProcessor);
 
     // ...and every one of their @Process handlers reached its own queue.
     const maintenanceJobs = registeredJobs(queues.maintenance);
     const mailJobs = registeredJobs(queues.mail);
     const notificationJobs = registeredJobs(queues.notification);
     const exportJobs = registeredJobs(queues.export);
+    const financeJobs = registeredJobs(queues.finance);
 
     expect(maintenanceJobs).toHaveLength(1);
     expect(mailJobs).toHaveLength(2);
     expect(notificationJobs).toHaveLength(1);
     expect(exportJobs).toHaveLength(1);
+    expect(financeJobs).toHaveLength(2);
 
     expect(maintenanceJobs.map(([name]) => name)).toEqual(["cleanup-expired"]);
     expect(mailJobs.map(([name]) => name)).toEqual(
@@ -291,6 +302,9 @@ describe("Worker graph lifecycle (queue/processor binding)", () => {
       "send-notification",
     ]);
     expect(exportJobs.map(([name]) => name)).toEqual(["process-export"]);
+    expect(financeJobs.map(([name]) => name)).toEqual(
+      expect.arrayContaining(["process-recurring", "check-budget-alerts"]),
+    );
 
     await module.close();
   });
