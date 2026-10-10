@@ -16,17 +16,52 @@ const delegates = (id: string, overrides: Record<string, jest.Mock> = {}) => ({
   ...overrides,
 });
 
+/**
+ * Answers "whose row is this?" per id, the way the account and category tables
+ * do.
+ *
+ * The projection resolves every reference a change names before it writes
+ * (`resolveReferenceOwner` / `referenceIsUnusable`), and it fails closed: a
+ * `null` is "the collection does not answer for this id", which is a refusal,
+ * not a licence. A fake that resolves every delegate to `null` therefore cannot
+ * test a landing CREATE — it only tests the drop. The fixture names the owners
+ * and leaves an unlisted id genuinely unlisted.
+ */
+function ownerLookup(ownersById: Record<string, string>) {
+  return jest.fn().mockImplementation((args: any) => {
+    const id = args?.where?.id;
+    return Promise.resolve(
+      typeof id === "string" && ownersById[id] !== undefined
+        ? { userId: ownersById[id] }
+        : null,
+    );
+  });
+}
+
+/** A delegate whose `findUnique` answers per id. */
+function owningDelegates(id: string, ownersById: Record<string, string>) {
+  return delegates(id, { findUnique: ownerLookup(ownersById) });
+}
+
 function fakeFinanceTx(overrides: Record<string, any> = {}) {
   return {
     financeTransaction: delegates(txId, overrides.financeTransaction || {}),
-    financeAccount: delegates(accountId, overrides.financeAccount || {}),
-    financeCategory: delegates(categoryId, overrides.financeCategory || {}),
+    financeAccount:
+      overrides.financeAccount ||
+      owningDelegates(accountId, { [accountId]: userId }),
+    financeCategory:
+      overrides.financeCategory ||
+      owningDelegates(categoryId, { [categoryId]: userId }),
     ...overrides,
   };
 }
 
 describe("test/finance/sync_projection_test.ts", () => {
-  it("validates that pushed finance_transaction changes update Prisma rows and emit sync:invalidation", async () => {
+  // `sync:invalidation` is not this function's output: the projection only
+  // writes rows, and `SyncGateway.broadcastToUser` (`src/sync/sync.gateway.ts`)
+  // emits the socket signal after `sync.service.ts` commits the push. The title
+  // used to promise that signal from `projectAcceptedChange` alone.
+  it("projects a pushed finance_transaction CREATE onto Prisma once its references resolve to the pusher", async () => {
     const tx = fakeFinanceTx();
 
     const change: ProjectableChange = {
@@ -61,5 +96,40 @@ describe("test/finance/sync_projection_test.ts", () => {
         version: 1,
       }),
     });
+
+    // The row only lands because the guard was asked and answered. Dropping
+    // these two calls would mean the fixture stopped modelling the tables the
+    // projection reads, which is exactly how a foreign reference starts passing.
+    expect(tx.financeAccount.findUnique).toHaveBeenCalledWith({
+      where: { id: accountId },
+      select: { userId: true },
+    });
+    expect(tx.financeCategory.findUnique).toHaveBeenCalledWith({
+      where: { id: categoryId },
+      select: { userId: true },
+    });
+  });
+
+  it("drops a CREATE that names an account the collection does not answer for", async () => {
+    const unknownAccount = "acc-00000000-0000-4000-8000-000000000000";
+    const tx = fakeFinanceTx();
+
+    await projectAcceptedChange(tx, userId, {
+      entityType: "finance_transaction",
+      entityId: txId,
+      operation: ChangeOperation.CREATE,
+      version: 1,
+      payload: {
+        accountId: unknownAccount,
+        categoryId,
+        type: "EXPENSE",
+        amountMinor: 250000,
+        currency: "INR",
+        title: "Ghost Account",
+        version: 1,
+      },
+    });
+
+    expect(tx.financeTransaction.create).not.toHaveBeenCalled();
   });
 });

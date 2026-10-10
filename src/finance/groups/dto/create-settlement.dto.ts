@@ -5,6 +5,8 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  IsUUID,
+  Max,
   MaxLength,
   Min,
 } from "class-validator";
@@ -16,6 +18,7 @@ export class CreateSettlementDto {
   })
   @IsNotEmpty()
   @IsString()
+  @MaxLength(100)
   fromUserId!: string;
 
   @ApiProperty({
@@ -24,6 +27,7 @@ export class CreateSettlementDto {
   })
   @IsNotEmpty()
   @IsString()
+  @MaxLength(100)
   toUserId!: string;
 
   @ApiProperty({
@@ -32,6 +36,7 @@ export class CreateSettlementDto {
   })
   @IsInt()
   @Min(1)
+  @Max(Number.MAX_SAFE_INTEGER)
   amountMinor!: number;
 
   @ApiPropertyOptional({ example: "INR", default: "INR" })
@@ -70,6 +75,6 @@ export class CreateSettlementDto {
     description: "Optional trip ID if associated with a trip",
   })
   @IsOptional()
-  @IsString()
+  @IsUUID()
   tripId?: string;
 }

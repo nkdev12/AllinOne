@@ -1,11 +1,13 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import {
+  ArrayMaxSize,
   IsArray,
   IsISO8601,
   IsInt,
   IsNotEmpty,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
 } from "class-validator";
@@ -23,7 +25,9 @@ export class CreateTripDto {
   })
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(20)
   @IsString({ each: true })
+  @MaxLength(100, { each: true })
   destinations?: string[];
 
   @ApiProperty({
@@ -59,6 +63,7 @@ export class CreateTripDto {
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(Number.MAX_SAFE_INTEGER)
   totalBudgetMinor?: number;
 
   @ApiPropertyOptional({

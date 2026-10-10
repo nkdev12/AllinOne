@@ -36,7 +36,8 @@ export class CollaborationController {
 
   @Post("shares")
   @ApiOperation({
-    summary: "Share a resource (note, project, calendar) with another user",
+    summary:
+      "Share a note, project, calendar, finance group, or trip with another user",
   })
   @ApiResponse({ status: 201, description: "Resource shared successfully" })
   @ApiResponse({

@@ -116,6 +116,28 @@ describe("VaultSettingsService recovery", () => {
     expect(result.message).toContain("If the vault can be recovered");
   });
 
+  it("does not claim a recovery code was sent when production email fails", async () => {
+    mailService.sendVaultRecoveryOtpEmail.mockResolvedValue(false);
+    const productionConfig = { ...config, isProduction: true };
+    const module = await Test.createTestingModule({
+      providers: [
+        VaultSettingsService,
+        { provide: PrismaService, useValue: prisma },
+        { provide: OtpService, useValue: otpService },
+        { provide: UsersService, useValue: usersService },
+        { provide: ConfigurationService, useValue: productionConfig },
+        { provide: MailService, useValue: mailService },
+        { provide: AuditLogService, useValue: auditLogService },
+      ],
+    }).compile();
+
+    await expect(
+      module
+        .get<VaultSettingsService>(VaultSettingsService)
+        .requestRecoveryOtp("user-1"),
+    ).rejects.toThrow(BadRequestException);
+  });
+
   it("refuses recovery for vaults stored without recovery material", async () => {
     prisma.vaultSetting.findUnique.mockResolvedValue({
       ...setting,

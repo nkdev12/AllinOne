@@ -6,6 +6,7 @@ import {
   Delete,
   Body,
   Param,
+  Query,
   UseGuards,
   NotFoundException,
   HttpCode,
@@ -28,6 +29,14 @@ import { UpdateUserProfileDto } from "./dto/update-user-profile.dto";
 @ApiBearerAuth("access-token")
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
+
+  @Get("suggestions")
+  @ApiOperation({
+    summary: "Find registered accounts to add to a shared finance group",
+  })
+  async suggestions(@GetUser("id") userId: string, @Query("q") query?: string) {
+    return this.usersService.suggestAccounts(userId, query ?? "");
+  }
 
   @Get("me")
   @ApiOperation({ summary: "Get profile of current authenticated user" })

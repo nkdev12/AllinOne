@@ -1,7 +1,17 @@
 import {
-  assertExpenseShares,
+  allocateExpenseShares,
   validMembers,
 } from "../finance/groups/group-validation";
+// Shared with the REST write boundary: every money read path
+// (`getCashFlowSummary`, `AnalyticsService.getNetWorth`, `BudgetsService`)
+// matches the currency column as exact upper case, so a device that stored
+// "inr" has to be normalised here too or the projection lands a row the
+// victim-side dashboards cannot see. `src/finance/accounts/accounts.service.ts`
+// is the single writer of that rule; importing it keeps the two paths from
+// drifting apart. Nothing in that file's graph reaches `change-projection`, so
+// the edge is one-way (`sync` -> `finance`), the same way this module already
+// reaches `finance/groups/group-validation`.
+import { normaliseCurrency } from "@/finance/accounts/accounts.service";
 import {
   BadRequestException,
   ForbiddenException,
@@ -97,6 +107,8 @@ export type ChangeProjectionClient = {
     Prisma.TransactionClient["financeGroup"],
     "findUnique" | "create" | "update"
   >;
+  resourceShare?: Pick<Prisma.TransactionClient["resourceShare"], "findFirst">;
+  user?: Pick<Prisma.TransactionClient["user"], "findMany">;
   financeSharedExpense?: Pick<
     Prisma.TransactionClient["financeSharedExpense"],
     "findUnique" | "create" | "update"
@@ -289,6 +301,17 @@ async function projectNoteChange(
     // nothing and cost a document.
     if (!existing) return;
 
+    // A tombstone is a write, so it answers to the same tie rule the content
+    // branches above apply. The push gate in `sync.service.ts` compares against
+    // the newest `Change` row, and `MaintenanceProcessor` prunes that log once a
+    // change is past retention and no live device is still waiting on it — after
+    // which the gate has nothing to compare against and this row is the only
+    // answer left. Unguarded, a 40-day-old DELETE queued at version 3 would
+    // tombstone a note the owner is at version 40 with *and* stamp 3 onto it, so
+    // the row ends up behind its own history and every device that had already
+    // deleted-and-raced it disagrees with the table about whether it exists.
+    if (losesToWhatTheRowHolds(change, existing)) return;
+
     await noteDelegate.update({
       where: { id: change.entityId },
       data: {
@@ -359,6 +382,11 @@ async function projectFolderChange(
 
   if (change.operation === ChangeOperation.DELETE) {
     if (!existing) return;
+    // The stale-DELETE tie rule, as in the note branch above. `FoldersService`
+    // neither bumps this row's version nor logs a change, so the version the row
+    // holds is the one the last accepted change left — which makes this the
+    // guard's cheapest case, not its hardest.
+    if (losesToWhatTheRowHolds(change, existing)) return;
     await folderDelegate.update({
       where: { id: change.entityId },
       data: { deletedAt: new Date(), version: change.version },
@@ -463,6 +491,21 @@ function isTextOrNull(value: unknown): value is string | null {
 }
 
 /**
+ * The currency column for a payload value, normalised exactly the way the REST
+ * write boundary normalises it (`normaliseCurrency`).
+ *
+ * A non-string is a currency no device meant: `assertPushableChanges` already
+ * refuses one, and the projection is the thing that would otherwise throw
+ * `value.trim is not a function` and take the whole push down with it. Every
+ * currency a projection writes goes through here, because a row stored as "inr"
+ * is invisible to the exact-upper-case money reads the same way it was before
+ * the REST path was fixed — the push mirror simply had not been told.
+ */
+function currencyColumn(value: unknown): string {
+  return normaliseCurrency(typeof value === "string" ? value : null);
+}
+
+/**
  * The device's own birth time for the note, or nothing.
  *
  * Only a CREATE carries one, and only a row being created can take it — an
@@ -500,6 +543,8 @@ async function projectTaskChange(
 
   if (change.operation === ChangeOperation.DELETE) {
     if (!existing) return;
+    // The stale-DELETE tie rule, as in the note branch above.
+    if (losesToWhatTheRowHolds(change, existing)) return;
     await taskDelegate.update({
       where: { id: change.entityId },
       data: { deletedAt: new Date(), version: change.version },
@@ -601,6 +646,8 @@ async function projectEventChange(
 
   if (change.operation === ChangeOperation.DELETE) {
     if (!existing) return;
+    // The stale-DELETE tie rule, as in the note branch above.
+    if (losesToWhatTheRowHolds(change, existing)) return;
     await eventDelegate.update({
       where: { id: change.entityId },
       data: { deletedAt: new Date(), version: change.version },
@@ -708,6 +755,13 @@ async function projectCalendarChange(
 
   if (change.operation === ChangeOperation.DELETE) {
     if (!existing) return;
+    // No tie guard here, and it is not an oversight: `Calendar` has no `version`
+    // column (`prisma/schema.prisma:662`), so the row cannot answer the question
+    // the guard asks. That cuts both ways — a stale calendar change cannot roll a
+    // stored version backwards, because this projection never writes one, and it
+    // cannot be refused for being older than the row either. Closing the tombstone
+    // half needs the column first, which is a schema change, not a projection
+    // change.
     await calendarDelegate.update({
       where: { id: change.entityId },
       data: { deletedAt: new Date() },
@@ -759,7 +813,7 @@ async function projectFinanceAccountChange(
 
   const existing = await delegate.findUnique({
     where: { id: change.entityId },
-    select: { userId: true, deletedAt: true },
+    select: { userId: true, deletedAt: true, version: true },
   });
 
   if (existing && existing.userId !== userId) {
@@ -771,6 +825,16 @@ async function projectFinanceAccountChange(
 
   if (change.operation === ChangeOperation.DELETE) {
     if (!existing) return;
+    // A tombstone is a write, and `adjustAccount` bumps this row's version on
+    // every transaction booked against it without ever logging a
+    // `finance_account` change, so the account's own copy of the oplog is
+    // regularly *behind* the row. An offline device's stale DELETE at version 3
+    // therefore passes the push gate in `sync.service.ts` and, unguarded, would
+    // blank out an account the owner is at version 40 with — and stamp 3, after
+    // which every legitimate later change looks stale. The tie rule is the one
+    // the content branches already apply; `RESTORE` still wins, because coming
+    // back is its whole meaning.
+    if (losesToWhatTheRowHolds(change, existing)) return;
     await delegate.update({
       where: { id: change.entityId },
       data: { deletedAt: new Date(), version: change.version },
@@ -794,7 +858,7 @@ async function projectFinanceAccountChange(
         userId,
         name: payload.name ?? "New Account",
         type: payload.type ?? "BANK",
-        currency: payload.currency ?? "INR",
+        currency: currencyColumn(payload.currency),
         openingBalanceMinor: openingMinor,
         currentBalanceMinor: currentMinor,
         color: isTextOrNull(payload.color) ? payload.color : null,
@@ -810,6 +874,8 @@ async function projectFinanceAccountChange(
     return;
   }
 
+  if (losesToWhatTheRowHolds(change, existing)) return;
+
   await delegate.update({
     where: { id: change.entityId },
     data: {
@@ -818,7 +884,7 @@ async function projectFinanceAccountChange(
         ? { type: payload.type as any }
         : {}),
       ...(typeof payload.currency === "string"
-        ? { currency: payload.currency }
+        ? { currency: currencyColumn(payload.currency) }
         : {}),
       ...(payload.currentBalanceMinor !== undefined
         ? { currentBalanceMinor: currentMinor }
@@ -848,7 +914,7 @@ async function projectFinanceCategoryChange(
 
   const existing = await delegate.findUnique({
     where: { id: change.entityId },
-    select: { userId: true, deletedAt: true },
+    select: { userId: true, deletedAt: true, version: true },
   });
 
   if (existing && existing.userId !== userId) {
@@ -860,6 +926,8 @@ async function projectFinanceCategoryChange(
 
   if (change.operation === ChangeOperation.DELETE) {
     if (!existing) return;
+    // The stale-DELETE tie rule, as in the account branch above.
+    if (losesToWhatTheRowHolds(change, existing)) return;
     await delegate.update({
       where: { id: change.entityId },
       data: { deletedAt: new Date(), version: change.version },
@@ -887,6 +955,8 @@ async function projectFinanceCategoryChange(
     return;
   }
 
+  if (losesToWhatTheRowHolds(change, existing)) return;
+
   await delegate.update({
     where: { id: change.entityId },
     data: {
@@ -903,6 +973,56 @@ async function projectFinanceCategoryChange(
   });
 }
 
+/**
+ * Whose row a reference the payload names answers to, or nothing at all.
+ *
+ * `undefined` means the question was never asked — either the change does not
+ * speak about that reference, or this projection client has no delegate to ask.
+ * A partial client is a test fixture's shape, not a rule about ownership, so it
+ * is the one case that cannot be judged; the real `/sync/push` path always hands
+ * the whole Prisma transaction client.
+ */
+async function resolveReferenceOwner(
+  delegate: { findUnique: (args: any) => Promise<any> } | undefined,
+  ref: string | null,
+): Promise<{ userId: string | null } | null | undefined> {
+  if (ref === null || !delegate) return undefined;
+  return delegate.findUnique({ where: { id: ref }, select: { userId: true } });
+}
+
+/**
+ * Whether a reference this change names must not be written onto the row.
+ *
+ * REST asks this question of every reference before it writes
+ * (`transactions.service.ts` resolves `accountId`, `toAccountId` and
+ * `categoryId` under the caller, `recurring.service.ts` does the same with
+ * `assertAccountOwned`/`assertCategoryUsable`), and a push that skipped it plants
+ * a row on a victim's account for the victim's own writes to settle:
+ * `updateTransaction` and `deleteTransaction` hand `oldTx.accountId` to
+ * `adjustAccount`, which updates `financeAccount` under the *transaction* row's
+ * owner and moves that account's balance. So a reference the caller may not use
+ * is refused here, exactly as the row itself is refused by the owner comparisons
+ * above.
+ *
+ * Fails closed. An id the collection does not answer for is refused alongside a
+ * provably foreign one: "nobody owns this account" is not "the pusher owns it",
+ * and a row parked on an id that resolves to nothing is a balance no path can
+ * attribute — the same way the itinerary branch refuses a parent trip the table
+ * does not answer for.
+ *
+ * `FinanceCategory.userId` is nullable (`prisma/schema.prisma:932`) and the
+ * unowned rows are the shared `isSystem` labels analytics serves to everybody,
+ * so a `null` owner is usable, not foreign.
+ */
+function referenceIsUnusable(
+  row: { userId: string | null } | null | undefined,
+  userId: string,
+): boolean {
+  if (row === undefined) return false;
+  if (row === null) return true;
+  return row.userId !== null && row.userId !== userId;
+}
+
 async function projectFinanceTransactionChange(
   tx: ChangeProjectionClient,
   userId: string,
@@ -917,6 +1037,7 @@ async function projectFinanceTransactionChange(
     select: {
       userId: true,
       deletedAt: true,
+      version: true,
     },
   });
 
@@ -929,6 +1050,7 @@ async function projectFinanceTransactionChange(
 
   if (change.operation === ChangeOperation.DELETE) {
     if (!existing || existing.deletedAt) return;
+    if (losesToWhatTheRowHolds(change, existing)) return;
     await delegate.update({
       where: { id: change.entityId },
       data: { deletedAt: new Date(), version: change.version },
@@ -941,6 +1063,41 @@ async function projectFinanceTransactionChange(
     ? new Date(payload.transactionDate)
     : new Date();
 
+  const accountRef =
+    typeof payload.accountId === "string" ? payload.accountId : null;
+  const toAccountRef =
+    typeof payload.toAccountId === "string" ? payload.toAccountId : null;
+  const categoryRef =
+    typeof payload.categoryId === "string" ? payload.categoryId : null;
+
+  const accountRow = await resolveReferenceOwner(tx.financeAccount, accountRef);
+  const toAccountRow = await resolveReferenceOwner(
+    tx.financeAccount,
+    toAccountRef,
+  );
+
+  if (
+    referenceIsUnusable(accountRow, userId) ||
+    referenceIsUnusable(toAccountRow, userId)
+  ) {
+    // A transfer with one side belonging to somebody else is not a transfer
+    // this user can make, and an income or expense parked on a foreign account
+    // is the same write wearing a different hat. The change is dropped whole
+    // rather than repaired: an account half is not the caller's to settle.
+    logger.warn(
+      `Ignored a ${String(change.operation)} change for finance_transaction ${change.entityId} pushed by ${userId}: it names an account that is not theirs or that the collection does not answer for.`,
+    );
+    return;
+  }
+
+  const categoryRow = await resolveReferenceOwner(
+    tx.financeCategory,
+    categoryRef,
+  );
+  // A label is a nullable column and a fact about the money rather than where
+  // it sits, so an unusable one costs the label and not the row.
+  const categoryIsUnusable = referenceIsUnusable(categoryRow, userId);
+
   if (!existing) {
     const createdAt = parsedCreatedAt(payload);
     await delegate.create({
@@ -951,12 +1108,13 @@ async function projectFinanceTransactionChange(
         toAccountId: isTextOrNull(payload.toAccountId)
           ? payload.toAccountId
           : null,
-        categoryId: isTextOrNull(payload.categoryId)
-          ? payload.categoryId
-          : null,
+        categoryId:
+          !categoryIsUnusable && isTextOrNull(payload.categoryId)
+            ? payload.categoryId
+            : null,
         type: payload.type ?? "EXPENSE",
         amountMinor,
-        currency: payload.currency ?? "INR",
+        currency: currencyColumn(payload.currency),
         title: payload.title ?? "Transaction",
         notes: isTextOrNull(payload.notes) ? payload.notes : null,
         tags: Array.isArray(payload.tags) ? payload.tags : [],
@@ -981,6 +1139,8 @@ async function projectFinanceTransactionChange(
     return;
   }
 
+  if (losesToWhatTheRowHolds(change, existing)) return;
+
   await delegate.update({
     where: { id: change.entityId },
     data: {
@@ -996,9 +1156,10 @@ async function projectFinanceTransactionChange(
         : {}),
       ...(payload.categoryId !== undefined
         ? {
-            categoryId: isTextOrNull(payload.categoryId)
-              ? payload.categoryId
-              : null,
+            categoryId:
+              !categoryIsUnusable && isTextOrNull(payload.categoryId)
+                ? payload.categoryId
+                : null,
           }
         : {}),
       ...(typeof payload.type === "string"
@@ -1006,7 +1167,7 @@ async function projectFinanceTransactionChange(
         : {}),
       ...(payload.amountMinor !== undefined ? { amountMinor } : {}),
       ...(typeof payload.currency === "string"
-        ? { currency: payload.currency }
+        ? { currency: currencyColumn(payload.currency) }
         : {}),
       ...(typeof payload.title === "string" ? { title: payload.title } : {}),
       ...(payload.notes !== undefined
@@ -1055,6 +1216,8 @@ async function projectFinanceBudgetChange(
 
   if (change.operation === ChangeOperation.DELETE) {
     if (!existing || existing.deletedAt) return;
+    // The stale-DELETE tie rule, as in the account branch above.
+    if (losesToWhatTheRowHolds(change, existing)) return;
     await delegate.update({
       where: { id: change.entityId },
       data: { deletedAt: new Date(), version: change.version },
@@ -1146,6 +1309,8 @@ async function projectFinanceSavingsGoalChange(
 
   if (change.operation === ChangeOperation.DELETE) {
     if (!existing || existing.deletedAt) return;
+    // The stale-DELETE tie rule, as in the account branch above.
+    if (losesToWhatTheRowHolds(change, existing)) return;
     await delegate.update({
       where: { id: change.entityId },
       data: { deletedAt: new Date(), version: change.version },
@@ -1238,6 +1403,8 @@ async function projectFinanceRecurringRuleChange(
 
   if (change.operation === ChangeOperation.DELETE) {
     if (!existing || existing.deletedAt) return;
+    // The stale-DELETE tie rule, as in the account branch above.
+    if (losesToWhatTheRowHolds(change, existing)) return;
     await delegate.update({
       where: { id: change.entityId },
       data: { deletedAt: new Date(), version: change.version },
@@ -1253,6 +1420,33 @@ async function projectFinanceRecurringRuleChange(
     ? new Date(payload.nextDueDate)
     : startDate;
 
+  // The same reference rule the transaction branch applies, kept identical: a
+  // rule bills against `accountId` for the rest of its life, and the processor
+  // half of that chain (`recurring.service.ts` `assertAccountOwned`, and the
+  // `processDueRules` re-check that settles a rule whose account is gone) is
+  // already closed server-side — so the projection was the one door left open.
+  // A foreign or unknown `accountId` drops the change whole; a label the caller
+  // may not use costs the label and not the rule, exactly as the transaction
+  // branch treats `categoryId`.
+  const accountRef =
+    typeof payload.accountId === "string" ? payload.accountId : null;
+  const categoryRef =
+    typeof payload.categoryId === "string" ? payload.categoryId : null;
+
+  const accountRow = await resolveReferenceOwner(tx.financeAccount, accountRef);
+  if (referenceIsUnusable(accountRow, userId)) {
+    logger.warn(
+      `Ignored a ${String(change.operation)} change for finance_recurring_rule ${change.entityId} pushed by ${userId}: it names an account that is not theirs or that the collection does not answer for.`,
+    );
+    return;
+  }
+
+  const categoryRow = await resolveReferenceOwner(
+    tx.financeCategory,
+    categoryRef,
+  );
+  const categoryIsUnusable = referenceIsUnusable(categoryRow, userId);
+
   if (!existing) {
     const createdAt = parsedCreatedAt(payload);
     await delegate.create({
@@ -1260,9 +1454,10 @@ async function projectFinanceRecurringRuleChange(
         id: change.entityId,
         userId,
         accountId: payload.accountId,
-        categoryId: isTextOrNull(payload.categoryId)
-          ? payload.categoryId
-          : null,
+        categoryId:
+          !categoryIsUnusable && isTextOrNull(payload.categoryId)
+            ? payload.categoryId
+            : null,
         type: (payload.type as any) ?? "EXPENSE",
         amountMinor,
         title:
@@ -1296,9 +1491,10 @@ async function projectFinanceRecurringRuleChange(
         : {}),
       ...(payload.categoryId !== undefined
         ? {
-            categoryId: isTextOrNull(payload.categoryId)
-              ? payload.categoryId
-              : null,
+            categoryId:
+              !categoryIsUnusable && isTextOrNull(payload.categoryId)
+                ? payload.categoryId
+                : null,
           }
         : {}),
       ...(payload.type !== undefined ? { type: payload.type as any } : {}),
@@ -1356,6 +1552,8 @@ async function projectFinanceLoanChange(
 
   if (change.operation === ChangeOperation.DELETE) {
     if (!existing || existing.deletedAt) return;
+    // The stale-DELETE tie rule, as in the account branch above.
+    if (losesToWhatTheRowHolds(change, existing)) return;
     await delegate.update({
       where: { id: change.entityId },
       data: { deletedAt: new Date(), version: change.version },
@@ -1458,7 +1656,12 @@ async function projectFinanceGroupChange(
     select: { ownerId: true, deletedAt: true, version: true },
   });
 
-  if (existing && existing.ownerId !== userId) {
+  if (
+    existing &&
+    existing.ownerId !== userId &&
+    (change.operation === ChangeOperation.DELETE ||
+      !(await canEditFinanceGroup(tx, userId, change.entityId)))
+  ) {
     logger.warn(
       `Ignored a ${String(change.operation)} change for finance_group ${change.entityId} pushed by ${userId}: the group belongs to ${existing.ownerId}.`,
     );
@@ -1467,6 +1670,8 @@ async function projectFinanceGroupChange(
 
   if (change.operation === ChangeOperation.DELETE) {
     if (!existing) return;
+    // The stale-DELETE tie rule, as in the account branch above.
+    if (losesToWhatTheRowHolds(change, existing)) return;
     await delegate.update({
       where: { id: change.entityId },
       data: { deletedAt: new Date(), version: change.version },
@@ -1474,8 +1679,12 @@ async function projectFinanceGroupChange(
     return;
   }
 
-  if (payload.members !== undefined && !validMembers(payload.members))
-    throw new BadRequestException("Invalid group friends.");
+  if (payload.members !== undefined) {
+    if (!validMembers(payload.members)) {
+      throw new BadRequestException("Invalid group friends.");
+    }
+    await assertRegisteredGroupMembers(tx, userId, payload.members);
+  }
 
   if (!existing) {
     const createdAt = parsedCreatedAt(payload);
@@ -1488,7 +1697,7 @@ async function projectFinanceGroupChange(
         description: isTextOrNull(payload.description)
           ? payload.description
           : null,
-        currency: payload.currency ?? "INR",
+        currency: currencyColumn(payload.currency),
         iconKey: isTextOrNull(payload.iconKey) ? payload.iconKey : null,
         isArchived:
           typeof payload.isArchived === "boolean" ? payload.isArchived : false,
@@ -1515,7 +1724,7 @@ async function projectFinanceGroupChange(
           }
         : {}),
       ...(typeof payload.currency === "string"
-        ? { currency: payload.currency }
+        ? { currency: currencyColumn(payload.currency) }
         : {}),
       ...(payload.iconKey !== undefined
         ? { iconKey: isTextOrNull(payload.iconKey) ? payload.iconKey : null }
@@ -1529,6 +1738,58 @@ async function projectFinanceGroupChange(
   });
 }
 
+async function canEditFinanceGroup(
+  tx: ChangeProjectionClient,
+  userId: string,
+  groupId: string,
+): Promise<boolean> {
+  const share = await tx.resourceShare?.findFirst({
+    where: {
+      resourceType: "EXPENSE_GROUP",
+      resourceId: groupId,
+      sharedWithUserId: userId,
+      deletedAt: null,
+      role: { in: ["EDITOR", "ADMIN"] },
+    },
+  });
+  return share != null;
+}
+
+async function assertRegisteredGroupMembers(
+  tx: ChangeProjectionClient,
+  userId: string,
+  members: Array<{ id: string }>,
+): Promise<void> {
+  const ids = [...new Set(members.map((member) => member.id))].filter(
+    (id) => id !== "You" && id !== userId,
+  );
+  if (!ids.length) return;
+  const accounts = await tx.user?.findMany({
+    where: { id: { in: ids }, status: "ACTIVE" },
+    select: { id: true, deletedAt: true },
+  });
+  const active = new Set(
+    (accounts ?? [])
+      .filter((account) => !account.deletedAt)
+      .map((account) => account.id),
+  );
+  if (ids.some((id) => !active.has(id))) {
+    throw new BadRequestException(
+      "Each friend must be a registered active account.",
+    );
+  }
+}
+
+/**
+ * The parent a shared expense or settlement answers to, and the currency it is
+ * pinned to.
+ *
+ * The currency comparison is made normalised on both sides, because that is the
+ * only answer consistent with what this module writes: a device that stored
+ * "inr" is not asking for a different currency, and refusing it here would abort
+ * the whole push over a case difference in a value the projection then
+ * normalises anyway.
+ */
 async function assertSharedScope(
   tx: ChangeProjectionClient,
   userId: string,
@@ -1542,10 +1803,18 @@ async function assertSharedScope(
     const parent = await tx.financeGroup?.findUnique({
       where: { id: refs.groupId },
     });
-    if (!parent || parent.ownerId !== userId || parent.deletedAt) {
+    if (
+      !parent ||
+      parent.deletedAt ||
+      (parent.ownerId !== userId &&
+        !(await canEditFinanceGroup(tx, userId, refs.groupId)))
+    ) {
       throw new ForbiddenException("This group is not available to you.");
     }
-    if (currency && parent.currency !== currency) {
+    if (
+      currency &&
+      currencyColumn(parent.currency) !== currencyColumn(currency)
+    ) {
       throw new BadRequestException("Use the group currency.");
     }
   }
@@ -1556,7 +1825,10 @@ async function assertSharedScope(
     if (!parent || parent.ownerId !== userId || parent.deletedAt) {
       throw new ForbiddenException("This trip is not available to you.");
     }
-    if (currency && parent.baseCurrency !== currency) {
+    if (
+      currency &&
+      currencyColumn(parent.baseCurrency) !== currencyColumn(currency)
+    ) {
       throw new BadRequestException("Use the trip currency.");
     }
   }
@@ -1577,6 +1849,7 @@ async function projectFinanceSharedExpenseChange(
       groupId: true,
       tripId: true,
       totalAmountMinor: true,
+      splitType: true,
       deletedAt: true,
       version: true,
     },
@@ -1597,6 +1870,8 @@ async function projectFinanceSharedExpenseChange(
 
   if (change.operation === ChangeOperation.DELETE) {
     if (!existing) return;
+    // The stale-DELETE tie rule, as in the account branch above.
+    if (losesToWhatTheRowHolds(change, existing)) return;
     await delegate.update({
       where: { id: change.entityId },
       data: { deletedAt: new Date(), version: change.version },
@@ -1604,18 +1879,39 @@ async function projectFinanceSharedExpenseChange(
     return;
   }
 
-  if (payload.shares !== undefined || !existing)
-    assertExpenseShares(
-      Number(payload.totalAmountMinor ?? existing?.totalAmountMinor),
-      payload.shares,
-    );
-  const shareData = Array.isArray(payload.shares)
-    ? payload.shares.map((share: any) => ({
-        userId: share.userId,
-        owedAmountMinor: BigInt(share.owedAmountMinor),
-        shareUnits: share.shareUnits ?? null,
-      }))
-    : undefined;
+  // The amounts come from the same allocator the REST write path uses
+  // (`groups.service.ts`), imported rather than re-derived here: a device that
+  // queues an honest three-way split of 10000 (3333 x 3, because its own
+  // `SplitCalculator` rounded the other way on an older build) was accepted over
+  // `POST /finance/groups/:id/expenses` and refused by `/sync/push`, so the same
+  // action answered differently by transport. `EQUAL`, `PERCENTAGE` and `SHARES`
+  // are allocated by weight with the largest-remainder pass; `EXACT` and
+  // `ITEMIZED` keep the exact-sum contract through the same call, and so do the
+  // non-negative / unique-participant / positive-total guarantees.
+  //
+  // It still throws. That is the established shape of this file —
+  // `assertSharedScope` already throws `BadRequestException` and
+  // `ForbiddenException` mid-push, and the whole batch rolls back with them — so
+  // a split no device can replay costs the push exactly the 400 the REST path
+  // would have cost the same split.
+  const totalMinorNumber = Math.round(
+    Number(payload.totalAmountMinor ?? existing?.totalAmountMinor ?? 0),
+  );
+
+  const allocated =
+    payload.shares !== undefined || !existing
+      ? allocateExpenseShares(
+          totalMinorNumber,
+          payload.shares,
+          payload.splitType ?? existing?.splitType,
+        )
+      : undefined;
+
+  const shareData = allocated?.map((share) => ({
+    userId: share.userId,
+    owedAmountMinor: BigInt(share.owedAmountMinor),
+    shareUnits: share.shareUnits ?? null,
+  }));
 
   const totalAmountMinor = BigInt(
     Math.round(Number(payload.totalAmountMinor ?? 0)),
@@ -1637,7 +1933,7 @@ async function projectFinanceSharedExpenseChange(
           typeof payload.title === "string" ? payload.title : "Shared Expense",
         totalAmountMinor,
         ...(shareData ? { shares: { create: shareData } } : {}),
-        currency: payload.currency ?? "INR",
+        currency: currencyColumn(payload.currency),
         splitType: (payload.splitType as any) ?? "EQUAL",
         date,
         notes: isTextOrNull(payload.notes) ? payload.notes : null,
@@ -1677,7 +1973,7 @@ async function projectFinanceSharedExpenseChange(
       ...(payload.totalAmountMinor !== undefined ? { totalAmountMinor } : {}),
       ...(shareData ? { shares: { deleteMany: {}, create: shareData } } : {}),
       ...(typeof payload.currency === "string"
-        ? { currency: payload.currency }
+        ? { currency: currencyColumn(payload.currency) }
         : {}),
       ...(payload.splitType !== undefined
         ? { splitType: payload.splitType as any }
@@ -1735,6 +2031,8 @@ async function projectFinanceSettlementChange(
 
   if (change.operation === ChangeOperation.DELETE) {
     if (!existing) return;
+    // The stale-DELETE tie rule, as in the account branch above.
+    if (losesToWhatTheRowHolds(change, existing)) return;
     await delegate.update({
       where: { id: change.entityId },
       data: { deletedAt: new Date(), version: change.version },
@@ -1765,7 +2063,7 @@ async function projectFinanceSettlementChange(
         fromUserId: payload.fromUserId ?? userId,
         toUserId: payload.toUserId ?? "",
         amountMinor,
-        currency: payload.currency ?? "INR",
+        currency: currencyColumn(payload.currency),
         date,
         notes: isTextOrNull(payload.notes) ? payload.notes : null,
         paymentMethod: isTextOrNull(payload.paymentMethod)
@@ -1798,7 +2096,7 @@ async function projectFinanceSettlementChange(
         : {}),
       ...(payload.amountMinor !== undefined ? { amountMinor } : {}),
       ...(typeof payload.currency === "string"
-        ? { currency: payload.currency }
+        ? { currency: currencyColumn(payload.currency) }
         : {}),
       ...(payload.date !== undefined ? { date } : {}),
       ...(payload.notes !== undefined
@@ -1840,6 +2138,8 @@ async function projectFinanceTripChange(
 
   if (change.operation === ChangeOperation.DELETE) {
     if (!existing) return;
+    // The stale-DELETE tie rule, as in the account branch above.
+    if (losesToWhatTheRowHolds(change, existing)) return;
     await delegate.update({
       where: { id: change.entityId },
       data: { deletedAt: new Date(), version: change.version },
@@ -1868,7 +2168,7 @@ async function projectFinanceTripChange(
           : [],
         startDate,
         endDate,
-        baseCurrency: payload.baseCurrency ?? "INR",
+        baseCurrency: currencyColumn(payload.baseCurrency),
         totalBudgetMinor,
         notes: isTextOrNull(payload.notes) ? payload.notes : null,
         isArchived:
@@ -1893,7 +2193,7 @@ async function projectFinanceTripChange(
       ...(payload.startDate !== undefined ? { startDate } : {}),
       ...(payload.endDate !== undefined ? { endDate } : {}),
       ...(typeof payload.baseCurrency === "string"
-        ? { baseCurrency: payload.baseCurrency }
+        ? { baseCurrency: currencyColumn(payload.baseCurrency) }
         : {}),
       ...(payload.totalBudgetMinor !== undefined ? { totalBudgetMinor } : {}),
       ...(payload.notes !== undefined
@@ -1910,7 +2210,7 @@ async function projectFinanceTripChange(
 
 async function projectFinanceTripItineraryChange(
   tx: ChangeProjectionClient,
-  _userId: string,
+  userId: string,
   change: ProjectableChange,
   payload: Record<string, any>,
 ): Promise<void> {
@@ -1922,8 +2222,50 @@ async function projectFinanceTripItineraryChange(
     select: { tripId: true, deletedAt: true, version: true },
   });
 
+  // `FinanceTripItinerary` has no owner column of its own — the parent trip is
+  // the only thing that can answer whose item this is (`prisma/schema.prisma:1191-1209`),
+  // the same way `finance_shared_expense` and `finance_settlement` reach their
+  // owner through their parent in `assertSharedScope`. So the parent is loaded
+  // and compared before any branch writes, the tombstone below included: a
+  // delete is the easiest cross-user write to hide, because it asks for nothing
+  // but the uuid it is about to blank out.
+  //
+  // A CREATE has no row to read, so the payload's own `tripId` is its only claim
+  // about the parent; an UPDATE or DELETE trusts the table first, because
+  // `payload.tripId` describes where the device thinks the item goes and the row
+  // says where it actually is — and the row is the thing being written.
+  const tripId = existing?.tripId ?? payload.tripId;
+  const trip =
+    typeof tripId === "string" && tripId
+      ? await tx.financeTrip?.findUnique({
+          where: { id: tripId },
+          select: { ownerId: true },
+        })
+      : null;
+
+  if (!trip || trip.ownerId !== userId) {
+    // A parent that is not in the table is not the caller's either, and a
+    // tombstoned trip belonging to somebody else fails the same comparison —
+    // `ownerId` is stamped from the pusher at CREATE and never rewritten, so
+    // this one read answers both questions. The change still goes on the
+    // caller's log, where it is harmless because nobody else reads that log;
+    // what must not happen is the write to this row.
+    logger.warn(
+      `Ignored a ${String(change.operation)} change for finance_trip_itinerary ${change.entityId} pushed by ${userId}: ${
+        trip
+          ? `the trip ${tripId} belongs to ${trip.ownerId}`
+          : `no trip it belongs to could be resolved (${tripId ?? "no tripId given"})`
+      }.`,
+    );
+    return;
+  }
+
   if (change.operation === ChangeOperation.DELETE) {
     if (!existing) return;
+    // The stale-DELETE tie rule, as in the account branch above: the row's own
+    // `version` is read here already, so a tombstone older than what the item
+    // holds cannot roll it back.
+    if (losesToWhatTheRowHolds(change, existing)) return;
     await delegate.update({
       where: { id: change.entityId },
       data: { deletedAt: new Date(), version: change.version },
@@ -1942,7 +2284,9 @@ async function projectFinanceTripItineraryChange(
     await delegate.create({
       data: {
         id: change.entityId,
-        tripId: payload.tripId,
+        // The parent this change was authorized against, not the payload's
+        // unverified claim about one.
+        tripId,
         dayIndex: typeof payload.dayIndex === "number" ? payload.dayIndex : 1,
         date,
         title:

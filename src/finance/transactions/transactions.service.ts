@@ -10,12 +10,31 @@ import { CreateTransactionDto } from "./dto/create-transaction.dto";
 import { UpdateTransactionDto } from "./dto/update-transaction.dto";
 import { QueryTransactionsDto } from "./dto/query-transaction.dto";
 import { appendChange } from "@/sync/change-cursor";
-import { accountChangePayload } from "../accounts/accounts.service";
+import {
+  accountChangePayload,
+  normaliseCurrency,
+} from "../accounts/accounts.service";
 import {
   ChangeOperation,
   FinanceTransactionType,
   Prisma,
 } from "@prisma/client";
+
+const DEFAULT_PAGE_SIZE = 20;
+const MAX_PAGE_SIZE = 200;
+const MAX_PAGE = 10000;
+
+/**
+ * `contains` on the MongoDB connector is not a substring match: the value is
+ * interpolated verbatim into `$regex` (verified against prisma 5.22 by logging
+ * the emitted command — `contains: "a.b(c+)+$"` becomes
+ * `regex: ".*a.b(c+)+$.*"`). Unescaped user text therefore either matches rows
+ * it should not (`a.b` also hits `axb`) or hands Mongo a backtracking bomb such
+ * as `(a+)+$`. Escaping first restores literal substring semantics.
+ */
+export function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 export function formatTransactionResponse(tx: any) {
   return {
@@ -64,6 +83,23 @@ export class TransactionsService {
     accountId: string,
     deltaMinor: bigint,
   ) {
+    // The `accountId` on a transaction row is only trusted as far as the row's
+    // own owner goes: a change pushed through the sync projection can name any
+    // account id, and this update used to key on `{ id }` alone — so a later
+    // REST update or delete of that row moved a stranger's balance. Verify
+    // ownership inside the same transaction and abort loudly rather than
+    // skipping the move, which would leave the ledger and the balance apart.
+    const owned = await tx.financeAccount.findFirst({
+      where: { id: accountId, userId, deletedAt: null },
+      select: { id: true },
+    });
+
+    if (!owned) {
+      throw new NotFoundException(
+        `Finance account with ID '${accountId}' not found.`,
+      );
+    }
+
     const updated = await tx.financeAccount.update({
       where: { id: accountId },
       data: {
@@ -94,10 +130,13 @@ export class TransactionsService {
       );
     }
 
-    if (
-      (dto.currency ?? account.currency).toUpperCase() !==
-      account.currency.toUpperCase()
-    ) {
+    const accountCurrency = normaliseCurrency(account.currency);
+    const currency =
+      dto.currency === undefined
+        ? accountCurrency
+        : normaliseCurrency(dto.currency);
+
+    if (currency !== accountCurrency) {
       throw new BadRequestException(
         "Transaction currency must match the account.",
       );
@@ -122,7 +161,7 @@ export class TransactionsService {
       }
       if (
         toAccount.isArchived ||
-        toAccount.currency.toUpperCase() !== account.currency.toUpperCase()
+        normaliseCurrency(toAccount.currency) !== accountCurrency
       ) {
         throw new BadRequestException(
           "Transfers require active accounts in the same currency.",
@@ -154,7 +193,7 @@ export class TransactionsService {
           categoryId: dto.categoryId,
           type: dto.type,
           amountMinor,
-          currency: account.currency,
+          currency,
           title: dto.title,
           notes: dto.notes,
           tags: dto.tags ?? [],
@@ -197,8 +236,14 @@ export class TransactionsService {
   }
 
   async getTransactions(userId: string, query: QueryTransactionsDto) {
-    const page = query.page || 1;
-    const limit = query.limit || 20;
+    // Bounds are enforced here as well as in the DTO: callers that build a query
+    // object by hand (sync jobs, scripts) must not be able to ask Mongo for a
+    // million-row page, and `skip` has to stay inside Prisma's Int range.
+    const page = Math.min(Math.max(Math.trunc(query.page || 1), 1), MAX_PAGE);
+    const limit = Math.min(
+      Math.max(Math.trunc(query.limit || DEFAULT_PAGE_SIZE), 1),
+      MAX_PAGE_SIZE,
+    );
     const skip = (page - 1) * limit;
 
     const where: any = { userId, deletedAt: null };
@@ -219,8 +264,9 @@ export class TransactionsService {
       if (query.endDate) where.transactionDate.lte = new Date(query.endDate);
     }
 
-    if (query.search) {
-      where.title = { contains: query.search, mode: "insensitive" };
+    const search = query.search?.trim();
+    if (search) {
+      where.title = { contains: escapeRegex(search), mode: "insensitive" };
     }
 
     const [total, items] = await Promise.all([
@@ -320,8 +366,8 @@ export class TransactionsService {
       },
     });
     if (!account) throw new NotFoundException("Source account not found.");
-    const currency = (dto.currency ?? oldTx.currency).toUpperCase();
-    if (currency !== account.currency.toUpperCase()) {
+    const currency = normaliseCurrency(dto.currency ?? oldTx.currency);
+    if (currency !== normaliseCurrency(account.currency)) {
       throw new BadRequestException(
         "Transaction currency must match the account.",
       );
@@ -337,7 +383,7 @@ export class TransactionsService {
       });
       if (!destination)
         throw new NotFoundException("Destination account not found.");
-      if (destination.currency.toUpperCase() !== currency) {
+      if (normaliseCurrency(destination.currency) !== currency) {
         throw new BadRequestException(
           "Transfers require accounts in the same currency.",
         );
@@ -540,10 +586,13 @@ export class TransactionsService {
     endDate?: string,
     currency = "INR",
   ) {
+    // Reads stay exact upper-case matches: every write path normalises through
+    // `normaliseCurrency`, so this is a plain index-friendly comparison.
+    const summaryCurrency = normaliseCurrency(currency);
     const where: any = {
       userId,
       deletedAt: null,
-      currency: currency.toUpperCase(),
+      currency: summaryCurrency,
     };
     if (startDate || endDate) {
       where.transactionDate = {};
@@ -572,7 +621,7 @@ export class TransactionsService {
     }
 
     return {
-      currency: currency.toUpperCase(),
+      currency: summaryCurrency,
       incomeMinor,
       expenseMinor,
       netMinor: incomeMinor - expenseMinor,

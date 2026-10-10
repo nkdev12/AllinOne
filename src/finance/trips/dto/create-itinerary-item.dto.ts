@@ -5,6 +5,7 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
 } from "class-validator";
@@ -16,6 +17,7 @@ export class CreateItineraryItemDto {
   })
   @IsInt()
   @Min(1)
+  @Max(3650)
   dayIndex!: number;
 
   @ApiPropertyOptional({
@@ -42,6 +44,7 @@ export class CreateItineraryItemDto {
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(Number.MAX_SAFE_INTEGER)
   plannedCostMinor?: number;
 
   @ApiPropertyOptional({

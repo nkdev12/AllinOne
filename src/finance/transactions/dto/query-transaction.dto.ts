@@ -6,6 +6,8 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Max,
+  MaxLength,
   Min,
 } from "class-validator";
 import { Type } from "class-transformer";
@@ -37,9 +39,13 @@ export class QueryTransactionsDto {
   @IsDateString()
   endDate?: string;
 
-  @ApiPropertyOptional({ description: "Search by title or notes" })
+  @ApiPropertyOptional({
+    description:
+      "Search by title, matched literally: regex metacharacters are escaped server-side because the MongoDB connector compiles this into $regex.",
+  })
   @IsOptional()
   @IsString()
+  @MaxLength(80)
   search?: string;
 
   @ApiPropertyOptional({ default: 1 })
@@ -47,6 +53,7 @@ export class QueryTransactionsDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(10000)
   page?: number = 1;
 
   @ApiPropertyOptional({ default: 20 })
@@ -54,5 +61,6 @@ export class QueryTransactionsDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(200)
   limit?: number = 20;
 }

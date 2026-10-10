@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException, Optional } from "@nestjs/common";
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  Optional,
+} from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { SyncNotificationService } from "@/sync/sync-notification.service";
 import { CreateGoalDto } from "./dto/create-goal.dto";
@@ -13,6 +18,50 @@ export function formatGoalResponse(goal: any) {
     targetAmountMinor: Number(goal.targetAmountMinor),
     currentAmountMinor: Number(goal.currentAmountMinor),
   };
+}
+
+/**
+ * `BigInt()` on a non-integer throws `RangeError`, and on `Infinity`/`NaN` the
+ * request dies as a 500. Fence the value first and answer 400 instead (same
+ * guard the transaction service uses).
+ */
+function toMinorUnits(value: number, field: string): bigint {
+  if (!Number.isSafeInteger(value)) {
+    throw new BadRequestException(`${field} must be a safe integer.`);
+  }
+  return BigInt(value);
+}
+
+function toDateOrThrow(value: string, field: string): Date {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new BadRequestException(`${field} must be a valid ISO-8601 date.`);
+  }
+  return parsed;
+}
+
+/**
+ * Resolve what a `$inc`-style write actually left in the row.
+ *
+ * Prisma applies `{ increment: n }` / `{ decrement: n }` server-side and returns
+ * the post-update document, so `posted` normally *is* the stored BigInt and
+ * already contains a write that raced in between our read and our commit — which
+ * is the whole reason the delta is written as an operator. A delegate that
+ * echoes the operator object back instead of resolving it (the naive update mock
+ * in the shared service harness; the account mock there does resolve) falls back
+ * to read + delta. Falling back is deliberate: `Number(posted)` on an object is
+ * NaN, and a NaN amount in the emitted payload is a NaN every device replays.
+ */
+function minorUnitsAfter(
+  posted: unknown,
+  before: bigint,
+  delta: bigint,
+): bigint {
+  if (typeof posted === "bigint") return posted;
+  if (typeof posted === "number" && Number.isSafeInteger(posted)) {
+    return BigInt(posted);
+  }
+  return before + delta;
 }
 
 export function goalChangePayload(goal: any): Record<string, any> {
@@ -43,8 +92,25 @@ export class GoalsService {
   ) {}
 
   async createGoal(userId: string, dto: CreateGoalDto) {
-    const targetAmountMinor = BigInt(Math.round(dto.targetAmountMinor));
-    const currentAmountMinor = BigInt(Math.round(dto.currentAmountMinor ?? 0));
+    const targetAmountMinor = toMinorUnits(
+      dto.targetAmountMinor,
+      "targetAmountMinor",
+    );
+    const currentAmountMinor = toMinorUnits(
+      dto.currentAmountMinor ?? 0,
+      "currentAmountMinor",
+    );
+    if (targetAmountMinor <= 0n) {
+      throw new BadRequestException("targetAmountMinor must be positive.");
+    }
+    if (currentAmountMinor < 0n) {
+      throw new BadRequestException(
+        "currentAmountMinor cannot be negative — use a deposit to add to a goal.",
+      );
+    }
+    const targetDate = dto.targetDate
+      ? toDateOrThrow(dto.targetDate, "targetDate")
+      : undefined;
     let highestCursor: bigint | undefined;
 
     const created = await this.prisma.$transaction(async (tx) => {
@@ -54,7 +120,7 @@ export class GoalsService {
           name: dto.name,
           targetAmountMinor,
           currentAmountMinor,
-          targetDate: dto.targetDate ? new Date(dto.targetDate) : undefined,
+          targetDate,
           color: dto.color,
           iconKey: dto.iconKey,
           isCompleted: currentAmountMinor >= targetAmountMinor,
@@ -105,32 +171,53 @@ export class GoalsService {
       throw new NotFoundException(`Savings goal with ID ${id} not found`);
     }
 
-    const depositMinor = BigInt(Math.round(dto.amountMinor));
-    const newCurrent = existing.currentAmountMinor + depositMinor;
-    const isCompleted = newCurrent >= existing.targetAmountMinor;
+    const depositMinor = toMinorUnits(dto.amountMinor, "amountMinor");
+    if (depositMinor <= 0n) {
+      throw new BadRequestException("amountMinor must be greater than zero.");
+    }
     let highestCursor: bigint | undefined;
 
     const updated = await this.prisma.$transaction(async (tx) => {
-      const goal = await tx.financeSavingsGoal.update({
+      // `$inc`, not `existing.currentAmountMinor + depositMinor` written as an
+      // absolute value: two deposits that read the same 1000 used to both write
+      // 1500, so one of them evaporated. The row handed back is the post-increment
+      // document, so the flag, the payload and the response all describe the value
+      // that is actually stored even when another writer committed mid-tx.
+      let goal = await tx.financeSavingsGoal.update({
         where: { id },
         data: {
-          currentAmountMinor: newCurrent,
-          isCompleted,
+          currentAmountMinor: { increment: depositMinor },
           version: { increment: 1 },
         },
       });
 
+      const currentAmountMinor = minorUnitsAfter(
+        goal.currentAmountMinor,
+        existing.currentAmountMinor,
+        depositMinor,
+      );
+      const isCompleted = currentAmountMinor >= goal.targetAmountMinor;
+      if (Boolean(goal.isCompleted) !== isCompleted) {
+        // Only the deposit that really crosses the target rewrites the flag.
+        goal = await tx.financeSavingsGoal.update({
+          where: { id },
+          data: { isCompleted },
+        });
+      }
+
+      const postImage = { ...goal, currentAmountMinor, isCompleted };
+
       const logged = await appendChange(tx, {
         entityType: "finance_savings_goal",
-        entityId: goal.id,
+        entityId: postImage.id,
         operation: ChangeOperation.UPDATE,
-        version: goal.version,
-        payload: goalChangePayload(goal),
+        version: postImage.version,
+        payload: goalChangePayload(postImage),
         userId,
       });
       highestCursor = logged.cursor;
 
-      return goal;
+      return postImage;
     });
 
     this.syncNotifications?.notifyMutation({ userId, highestCursor });
@@ -149,14 +236,22 @@ export class GoalsService {
     let highestCursor: bigint | undefined;
 
     const updated = await this.prisma.$transaction(async (tx) => {
+      // An explicit amount here is the author of the goal stating the saved
+      // total, so it is written as given (guarded) rather than as a delta.
       const targetAmount =
         dto.targetAmountMinor !== undefined
-          ? BigInt(Math.round(dto.targetAmountMinor))
+          ? toMinorUnits(dto.targetAmountMinor, "targetAmountMinor")
           : existing.targetAmountMinor;
       const currentAmount =
         dto.currentAmountMinor !== undefined
-          ? BigInt(Math.round(dto.currentAmountMinor))
+          ? toMinorUnits(dto.currentAmountMinor, "currentAmountMinor")
           : existing.currentAmountMinor;
+      if (targetAmount <= 0n) {
+        throw new BadRequestException("targetAmountMinor must be positive.");
+      }
+      if (currentAmount < 0n) {
+        throw new BadRequestException("currentAmountMinor cannot be negative.");
+      }
       const isCompleted = currentAmount >= targetAmount;
 
       const goal = await tx.financeSavingsGoal.update({
@@ -171,7 +266,11 @@ export class GoalsService {
             : {}),
           isCompleted,
           ...(dto.targetDate !== undefined
-            ? { targetDate: dto.targetDate ? new Date(dto.targetDate) : null }
+            ? {
+                targetDate: dto.targetDate
+                  ? toDateOrThrow(dto.targetDate, "targetDate")
+                  : null,
+              }
             : {}),
           ...(dto.color !== undefined ? { color: dto.color } : {}),
           ...(dto.iconKey !== undefined ? { iconKey: dto.iconKey } : {}),

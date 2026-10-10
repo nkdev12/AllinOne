@@ -1,4 +1,5 @@
 import { Injectable, Logger, Optional } from "@nestjs/common";
+import { ChangeOperation, Prisma } from "@prisma/client";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { PushSyncDto } from "./dto/push-sync.dto";
 import { PullSyncDto } from "./dto/pull-sync.dto";
@@ -18,6 +19,14 @@ export interface SyncConflictEntry {
   serverVersion: number;
   serverPayload?: any;
 }
+
+/**
+ * The largest page one pull may hand back. A change row is unbounded up to the
+ * 64 KiB payload ceiling (`change-payload.validator.ts`), so 500 rows is already
+ * a ~32 MB response; anything larger is a client bug or a denial-of-service
+ * attempt, and it is answered with a shorter page instead of an error.
+ */
+export const MAX_PULL_PAGE_SIZE = 500;
 
 @Injectable()
 export class SyncService {
@@ -44,6 +53,7 @@ export class SyncService {
 
     assertPushableChanges(dto.changes);
 
+    const replicaRecipients = new Set<string>();
     const result = await this.prisma.$transaction(async (tx) => {
       const conflictsResolved = 0;
       const accepted: string[] = [];
@@ -76,7 +86,7 @@ export class SyncService {
         // the same number, and refusing it would report a conflict over work the
         // log already holds and drop the client's queue entry for it — and two
         // devices that edited from the same version, which is a genuine
-        // concurrent write. Nothing on this request can tell the two apart: both
+        // concurrent write. Nothing here can tell the two apart: both
         // are the same entity at the same version, and `deviceId` is not a tie
         // break because a retry comes from the same device that made the edit.
         // So both are accepted, and the concurrent pair resolves to whichever
@@ -89,11 +99,15 @@ export class SyncService {
         // (`SyncManager.rewrittenNotes` in the Flutter client). That makes the
         // loss visible where the user is looking; recovering the discarded
         // version is a product decision the log does not pretend to have made.
-        if (
-          existingChange &&
-          existingChange.payload &&
-          typeof existingChange.payload === "object"
-        ) {
+        //
+        // The comparison is with the newest stored *version*, which the row
+        // carries whether or not it carries a payload: a DELETE is legitimately
+        // logged with `payload: null` (see `CONTENT_CARRYING_OPERATIONS`), and
+        // gating on the payload shape used to disarm the whole rule for that
+        // entity — once a delete tail sat there, a stale UPDATE at version 3
+        // against stored version 9 was accepted and resurrected the row on every
+        // device. `serverPayload` is still only echoed when it is an object.
+        if (existingChange) {
           if (change.version < existingChange.version) {
             conflicts.push({
               entityId: change.entityId,
@@ -101,7 +115,11 @@ export class SyncService {
               reason: "VERSION_MISMATCH",
               clientVersion: change.version,
               serverVersion: existingChange.version,
-              serverPayload: existingChange.payload,
+              serverPayload:
+                existingChange.payload &&
+                typeof existingChange.payload === "object"
+                  ? existingChange.payload
+                  : undefined,
             });
             continue;
           }
@@ -129,6 +147,20 @@ export class SyncService {
         // rolled back would otherwise leave a domain row edited by changes no
         // device will ever be handed.
         await projectAcceptedChange(tx, userId, change);
+        for (const recipient of await this.replicateGroupChange(
+          tx,
+          userId,
+          {
+            entityType: change.entityType,
+            entityId: change.entityId,
+            operation: change.operation as ChangeOperation,
+            version: change.version,
+          },
+          finalPayload as Prisma.InputJsonValue,
+          dto.deviceId,
+        )) {
+          replicaRecipients.add(recipient);
+        }
 
         accepted.push(createdChange.id);
       }
@@ -168,11 +200,86 @@ export class SyncService {
         originDeviceId: dto.deviceId,
         highestCursor: result.highestCursor,
       });
+      for (const recipientId of replicaRecipients) {
+        this.syncNotifications.notifyMutation({ userId: recipientId });
+      }
     }
 
     this.metricsService?.incrementSyncPush(dto.changes.length);
 
     return result;
+  }
+
+  /**
+   * Sync cursors belong to one account. A group edit is copied to every
+   * collaborator's own log, so each participant can pull it with their cursor.
+   */
+  private async replicateGroupChange(
+    tx: Prisma.TransactionClient,
+    authorId: string,
+    change: {
+      entityType: string;
+      entityId: string;
+      operation: ChangeOperation;
+      version: number;
+    },
+    payload: Prisma.InputJsonValue,
+    deviceId: string,
+  ): Promise<string[]> {
+    let groupId: string | null = null;
+    if (change.entityType === "finance_group") groupId = change.entityId;
+    if (change.entityType === "finance_shared_expense") {
+      groupId =
+        (
+          await tx.financeSharedExpense.findUnique({
+            where: { id: change.entityId },
+            select: { groupId: true },
+          })
+        )?.groupId ?? null;
+    }
+    if (change.entityType === "finance_settlement") {
+      groupId =
+        (
+          await tx.financeSettlement.findUnique({
+            where: { id: change.entityId },
+            select: { groupId: true },
+          })
+        )?.groupId ?? null;
+    }
+    if (!groupId) return [];
+
+    const group = await tx.financeGroup.findUnique({
+      where: { id: groupId },
+      select: { ownerId: true },
+    });
+    if (!group) return [];
+    const shares = await tx.resourceShare.findMany({
+      where: {
+        resourceType: "EXPENSE_GROUP",
+        resourceId: groupId,
+        deletedAt: null,
+      },
+      select: { sharedWithUserId: true },
+    });
+    const recipients = new Set<string>([
+      group.ownerId,
+      ...shares.map(
+        (share: { sharedWithUserId: string }) => share.sharedWithUserId,
+      ),
+    ]);
+    recipients.delete(authorId);
+    for (const recipientId of recipients) {
+      await appendChange(tx, {
+        userId: recipientId,
+        deviceId,
+        entityType: change.entityType,
+        entityId: change.entityId,
+        operation: change.operation,
+        version: change.version,
+        payload,
+      });
+    }
+    return [...recipients];
   }
 
   /**
@@ -183,7 +290,11 @@ export class SyncService {
     await assertSyncDevice(this.prisma, userId, dto.deviceId);
 
     const cursorBigInt = parsePullCursor(dto.cursor);
-    const limit = dto.limit || 100;
+    // Clamped, not just validated: `PullSyncDto` now bounds `limit` at
+    // MAX_PULL_PAGE_SIZE, but a client that predates that bound would otherwise
+    // get a 400 for a call that used to work. Degrading to the ceiling keeps it
+    // paging, and keeps `take: limit + 1` from asking for the whole log.
+    const limit = Math.min(dto.limit || 100, MAX_PULL_PAGE_SIZE);
 
     const serverHighestCursor = await getHighestChangeCursor(
       this.prisma,

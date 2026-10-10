@@ -9,9 +9,11 @@ import { PrismaService } from "@/common/prisma/prisma.service";
 import { AuditLogService } from "@/common/audit/audit-log.service";
 import {
   AuditAction,
+  ChangeOperation,
   Prisma,
   ResourceShare as ResourceShareRow,
 } from "@prisma/client";
+import { appendChange } from "@/sync/change-cursor";
 import {
   ResourceShare,
   ResourceType,
@@ -117,6 +119,18 @@ export class CollaborationService {
       return { ownerId: calendar.userId, title: calendar.name };
     }
 
+    if (resourceType === "EXPENSE_GROUP") {
+      const group = await this.prisma.financeGroup.findFirst({
+        where: { id: resourceId, deletedAt: null },
+      });
+      if (!group) {
+        throw new NotFoundException(
+          `Finance group with ID '${resourceId}' not found.`,
+        );
+      }
+      return { ownerId: group.ownerId, title: group.name };
+    }
+
     throw new NotFoundException(
       `Resource type '${resourceType}' not supported.`,
     );
@@ -210,7 +224,7 @@ export class CollaborationService {
           // rather than collide with the unique key, so re-sharing with somebody
           // you already revoked works the way it did from memory. `createdAt`
           // stays on the original grant: it is the same collaborator record.
-          return tx.resourceShare.update({
+          const revived = await tx.resourceShare.update({
             where: { id: clash.id },
             data: {
               role: dto.role,
@@ -220,9 +234,16 @@ export class CollaborationService {
               deletedAt: null,
             },
           });
+          await this.queueGroupSnapshot(
+            tx,
+            dto.resourceType,
+            dto.resourceId,
+            collaborator.id,
+          );
+          return revived;
         }
 
-        return tx.resourceShare.create({
+        const created = await tx.resourceShare.create({
           data: {
             resourceType: dto.resourceType,
             resourceId: dto.resourceId,
@@ -232,6 +253,13 @@ export class CollaborationService {
             role: dto.role,
           },
         });
+        await this.queueGroupSnapshot(
+          tx,
+          dto.resourceType,
+          dto.resourceId,
+          collaborator.id,
+        );
+        return created;
       });
     } catch (error) {
       if (this.isUniqueViolation(error)) {
@@ -267,6 +295,93 @@ export class CollaborationService {
     );
 
     return share;
+  }
+
+  /** Add the full current ledger to a new collaborator's own sync stream. */
+  private async queueGroupSnapshot(
+    tx: Prisma.TransactionClient,
+    resourceType: ResourceType,
+    groupId: string,
+    recipientId: string,
+  ) {
+    if (resourceType !== "EXPENSE_GROUP") return;
+    const group = await tx.financeGroup.findUnique({ where: { id: groupId } });
+    if (!group || group.deletedAt) return;
+    await appendChange(tx, {
+      userId: recipientId,
+      entityType: "finance_group",
+      entityId: group.id,
+      operation: ChangeOperation.CREATE,
+      version: group.version,
+      payload: {
+        name: group.name,
+        members: group.members ?? [],
+        description: group.description,
+        currency: group.currency,
+        iconKey: group.iconKey,
+        isArchived: group.isArchived,
+        createdAt: group.createdAt.toISOString(),
+        version: group.version,
+      },
+    });
+    const [expenses, settlements] = await Promise.all([
+      tx.financeSharedExpense.findMany({
+        where: { groupId, deletedAt: null },
+        include: { shares: true },
+      }),
+      tx.financeSettlement.findMany({ where: { groupId, deletedAt: null } }),
+    ]);
+    for (const expense of expenses) {
+      await appendChange(tx, {
+        userId: recipientId,
+        entityType: "finance_shared_expense",
+        entityId: expense.id,
+        operation: ChangeOperation.CREATE,
+        version: expense.version,
+        payload: {
+          groupId: expense.groupId,
+          tripId: expense.tripId,
+          paidByUserId: expense.paidByUserId,
+          payerAccountId: expense.payerAccountId,
+          title: expense.title,
+          totalAmountMinor: Number(expense.totalAmountMinor),
+          currency: expense.currency,
+          splitType: expense.splitType,
+          date: expense.date.toISOString(),
+          notes: expense.notes,
+          receiptAttachmentId: expense.receiptAttachmentId,
+          createdAt: expense.createdAt.toISOString(),
+          version: expense.version,
+          shares: expense.shares.map((share) => ({
+            userId: share.userId,
+            owedAmountMinor: Number(share.owedAmountMinor),
+            shareUnits: share.shareUnits,
+          })),
+        },
+      });
+    }
+    for (const settlement of settlements) {
+      await appendChange(tx, {
+        userId: recipientId,
+        entityType: "finance_settlement",
+        entityId: settlement.id,
+        operation: ChangeOperation.CREATE,
+        version: settlement.version,
+        payload: {
+          groupId: settlement.groupId,
+          tripId: settlement.tripId,
+          fromUserId: settlement.fromUserId,
+          toUserId: settlement.toUserId,
+          amountMinor: Number(settlement.amountMinor),
+          currency: settlement.currency,
+          date: settlement.date.toISOString(),
+          notes: settlement.notes,
+          paymentMethod: settlement.paymentMethod,
+          createdAt: settlement.createdAt.toISOString(),
+          version: settlement.version,
+        },
+      });
+    }
   }
 
   async getSharesForResource(

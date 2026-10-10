@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException, Optional } from "@nestjs/common";
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  Optional,
+} from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { SyncNotificationService } from "@/sync/sync-notification.service";
 import { CreateBudgetDto } from "./dto/create-budget.dto";
@@ -9,6 +14,159 @@ import {
   FinanceBudgetPeriod,
   FinanceTransactionType,
 } from "@prisma/client";
+
+/**
+ * Spend is only ever summed over transactions in this currency.
+ *
+ * `FinanceBudget` carries no currency column, so a budget cannot express which
+ * currency it caps. Rather than guess per row, the spend query stays pinned to
+ * the one currency every account is seeded with. Adding the column is a schema
+ * decision (`prisma db push`), not a service fix, so the limitation is stated
+ * here in a single place instead of being scattered through the filter: a budget
+ * meant for a USD account currently measures nothing.
+ */
+const BUDGET_SPEND_CURRENCY = "INR";
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+export type BudgetSpendWindow = { start: Date; end: Date };
+
+/**
+ * The calendar cycle the spend windows are anchored to. `monthOneBased` is 1 =
+ * January: the HTTP layer, this service and every window derived below speak the
+ * same 1-based convention, and the only places the 0-based `Date`/`Date.UTC`
+ * index appears are the `- 1` conversions in `utcCycleWindow` and the quarter
+ * maths. Everything is UTC — the local `getFullYear()`/`getMonth()` pair
+ * disagreed with the UTC buckets the alert cycle and analytics use either side
+ * of a month boundary in +05:30.
+ */
+export type ReferenceCycle = {
+  year: number;
+  monthOneBased: number;
+  anchor: Date;
+};
+
+function utcStartOfDay(date: Date): Date {
+  return new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
+  );
+}
+
+/** Exclusive upper bound for a day that is stored as an inclusive date. */
+function nextUtcDay(startOfDay: Date): Date {
+  return new Date(startOfDay.getTime() + MS_PER_DAY);
+}
+
+function utcCycleWindow(
+  year: number,
+  monthOneBased: number,
+): BudgetSpendWindow {
+  return {
+    start: new Date(Date.UTC(year, monthOneBased - 1, 1)),
+    end: new Date(Date.UTC(year, monthOneBased, 1)),
+  };
+}
+
+/**
+ * `BigInt()` on a non-integer throws a `RangeError` and on `Infinity`/`NaN` blows
+ * up the whole request as a 500, so every conversion is fenced by the safe
+ * integer check first and reported as a 400 (same guard the transaction service
+ * uses).
+ */
+function toMinorUnits(value: number, field: string): bigint {
+  if (!Number.isSafeInteger(value)) {
+    throw new BadRequestException(`${field} must be a safe integer.`);
+  }
+  return BigInt(value);
+}
+
+function toDateOrThrow(value: unknown, field: string): Date {
+  const parsed = new Date(value as string | number | Date);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new BadRequestException(`${field} must be a valid ISO-8601 date.`);
+  }
+  return parsed;
+}
+
+/**
+ * The window a budget's cap applies to, derived from the budget itself.
+ *
+ * `end` is exclusive. A CUSTOM budget lives between its own `startDate` and
+ * `endDate` (inclusive day boundaries); every other period rolls up from the
+ * reference cycle, and `startDate`/`endDate` then clamp that cycle so spend from
+ * before the budget existed, or after it ended, is not charged to it.
+ */
+export function resolveBudgetSpendWindow(
+  budget: {
+    period?: FinanceBudgetPeriod | null;
+    startDate?: Date | null;
+    endDate?: Date | null;
+  },
+  cycle: ReferenceCycle,
+): BudgetSpendWindow {
+  const period = budget.period ?? FinanceBudgetPeriod.MONTHLY;
+  const monthly = utcCycleWindow(cycle.year, cycle.monthOneBased);
+  let window: BudgetSpendWindow;
+
+  switch (period) {
+    case FinanceBudgetPeriod.WEEKLY: {
+      const isoWeekday = (cycle.anchor.getUTCDay() + 6) % 7; // Monday = 0
+      const start = new Date(
+        utcStartOfDay(cycle.anchor).getTime() - isoWeekday * MS_PER_DAY,
+      );
+      window = { start, end: new Date(start.getTime() + 7 * MS_PER_DAY) };
+      break;
+    }
+    case FinanceBudgetPeriod.QUARTERLY: {
+      const firstMonth = Math.floor((cycle.monthOneBased - 1) / 3) * 3; // 0-based
+      window = {
+        start: new Date(Date.UTC(cycle.year, firstMonth, 1)),
+        end: new Date(Date.UTC(cycle.year, firstMonth + 3, 1)),
+      };
+      break;
+    }
+    case FinanceBudgetPeriod.YEARLY:
+      window = {
+        start: new Date(Date.UTC(cycle.year, 0, 1)),
+        end: new Date(Date.UTC(cycle.year + 1, 0, 1)),
+      };
+      break;
+    case FinanceBudgetPeriod.CUSTOM: {
+      const start = budget.startDate
+        ? utcStartOfDay(toDateOrThrow(budget.startDate, "startDate"))
+        : monthly.start;
+      const end = budget.endDate
+        ? nextUtcDay(utcStartOfDay(toDateOrThrow(budget.endDate, "endDate")))
+        : monthly.end;
+      window = { start, end };
+      break;
+    }
+    case FinanceBudgetPeriod.MONTHLY:
+    default:
+      window = monthly;
+      break;
+  }
+
+  if (period !== FinanceBudgetPeriod.CUSTOM) {
+    if (budget.startDate) {
+      const from = utcStartOfDay(toDateOrThrow(budget.startDate, "startDate"));
+      if (from > window.start) window = { ...window, start: from };
+    }
+    if (budget.endDate) {
+      const to = nextUtcDay(
+        utcStartOfDay(toDateOrThrow(budget.endDate, "endDate")),
+      );
+      if (to < window.end) window = { ...window, end: to };
+    }
+  }
+
+  // An inverted CUSTOM range is an empty window, not a range that swallows the
+  // whole union of the other budgets.
+  if (window.end <= window.start) {
+    window = { start: window.start, end: window.start };
+  }
+  return window;
+}
 
 export function formatBudgetResponse(budget: any) {
   return {
@@ -52,7 +210,19 @@ export class BudgetsService {
   ) {}
 
   async createBudget(userId: string, dto: CreateBudgetDto) {
-    const amountMinor = BigInt(Math.round(dto.amountMinor));
+    const amountMinor = toMinorUnits(dto.amountMinor, "amountMinor");
+    // Stored exactly as sent (only validated); the day-granular truncation
+    // happens when the spend window is derived, so a write never silently moves
+    // a timestamp the client will read back.
+    const startDate = dto.startDate
+      ? toDateOrThrow(dto.startDate, "startDate")
+      : undefined;
+    const endDate = dto.endDate
+      ? toDateOrThrow(dto.endDate, "endDate")
+      : undefined;
+    if (startDate && endDate && endDate < startDate) {
+      throw new BadRequestException("endDate must not be before startDate.");
+    }
     let highestCursor: bigint | undefined;
 
     const created = await this.prisma.$transaction(async (tx) => {
@@ -62,8 +232,8 @@ export class BudgetsService {
           categoryId: dto.categoryId,
           amountMinor,
           period: dto.period ?? FinanceBudgetPeriod.MONTHLY,
-          startDate: dto.startDate ? new Date(dto.startDate) : undefined,
-          endDate: dto.endDate ? new Date(dto.endDate) : undefined,
+          startDate,
+          endDate,
           alertAt80: dto.alertAt80 ?? true,
           alertAt100: dto.alertAt100 ?? true,
         },
@@ -96,58 +266,104 @@ export class BudgetsService {
     return budgets.map(formatBudgetResponse);
   }
 
-  async getBudgetsWithSpending(userId: string, month?: number, year?: number) {
+  /**
+   * `month` is 1-based (January = 1) and both parameters are UTC, so an
+   * `?month=` from HTTP, the alert cycle and the windows below agree. Anything
+   * else is rejected rather than fed into `Date.UTC`, which used to turn
+   * `?month=abc` into an Invalid Date inside a Prisma filter.
+   */
+  private resolveReferenceCycle(month?: number, year?: number): ReferenceCycle {
+    if (month !== undefined) {
+      if (!Number.isInteger(month) || month < 1 || month > 12) {
+        throw new BadRequestException(
+          "month must be an integer between 1 and 12.",
+        );
+      }
+    }
+    if (year !== undefined) {
+      if (!Number.isInteger(year) || year < 2000 || year > 2100) {
+        throw new BadRequestException("year must be between 2000 and 2100.");
+      }
+    }
+
     const now = new Date();
-    const targetYear = year ?? now.getFullYear();
-    const targetMonth = month !== undefined ? month : now.getMonth();
+    const utcYear = now.getUTCFullYear();
+    const utcMonthOneBased = now.getUTCMonth() + 1;
 
-    const startOfMonth = new Date(
-      Date.UTC(targetYear, targetMonth, 1, 0, 0, 0, 0),
+    if (month === undefined) {
+      return {
+        year: year ?? utcYear,
+        monthOneBased: utcMonthOneBased,
+        anchor: now,
+      };
+    }
+    // An explicit cycle is an anchor at its first instant, so WEEKLY and
+    // QUARTERLY budgets resolve against the requested month too.
+    return {
+      year: year ?? utcYear,
+      monthOneBased: month,
+      anchor: new Date(Date.UTC(year ?? utcYear, month - 1, 1)),
+    };
+  }
+
+  async getBudgetsWithSpending(userId: string, month?: number, year?: number) {
+    const cycle = this.resolveReferenceCycle(month, year);
+
+    const budgets = await this.prisma.financeBudget.findMany({
+      where: { userId, deletedAt: null },
+      include: { category: true },
+      orderBy: { createdAt: "desc" },
+    });
+    if (budgets.length === 0) return [];
+
+    // One query over the union of every budget's window, then bucket in memory.
+    // Going per budget would be N round trips for the same rows, since a MONTHLY
+    // budget's window is always inside a YEARLY one anyway.
+    const windows = budgets.map((b) => resolveBudgetSpendWindow(b, cycle));
+    const unionStart = new Date(
+      Math.min(...windows.map((w) => w.start.getTime())),
     );
-    const endOfMonth = new Date(
-      Date.UTC(targetYear, targetMonth + 1, 0, 23, 59, 59, 999),
-    );
+    const unionEnd = new Date(Math.max(...windows.map((w) => w.end.getTime())));
 
-    const [budgets, expenses] = await Promise.all([
-      this.prisma.financeBudget.findMany({
-        where: { userId, deletedAt: null },
-        include: { category: true },
-        orderBy: { createdAt: "desc" },
-      }),
-      this.prisma.financeTransaction.findMany({
-        where: {
-          account: { userId },
-          type: FinanceTransactionType.EXPENSE,
-          isExcludedFromBudget: false,
-          currency: "INR",
-          deletedAt: null,
-          transactionDate: {
-            gte: startOfMonth,
-            lte: endOfMonth,
-          },
-        },
-      }),
-    ]);
+    const expenses =
+      unionEnd > unionStart
+        ? await this.prisma.financeTransaction.findMany({
+            where: {
+              account: { userId },
+              type: FinanceTransactionType.EXPENSE,
+              isExcludedFromBudget: false,
+              currency: BUDGET_SPEND_CURRENCY,
+              deletedAt: null,
+              transactionDate: {
+                gte: unionStart,
+                lt: unionEnd,
+              },
+            },
+          })
+        : [];
 
-    return budgets.map((b) => {
+    return budgets.map((b, index) => {
       const budgetAmount = Number(b.amountMinor);
-      let spentMinor = 0;
+      const window = windows[index];
+      // Summed in minor units so a year of rupee spend cannot drift on a float.
+      let spentMinor = 0n;
 
-      for (const tx of expenses) {
-        if (!b.categoryId) {
-          spentMinor += Number(tx.amountMinor);
-        } else if (tx.categoryId === b.categoryId) {
-          spentMinor += Number(tx.amountMinor);
-        }
+      for (const expense of expenses) {
+        if (b.categoryId && expense.categoryId !== b.categoryId) continue;
+        const date = expense.transactionDate;
+        if (date < window.start || date >= window.end) continue;
+        spentMinor += BigInt(expense.amountMinor);
       }
 
-      const percentUsed =
-        budgetAmount > 0 ? (spentMinor / budgetAmount) * 100 : 0;
+      const spent = Number(spentMinor);
+      const percentUsed = budgetAmount > 0 ? (spent / budgetAmount) * 100 : 0;
 
       return {
         ...formatBudgetResponse(b),
-        spentMinor,
-        remainingMinor: budgetAmount - spentMinor,
+        spentWindowStart: window.start.toISOString(),
+        spentWindowEnd: window.end.toISOString(),
+        spentMinor: spent,
+        remainingMinor: budgetAmount - spent,
         percentUsed,
       };
     });
@@ -182,14 +398,22 @@ export class BudgetsService {
             ? { categoryId: dto.categoryId }
             : {}),
           ...(dto.amountMinor !== undefined
-            ? { amountMinor: BigInt(Math.round(dto.amountMinor)) }
+            ? { amountMinor: toMinorUnits(dto.amountMinor, "amountMinor") }
             : {}),
           ...(dto.period !== undefined ? { period: dto.period } : {}),
           ...(dto.startDate !== undefined
-            ? { startDate: dto.startDate ? new Date(dto.startDate) : null }
+            ? {
+                startDate: dto.startDate
+                  ? toDateOrThrow(dto.startDate, "startDate")
+                  : null,
+              }
             : {}),
           ...(dto.endDate !== undefined
-            ? { endDate: dto.endDate ? new Date(dto.endDate) : null }
+            ? {
+                endDate: dto.endDate
+                  ? toDateOrThrow(dto.endDate, "endDate")
+                  : null,
+              }
             : {}),
           ...(dto.alertAt80 !== undefined ? { alertAt80: dto.alertAt80 } : {}),
           ...(dto.alertAt100 !== undefined

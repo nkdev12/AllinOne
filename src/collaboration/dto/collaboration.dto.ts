@@ -14,11 +14,11 @@ import { ShareRole, ResourceType } from "../collaboration.interface";
 
 export class CreateShareDto {
   @ApiProperty({
-    enum: ["NOTE", "PROJECT", "CALENDAR"],
+    enum: ["NOTE", "PROJECT", "CALENDAR", "EXPENSE_GROUP", "TRIP"],
     example: "NOTE",
     description: "The type of resource being shared",
   })
-  @IsEnum(["NOTE", "PROJECT", "CALENDAR"])
+  @IsEnum(["NOTE", "PROJECT", "CALENDAR", "EXPENSE_GROUP", "TRIP"])
   @IsNotEmpty()
   resourceType!: ResourceType;
 
@@ -61,11 +61,11 @@ export class UpdateShareDto {
 
 export class QuerySharedResourcesDto {
   @ApiPropertyOptional({
-    enum: ["NOTE", "PROJECT", "CALENDAR"],
+    enum: ["NOTE", "PROJECT", "CALENDAR", "EXPENSE_GROUP", "TRIP"],
     description: "Filter shared items by resource type",
   })
   @IsOptional()
-  @IsEnum(["NOTE", "PROJECT", "CALENDAR"])
+  @IsEnum(["NOTE", "PROJECT", "CALENDAR", "EXPENSE_GROUP", "TRIP"])
   resourceType?: ResourceType;
 
   @ApiPropertyOptional({ default: 1, minimum: 1 })

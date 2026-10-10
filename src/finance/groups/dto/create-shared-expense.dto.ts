@@ -1,5 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import {
+  ArrayMaxSize,
+  ArrayNotEmpty,
   IsArray,
   IsEnum,
   IsInt,
@@ -8,6 +10,8 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  IsUUID,
+  Max,
   MaxLength,
   Min,
   ValidateNested,
@@ -22,16 +26,32 @@ export class ExpenseShareItemDto {
   })
   @IsNotEmpty()
   @IsString()
+  @MaxLength(100)
   userId!: string;
 
-  @ApiProperty({ example: 50000, description: "Owed amount in minor units" })
+  @ApiPropertyOptional({
+    example: 50000,
+    description:
+      "Owed amount in minor units. Required for EXACT and ITEMIZED; ignored — " +
+      "and recomputed by the server's largest-remainder split — for EQUAL, " +
+      "PERCENTAGE and SHARES.",
+  })
+  @IsOptional()
   @IsInt()
   @Min(0)
-  owedAmountMinor!: number;
+  @Max(Number.MAX_SAFE_INTEGER)
+  owedAmountMinor?: number;
 
-  @ApiPropertyOptional({ example: 1.0, description: "Share units or weight" })
+  @ApiPropertyOptional({
+    example: 1.0,
+    description:
+      "Share weight: percentage points for PERCENTAGE, units for SHARES, unused " +
+      "for EQUAL.",
+  })
   @IsOptional()
-  @IsNumber()
+  @IsNumber({ maxDecimalPlaces: 4 })
+  @Min(0)
+  @Max(1000000)
   shareUnits?: number;
 }
 
@@ -48,6 +68,7 @@ export class CreateSharedExpenseDto {
   @ApiProperty({ example: 150000, description: "Total amount in minor units" })
   @IsInt()
   @Min(1)
+  @Max(Number.MAX_SAFE_INTEGER)
   totalAmountMinor!: number;
 
   @ApiPropertyOptional({ example: "INR", default: "INR" })
@@ -59,6 +80,7 @@ export class CreateSharedExpenseDto {
   @ApiProperty({ example: "user_uuid_payer", description: "User ID who paid" })
   @IsNotEmpty()
   @IsString()
+  @MaxLength(100)
   paidByUserId!: string;
 
   @ApiPropertyOptional({
@@ -66,7 +88,7 @@ export class CreateSharedExpenseDto {
     description: "Account used to pay",
   })
   @IsOptional()
-  @IsString()
+  @IsUUID()
   payerAccountId?: string;
 
   @ApiPropertyOptional({
@@ -93,14 +115,14 @@ export class CreateSharedExpenseDto {
 
   @ApiPropertyOptional({ description: "Receipt attachment ID" })
   @IsOptional()
-  @IsString()
+  @IsUUID()
   receiptAttachmentId?: string;
 
   @ApiPropertyOptional({
     description: "Optional trip ID if associated with a trip",
   })
   @IsOptional()
-  @IsString()
+  @IsUUID()
   tripId?: string;
 
   @ApiProperty({
@@ -108,6 +130,8 @@ export class CreateSharedExpenseDto {
     description: "List of participant shares",
   })
   @IsArray()
+  @ArrayNotEmpty()
+  @ArrayMaxSize(100)
   @ValidateNested({ each: true })
   @Type(() => ExpenseShareItemDto)
   shares!: ExpenseShareItemDto[];

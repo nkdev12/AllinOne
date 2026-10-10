@@ -1,6 +1,10 @@
 import { Injectable, NotFoundException, Optional } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { SyncNotificationService } from "@/sync/sync-notification.service";
+import {
+  normaliseCurrency,
+  toMinorUnits,
+} from "@/finance/accounts/accounts.service";
 import { CreateTripDto } from "./dto/create-trip.dto";
 import { UpdateTripDto } from "./dto/update-trip.dto";
 import { CreateItineraryItemDto } from "./dto/create-itinerary-item.dto";
@@ -93,7 +97,7 @@ export class TripsService {
   async createTrip(userId: string, dto: CreateTripDto) {
     const totalBudgetMinor =
       dto.totalBudgetMinor !== undefined && dto.totalBudgetMinor !== null
-        ? BigInt(Math.round(dto.totalBudgetMinor))
+        ? toMinorUnits(dto.totalBudgetMinor, "totalBudgetMinor")
         : null;
 
     let highestCursor: bigint | undefined;
@@ -106,7 +110,7 @@ export class TripsService {
           destinations: dto.destinations ?? [],
           startDate: new Date(dto.startDate),
           endDate: new Date(dto.endDate),
-          baseCurrency: dto.baseCurrency ?? "INR",
+          baseCurrency: normaliseCurrency(dto.baseCurrency),
           totalBudgetMinor,
           notes: dto.notes,
           isArchived: false,
@@ -191,13 +195,13 @@ export class TripsService {
             ? { endDate: new Date(dto.endDate) }
             : {}),
           ...(dto.baseCurrency !== undefined
-            ? { baseCurrency: dto.baseCurrency }
+            ? { baseCurrency: normaliseCurrency(dto.baseCurrency) }
             : {}),
           ...(dto.totalBudgetMinor !== undefined
             ? {
                 totalBudgetMinor:
                   dto.totalBudgetMinor !== null
-                    ? BigInt(Math.round(dto.totalBudgetMinor))
+                    ? toMinorUnits(dto.totalBudgetMinor, "totalBudgetMinor")
                     : null,
               }
             : {}),
@@ -235,13 +239,14 @@ export class TripsService {
 
   async deleteTrip(userId: string, tripId: string) {
     const existing = await this.getTripById(userId, tripId);
+    const deletedAt = new Date();
     let highestCursor: bigint | undefined;
 
     await this.prisma.$transaction(async (tx) => {
       const updated = await tx.financeTrip.update({
         where: { id: existing.id },
         data: {
-          deletedAt: new Date(),
+          deletedAt,
           version: { increment: 1 },
         },
       });
@@ -255,6 +260,70 @@ export class TripsService {
         userId,
       });
       highestCursor = logged.cursor;
+
+      // `onDelete: Cascade` in schema.prisma is decoration only on MongoDB, so
+      // tombstoning the trip left its plan, its expenses and its settlements
+      // live: they kept feeding `getTripStats`-shaped reads on the child rows
+      // and a device that pulled the trip DELETE still showed the whole trip in
+      // its expense list. Every child gets a tombstone and a DELETE change of
+      // its own, inside the same transaction, so the replay converges.
+      const [itineraryItems, sharedExpenses, settlements] = await Promise.all([
+        tx.financeTripItinerary.findMany({
+          where: { tripId, deletedAt: null },
+        }),
+        tx.financeSharedExpense.findMany({
+          where: { tripId, deletedAt: null },
+        }),
+        tx.financeSettlement.findMany({ where: { tripId, deletedAt: null } }),
+      ]);
+
+      for (const item of itineraryItems) {
+        const child = await tx.financeTripItinerary.update({
+          where: { id: item.id },
+          data: { deletedAt, version: { increment: 1 } },
+        });
+        const childLogged = await appendChange(tx, {
+          entityType: "finance_trip_itinerary",
+          entityId: item.id,
+          operation: ChangeOperation.DELETE,
+          version: child.version,
+          payload: {},
+          userId,
+        });
+        highestCursor = childLogged.cursor;
+      }
+
+      for (const expense of sharedExpenses) {
+        const child = await tx.financeSharedExpense.update({
+          where: { id: expense.id },
+          data: { deletedAt, version: { increment: 1 } },
+        });
+        const childLogged = await appendChange(tx, {
+          entityType: "finance_shared_expense",
+          entityId: expense.id,
+          operation: ChangeOperation.DELETE,
+          version: child.version,
+          payload: {},
+          userId,
+        });
+        highestCursor = childLogged.cursor;
+      }
+
+      for (const settlement of settlements) {
+        const child = await tx.financeSettlement.update({
+          where: { id: settlement.id },
+          data: { deletedAt, version: { increment: 1 } },
+        });
+        const childLogged = await appendChange(tx, {
+          entityType: "finance_settlement",
+          entityId: settlement.id,
+          operation: ChangeOperation.DELETE,
+          version: child.version,
+          payload: {},
+          userId,
+        });
+        highestCursor = childLogged.cursor;
+      }
     });
 
     this.syncNotifications?.notifyMutation({ userId, highestCursor });
@@ -274,7 +343,7 @@ export class TripsService {
     await this.getTripById(userId, tripId);
     const plannedCostMinor =
       dto.plannedCostMinor !== undefined && dto.plannedCostMinor !== null
-        ? BigInt(Math.round(dto.plannedCostMinor))
+        ? toMinorUnits(dto.plannedCostMinor, "plannedCostMinor")
         : null;
 
     let highestCursor: bigint | undefined;
@@ -352,7 +421,7 @@ export class TripsService {
             ? {
                 plannedCostMinor:
                   dto.plannedCostMinor !== null
-                    ? BigInt(Math.round(dto.plannedCostMinor))
+                    ? toMinorUnits(dto.plannedCostMinor, "plannedCostMinor")
                     : null,
               }
             : {}),
@@ -422,6 +491,14 @@ export class TripsService {
   // Trip Stats & Actual vs Planned Budget
   // -------------------------------------------------------------
 
+  /**
+   * There is no exchange-rate concept anywhere in the schema — no column, no
+   * table, nothing in `src/finance/` that converts — so a trip's minor units
+   * only add up when they are all the same currency. Summing a USD 10000 and an
+   * INR 200000 into "210000 INR" was not a rounding problem but an invented
+   * number, so the spend comes back bucketed by currency and the budget
+   * arithmetic uses only the trip's own base-currency rows.
+   */
   async getTripStats(userId: string, tripId: string) {
     const trip = await this.getTripById(userId, tripId);
 
@@ -441,21 +518,36 @@ export class TripsService {
       }
     }
 
-    let totalActualSpentMinor = 0;
+    const baseCurrency = normaliseCurrency(trip.baseCurrency);
+    const buckets = new Map<string, { total: number; count: number }>();
     for (const exp of sharedExpenses) {
-      totalActualSpentMinor += Number(exp.totalAmountMinor);
+      const currency = normaliseCurrency(exp.currency);
+      const bucket = buckets.get(currency) ?? { total: 0, count: 0 };
+      bucket.total += Number(exp.totalAmountMinor);
+      bucket.count += 1;
+      buckets.set(currency, bucket);
     }
 
+    const subtotalsByCurrency = [...buckets.entries()]
+      .sort(([a], [b]) => (a === b ? 0 : a < b ? -1 : 1))
+      .map(([currency, bucket]) => ({
+        currency,
+        totalAmountMinor: bucket.total,
+        expenseCount: bucket.count,
+      }));
+
+    const totalActualSpentMinor = buckets.get(baseCurrency)?.total ?? 0;
     const totalBudgetMinor = trip.totalBudgetMinor ?? 0;
     const remainingBudgetMinor = totalBudgetMinor - totalActualSpentMinor;
 
     return {
       tripId,
-      currency: trip.baseCurrency,
+      currency: baseCurrency,
       totalBudgetMinor,
       totalPlannedCostMinor,
       totalActualSpentMinor,
       remainingBudgetMinor,
+      subtotalsByCurrency,
       itineraryItemCount: itineraryItems.length,
       expenseCount: sharedExpenses.length,
     };

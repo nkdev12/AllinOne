@@ -1,18 +1,25 @@
-import { assertExpenseShares, validMembers } from "./group-validation";
+import { allocateExpenseShares, validMembers } from "./group-validation";
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
   Optional,
 } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { SyncNotificationService } from "@/sync/sync-notification.service";
+import {
+  normaliseCurrency,
+  toMinorUnits,
+} from "@/finance/accounts/accounts.service";
 import { CreateGroupDto } from "./dto/create-group.dto";
 import { UpdateGroupDto } from "./dto/update-group.dto";
 import { CreateSharedExpenseDto } from "./dto/create-shared-expense.dto";
 import { CreateSettlementDto } from "./dto/create-settlement.dto";
 import { appendChange } from "@/sync/change-cursor";
-import { ChangeOperation, FinanceSplitType } from "@prisma/client";
+import { ChangeOperation, FinanceSplitType, Prisma } from "@prisma/client";
+
+type WriteClient = Prisma.TransactionClient;
 
 export function formatGroupResponse(group: any) {
   return {
@@ -125,6 +132,7 @@ export class GroupsService {
   async createGroup(userId: string, dto: CreateGroupDto) {
     if (dto.members && !validMembers(dto.members))
       throw new BadRequestException("Friends must have unique names and IDs.");
+    await this.assertMemberAccounts(userId, dto.members);
     let highestCursor: bigint | undefined;
 
     const created = await this.prisma.$transaction(async (tx) => {
@@ -138,7 +146,7 @@ export class GroupsService {
             active: member.active !== false,
           })),
           description: dto.description,
-          currency: dto.currency ?? "INR",
+          currency: normaliseCurrency(dto.currency),
           iconKey: dto.iconKey,
           isArchived: false,
         },
@@ -163,9 +171,20 @@ export class GroupsService {
   }
 
   async getGroups(userId: string, includeArchived = false) {
+    const shared = await this.prisma.resourceShare.findMany({
+      where: {
+        resourceType: "EXPENSE_GROUP",
+        sharedWithUserId: userId,
+        deletedAt: null,
+      },
+      select: { resourceId: true },
+    });
     const groups = await this.prisma.financeGroup.findMany({
       where: {
-        ownerId: userId,
+        OR: [
+          { ownerId: userId },
+          { id: { in: shared.map((share) => share.resourceId) } },
+        ],
         deletedAt: null,
         ...(includeArchived ? {} : { isArchived: false }),
       },
@@ -175,11 +194,10 @@ export class GroupsService {
     return groups.map(formatGroupResponse);
   }
 
-  async getGroupById(userId: string, groupId: string) {
+  async getGroupById(userId: string, groupId: string, canEdit = false) {
     const group = await this.prisma.financeGroup.findFirst({
       where: {
         id: groupId,
-        ownerId: userId,
         deletedAt: null,
       },
     });
@@ -188,14 +206,33 @@ export class GroupsService {
       throw new NotFoundException("Finance group not found");
     }
 
+    if (group.ownerId !== userId) {
+      const share = await this.prisma.resourceShare.findFirst({
+        where: {
+          resourceType: "EXPENSE_GROUP",
+          resourceId: groupId,
+          sharedWithUserId: userId,
+          deletedAt: null,
+          ...(canEdit ? { role: { in: ["EDITOR", "ADMIN"] } } : {}),
+        },
+      });
+      if (!share) throw new NotFoundException("Finance group not found");
+    }
+
     return formatGroupResponse(group);
   }
 
   async updateGroup(userId: string, groupId: string, dto: UpdateGroupDto) {
     if (dto.members && !validMembers(dto.members))
       throw new BadRequestException("Friends must have unique names and IDs.");
-    const existing = await this.getGroupById(userId, groupId);
-    if (dto.currency && dto.currency !== existing.currency)
+    await this.assertMemberAccounts(userId, dto.members);
+    const existing = await this.getGroupById(userId, groupId, true);
+    const incomingCurrency =
+      dto.currency === undefined ? undefined : normaliseCurrency(dto.currency);
+    if (
+      incomingCurrency !== undefined &&
+      incomingCurrency !== normaliseCurrency(existing.currency)
+    )
       throw new BadRequestException(
         "Group currency cannot be changed after creation.",
       );
@@ -218,7 +255,9 @@ export class GroupsService {
           ...(dto.description !== undefined
             ? { description: dto.description }
             : {}),
-          ...(dto.currency !== undefined ? { currency: dto.currency } : {}),
+          ...(incomingCurrency !== undefined
+            ? { currency: incomingCurrency }
+            : {}),
           ...(dto.iconKey !== undefined ? { iconKey: dto.iconKey } : {}),
           ...(dto.isArchived !== undefined
             ? { isArchived: dto.isArchived }
@@ -245,15 +284,47 @@ export class GroupsService {
     return formatGroupResponse(updated);
   }
 
+  /** `You` is the local self marker; every other participant is an account. */
+  private async assertMemberAccounts(
+    userId: string,
+    members?: Array<{ id: string }>,
+  ) {
+    if (!members) return;
+    const ids = [...new Set(members.map((member) => member.id))].filter(
+      (id) => id !== "You" && id !== userId,
+    );
+    if (!ids.length) return;
+    const found = await this.prisma.user.findMany({
+      where: { id: { in: ids }, status: "ACTIVE" },
+      select: { id: true, deletedAt: true },
+    });
+    const active = new Set(
+      found
+        .filter((account) => !account.deletedAt)
+        .map((account) => account.id),
+    );
+    if (ids.some((id) => !active.has(id))) {
+      throw new BadRequestException(
+        "Each friend must be a registered active account.",
+      );
+    }
+  }
+
   async deleteGroup(userId: string, groupId: string) {
     const existing = await this.getGroupById(userId, groupId);
+    if (existing.ownerId !== userId) {
+      throw new ForbiddenException(
+        "Only the group owner can remove this group.",
+      );
+    }
+    const deletedAt = new Date();
     let highestCursor: bigint | undefined;
 
     await this.prisma.$transaction(async (tx) => {
       const updated = await tx.financeGroup.update({
         where: { id: existing.id },
         data: {
-          deletedAt: new Date(),
+          deletedAt,
           version: { increment: 1 },
         },
       });
@@ -267,11 +338,107 @@ export class GroupsService {
         userId,
       });
       highestCursor = logged.cursor;
+
+      // `onDelete: Cascade` in schema.prisma is decoration only on MongoDB —
+      // nothing enforces it at write time. Tombstoning just the group left its
+      // expenses and settlements live, so `GET /groups/:id/expenses` 404s on a
+      // deleted parent while the rows still carried balances into every other
+      // read path, and a device that pulled the group DELETE kept its half of
+      // the ledger. Each child gets its own tombstone and its own DELETE change
+      // in this transaction, so the log replays the whole subtree.
+      //
+      // `FinanceExpenseShare` has no `deletedAt`, so shares are not tombstoned;
+      // they are only ever read through their (now deleted) expense.
+      const [expenses, settlements] = await Promise.all([
+        tx.financeSharedExpense.findMany({
+          where: { groupId, deletedAt: null },
+        }),
+        tx.financeSettlement.findMany({ where: { groupId, deletedAt: null } }),
+      ]);
+
+      for (const expense of expenses) {
+        const child = await tx.financeSharedExpense.update({
+          where: { id: expense.id },
+          data: { deletedAt, version: { increment: 1 } },
+        });
+        const childLogged = await appendChange(tx, {
+          entityType: "finance_shared_expense",
+          entityId: expense.id,
+          operation: ChangeOperation.DELETE,
+          version: child.version,
+          payload: {},
+          userId,
+        });
+        highestCursor = childLogged.cursor;
+      }
+
+      for (const settlement of settlements) {
+        const child = await tx.financeSettlement.update({
+          where: { id: settlement.id },
+          data: { deletedAt, version: { increment: 1 } },
+        });
+        const childLogged = await appendChange(tx, {
+          entityType: "finance_settlement",
+          entityId: settlement.id,
+          operation: ChangeOperation.DELETE,
+          version: child.version,
+          payload: {},
+          userId,
+        });
+        highestCursor = childLogged.cursor;
+      }
     });
 
     this.syncNotifications?.notifyMutation({ userId, highestCursor });
 
     return { success: true };
+  }
+
+  // -------------------------------------------------------------
+  // Tenant checks for the id-shaped references a write carries
+  // -------------------------------------------------------------
+
+  /**
+   * A `tripId` was stored verbatim, so attaching an expense to somebody else's
+   * trip both succeeded on REST and then fed their `getTripStats`, even though
+   * the sync projection already refused the same row with `assertSharedScope`.
+   * The two write paths must answer the same question the same way.
+   */
+  private async assertTripScope(userId: string, tripId?: string | null) {
+    if (!tripId) return null;
+    const trip = await this.prisma.financeTrip.findFirst({
+      where: { id: tripId, ownerId: userId, deletedAt: null },
+    });
+    if (!trip) {
+      throw new ForbiddenException("This trip is not available to you.");
+    }
+    return trip;
+  }
+
+  private async assertAccountScope(userId: string, accountId?: string | null) {
+    if (!accountId) return null;
+    const account = await this.prisma.financeAccount.findFirst({
+      where: { id: accountId, userId, deletedAt: null },
+    });
+    if (!account) {
+      throw new BadRequestException("Payer account does not belong to you.");
+    }
+    return account;
+  }
+
+  private async assertReceiptScope(
+    userId: string,
+    attachmentId?: string | null,
+  ) {
+    if (!attachmentId) return;
+    const receipt = await this.prisma.attachment.findFirst({
+      where: { id: attachmentId, userId },
+    });
+    if (!receipt) {
+      throw new BadRequestException(
+        "Receipt attachment does not belong to you.",
+      );
+    }
   }
 
   // -------------------------------------------------------------
@@ -283,11 +450,38 @@ export class GroupsService {
     groupId: string,
     dto: CreateSharedExpenseDto,
   ) {
-    const group = await this.getGroupById(userId, groupId);
-    assertExpenseShares(dto.totalAmountMinor, dto.shares);
-    if (dto.currency && dto.currency !== group.currency)
+    const group = await this.getGroupById(userId, groupId, true);
+    const splitType = dto.splitType ?? FinanceSplitType.EQUAL;
+    const groupCurrency = normaliseCurrency(group.currency);
+    const incomingCurrency =
+      dto.currency === undefined ? undefined : normaliseCurrency(dto.currency);
+    if (incomingCurrency !== undefined && incomingCurrency !== groupCurrency)
       throw new BadRequestException("Use the group currency.");
-    const totalAmountMinor = BigInt(dto.totalAmountMinor);
+
+    const totalAmountMinor = toMinorUnits(
+      dto.totalAmountMinor,
+      "totalAmountMinor",
+    );
+
+    // The amounts are derived here rather than taken from the request: a split
+    // of minor units is not always exact, and making the client guess the
+    // leftover turned an honest three-way split into a 400.
+    const shares = allocateExpenseShares(
+      dto.totalAmountMinor,
+      dto.shares,
+      splitType,
+    );
+
+    const trip = await this.assertTripScope(userId, dto.tripId);
+    if (trip && normaliseCurrency(trip.baseCurrency) !== groupCurrency)
+      throw new BadRequestException(
+        "This trip uses a different currency than the group.",
+      );
+    const payerAccount = await this.assertAccountScope(
+      userId,
+      dto.payerAccountId,
+    );
+    await this.assertReceiptScope(userId, dto.receiptAttachmentId);
     let highestCursor: bigint | undefined;
 
     const expense = await this.prisma.$transaction(async (tx) => {
@@ -296,18 +490,18 @@ export class GroupsService {
           groupId,
           tripId: dto.tripId,
           paidByUserId: dto.paidByUserId,
-          payerAccountId: dto.payerAccountId,
+          payerAccountId: payerAccount?.id ?? null,
           title: dto.title,
           totalAmountMinor,
-          currency: group.currency,
-          splitType: dto.splitType ?? FinanceSplitType.EQUAL,
+          currency: groupCurrency,
+          splitType,
           date: new Date(dto.date),
           notes: dto.notes,
           receiptAttachmentId: dto.receiptAttachmentId,
           shares: {
-            create: dto.shares.map((share) => ({
+            create: shares.map((share) => ({
               userId: share.userId,
-              owedAmountMinor: BigInt(Math.round(share.owedAmountMinor)),
+              owedAmountMinor: BigInt(share.owedAmountMinor),
               shareUnits: share.shareUnits,
             })),
           },
@@ -353,7 +547,7 @@ export class GroupsService {
     groupId: string,
     expenseId: string,
   ) {
-    await this.getGroupById(userId, groupId);
+    await this.getGroupById(userId, groupId, true);
 
     const expense = await this.prisma.financeSharedExpense.findFirst({
       where: { id: expenseId, groupId, deletedAt: null },
@@ -399,7 +593,7 @@ export class GroupsService {
     groupId: string,
     dto: CreateSettlementDto,
   ) {
-    const group = await this.getGroupById(userId, groupId);
+    const group = await this.getGroupById(userId, groupId, true);
     if (
       !Number.isSafeInteger(dto.amountMinor) ||
       dto.amountMinor <= 0 ||
@@ -408,21 +602,35 @@ export class GroupsService {
       throw new BadRequestException(
         "Choose different friends and a positive payment amount.",
       );
-    if (dto.currency && dto.currency !== group.currency)
-      throw new BadRequestException("Use the group currency.");
-    const summary = await this.getGroupBalancesAndSimplifiedDebts(
-      userId,
-      groupId,
-    );
+    const groupCurrency = normaliseCurrency(group.currency);
     if (
-      dto.amountMinor > -(summary.balances[dto.fromUserId] ?? 0) ||
-      dto.amountMinor > (summary.balances[dto.toUserId] ?? 0)
+      dto.currency !== undefined &&
+      normaliseCurrency(dto.currency) !== groupCurrency
     )
-      throw new BadRequestException("Payment exceeds the outstanding balance.");
-    const amountMinor = BigInt(dto.amountMinor);
+      throw new BadRequestException("Use the group currency.");
+    const amountMinor = toMinorUnits(dto.amountMinor, "amountMinor");
+    const trip = await this.assertTripScope(userId, dto.tripId);
+    if (trip && normaliseCurrency(trip.baseCurrency) !== groupCurrency)
+      throw new BadRequestException(
+        "This trip uses a different currency than the group.",
+      );
     let highestCursor: bigint | undefined;
 
     const settlement = await this.prisma.$transaction(async (tx) => {
+      // Read inside the transaction. Balances read before it let two devices
+      // settle "the full outstanding amount" at the same time: both saw Alice
+      // owing 10000, both were accepted, and the group ended up with Alice
+      // owing Bob nothing-of-her-making because the second payment overdrew her
+      // debt. The check and the write are one critical section now.
+      const balances = await this.readBalances(tx, groupId);
+      if (
+        dto.amountMinor > -(balances[dto.fromUserId] ?? 0) ||
+        dto.amountMinor > (balances[dto.toUserId] ?? 0)
+      )
+        throw new BadRequestException(
+          "Payment exceeds the outstanding balance.",
+        );
+
       const created = await tx.financeSettlement.create({
         data: {
           groupId,
@@ -430,7 +638,7 @@ export class GroupsService {
           fromUserId: dto.fromUserId,
           toUserId: dto.toUserId,
           amountMinor,
-          currency: group.currency,
+          currency: groupCurrency,
           date: new Date(dto.date),
           notes: dto.notes,
           paymentMethod: dto.paymentMethod,
@@ -474,7 +682,7 @@ export class GroupsService {
     groupId: string,
     settlementId: string,
   ) {
-    await this.getGroupById(userId, groupId);
+    await this.getGroupById(userId, groupId, true);
 
     const settlement = await this.prisma.financeSettlement.findFirst({
       where: { id: settlementId, groupId, deletedAt: null },
@@ -515,15 +723,21 @@ export class GroupsService {
   // Balances & Debt Simplifier (Min-Cash-Flow Algorithm)
   // -------------------------------------------------------------
 
-  async getGroupBalancesAndSimplifiedDebts(userId: string, groupId: string) {
-    await this.getGroupById(userId, groupId);
-
+  /**
+   * Balances for a group, off whatever client is handed to it — the plain
+   * service client for a read, the transaction for a settlement that has to be
+   * checked against them before it is written.
+   */
+  private async readBalances(
+    client: WriteClient,
+    groupId: string,
+  ): Promise<Record<string, number>> {
     const [expenses, settlements] = await Promise.all([
-      this.prisma.financeSharedExpense.findMany({
+      client.financeSharedExpense.findMany({
         where: { groupId, deletedAt: null },
         include: { shares: true },
       }),
-      this.prisma.financeSettlement.findMany({
+      client.financeSettlement.findMany({
         where: { groupId, deletedAt: null },
       }),
     ]);
@@ -553,6 +767,15 @@ export class GroupsService {
       balancesObj[u] = b;
     }
 
+    return balancesObj;
+  }
+
+  async getGroupBalancesAndSimplifiedDebts(userId: string, groupId: string) {
+    await this.getGroupById(userId, groupId);
+
+    const balancesObj = await this.readBalances(this.prisma, groupId);
+    const balances = new Map(Object.entries(balancesObj));
+
     // Min-Cash-Flow Bipartite Matching
     const debtors: { userId: string; amount: number }[] = [];
     const creditors: { userId: string; amount: number }[] = [];
@@ -565,8 +788,17 @@ export class GroupsService {
       }
     }
 
-    debtors.sort((a, b) => b.amount - a.amount);
-    creditors.sort((a, b) => b.amount - a.amount);
+    // `userId` breaks an equal-amount tie so the suggested plan is the same on
+    // every device; without one it inherits Map insertion order, which is
+    // whatever order Mongo happened to return the rows in.
+    const byAmountThenId = (
+      a: { userId: string; amount: number },
+      b: { userId: string; amount: number },
+    ) =>
+      b.amount - a.amount ||
+      (a.userId === b.userId ? 0 : a.userId < b.userId ? -1 : 1);
+    debtors.sort(byAmountThenId);
+    creditors.sort(byAmountThenId);
 
     const simplifiedDebts: SimplifiedDebt[] = [];
     let d = 0;

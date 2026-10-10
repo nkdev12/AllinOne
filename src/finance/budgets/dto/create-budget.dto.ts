@@ -1,18 +1,20 @@
 import {
   IsBoolean,
+  IsDateString,
   IsEnum,
   IsInt,
   IsOptional,
   IsPositive,
-  IsString,
+  IsUUID,
 } from "class-validator";
 import { FinanceBudgetPeriod } from "@prisma/client";
 
 export class CreateBudgetDto {
   @IsOptional()
-  @IsString()
+  @IsUUID()
   categoryId?: string;
 
+  /** Minor units (paise), never a float amount. */
   @IsInt()
   @IsPositive()
   amountMinor!: number;
@@ -21,12 +23,17 @@ export class CreateBudgetDto {
   @IsEnum(FinanceBudgetPeriod)
   period?: FinanceBudgetPeriod;
 
+  /**
+   * ISO-8601, validated rather than handed to `new Date()`: a junk string used
+   * to become an Invalid Date column and a 500. For CUSTOM the pair is the
+   * budget's window; for every other period it clamps the derived cycle.
+   */
   @IsOptional()
-  @IsString()
+  @IsDateString()
   startDate?: string;
 
   @IsOptional()
-  @IsString()
+  @IsDateString()
   endDate?: string;
 
   @IsOptional()

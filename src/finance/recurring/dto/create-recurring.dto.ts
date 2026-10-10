@@ -1,11 +1,14 @@
 import {
   IsBoolean,
+  IsDateString,
   IsEnum,
   IsInt,
   IsNotEmpty,
   IsOptional,
   IsPositive,
   IsString,
+  Max,
+  Min,
 } from "class-validator";
 import {
   FinanceRecurringFrequency,
@@ -26,6 +29,11 @@ export class CreateRecurringDto {
 
   @IsInt()
   @IsPositive()
+  @Min(1)
+  // The service widens this with `BigInt(Math.round(...))`, which is only exact
+  // up to `Number.MAX_SAFE_INTEGER`; above it the stored amount is already wrong
+  // before the BigInt conversion.
+  @Max(Number.MAX_SAFE_INTEGER)
   amountMinor!: number;
 
   @IsString()
@@ -39,14 +47,17 @@ export class CreateRecurringDto {
   @IsOptional()
   @IsInt()
   @IsPositive()
+  @Min(1)
+  @Max(1200)
   interval?: number;
 
-  @IsString()
-  @IsNotEmpty()
+  // `@IsString()` let `new Date(dto.startDate)` write an Invalid Date straight
+  // into the rule, after which every due-date comparison silently returns false.
+  @IsDateString()
   startDate!: string;
 
   @IsOptional()
-  @IsString()
+  @IsDateString()
   endDate?: string;
 
   @IsOptional()

@@ -4,12 +4,23 @@ import {
   ApiOperation,
   ApiResponse,
   ApiBearerAuth,
-  ApiQuery,
 } from "@nestjs/swagger";
 import { AnalyticsService } from "./analytics.service";
+import {
+  CashFlowQueryDto,
+  ExportTransactionsQueryDto,
+  NetWorthQueryDto,
+  SpendingByCategoryQueryDto,
+} from "./dto/analytics-query.dto";
 import { JwtAuthGuard } from "@/auth/guards/jwt-auth.guard";
 import { GetUser } from "@/auth/decorators/get-user.decorator";
 
+/**
+ * The query objects replace loose `@Query("startDate")` strings, one of which
+ * (`year`) the controller ran through `parseInt` before handing it to
+ * `new Date(NaN, 0, 1)` — an Invalid Date that the database answered with a 500
+ * for what was only a typo in the address bar.
+ */
 @ApiTags("Finance Analytics & Export")
 @Controller("finance/analytics")
 @UseGuards(JwtAuthGuard)
@@ -17,72 +28,62 @@ import { GetUser } from "@/auth/decorators/get-user.decorator";
 export class AnalyticsController {
   constructor(private readonly analyticsService: AnalyticsService) {}
 
-  @ApiQuery({ name: "currency", required: false, example: "INR" })
   @Get("spending-by-category")
   @ApiOperation({
     summary: "Get spending breakdown by category for a date range",
   })
-  @ApiQuery({ name: "startDate", required: false, type: String })
-  @ApiQuery({ name: "endDate", required: false, type: String })
   @ApiResponse({ status: 200, description: "Category spending breakdown" })
   async getSpendingByCategory(
     @GetUser("id") userId: string,
-    @Query("startDate") startDate?: string,
-    @Query("endDate") endDate?: string,
-    @Query("currency") currency = "INR",
+    @Query() query: SpendingByCategoryQueryDto,
   ) {
     return this.analyticsService.getSpendingByCategory(
       userId,
-      startDate,
-      endDate,
-      currency,
+      query.startDate,
+      query.endDate,
+      query.currency,
     );
   }
 
-  @ApiQuery({ name: "currency", required: false, example: "INR" })
   @Get("cash-flow")
   @ApiOperation({
     summary: "Get monthly income, expense, and net savings for a year",
   })
-  @ApiQuery({ name: "year", required: false, type: Number })
   @ApiResponse({ status: 200, description: "Monthly cash flow" })
   async getCashFlow(
     @GetUser("id") userId: string,
-    @Query("year") year?: string,
-    @Query("currency") currency = "INR",
+    @Query() query: CashFlowQueryDto,
   ) {
-    const parsedYear = year ? parseInt(year, 10) : undefined;
-    return this.analyticsService.getCashFlow(userId, parsedYear, currency);
+    return this.analyticsService.getCashFlow(
+      userId,
+      query.year,
+      query.currency,
+    );
   }
 
-  @ApiQuery({ name: "currency", required: false, example: "INR" })
   @Get("net-worth")
   @ApiOperation({ summary: "Get total net worth, assets, and liabilities" })
   @ApiResponse({ status: 200, description: "Net worth breakdown" })
   async getNetWorth(
     @GetUser("id") userId: string,
-    @Query("currency") currency = "INR",
+    @Query() query: NetWorthQueryDto,
   ) {
-    return this.analyticsService.getNetWorth(userId, currency);
+    return this.analyticsService.getNetWorth(userId, query.currency ?? "INR");
   }
 
   @Get("export")
   @ApiOperation({ summary: "Export transactions in CSV or JSON format" })
-  @ApiQuery({ name: "format", required: false, enum: ["json", "csv"] })
-  @ApiQuery({ name: "startDate", required: false, type: String })
-  @ApiQuery({ name: "endDate", required: false, type: String })
   @ApiResponse({ status: 200, description: "Exported transactions" })
   async exportTransactions(
     @GetUser("id") userId: string,
-    @Query("format") format: "json" | "csv" = "json",
-    @Query("startDate") startDate?: string,
-    @Query("endDate") endDate?: string,
+    @Query() query: ExportTransactionsQueryDto,
   ) {
     return this.analyticsService.exportTransactions(
       userId,
-      format,
-      startDate,
-      endDate,
+      query.format ?? "json",
+      query.startDate,
+      query.endDate,
+      query.currency,
     );
   }
 }

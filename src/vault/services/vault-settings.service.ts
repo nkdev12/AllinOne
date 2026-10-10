@@ -326,12 +326,30 @@ export class VaultSettingsService {
         this.logger.warn(
           `Vault recovery OTP could not be delivered to ${user.email}. Check SMTP configuration.`,
         );
+        if (this.configService.isProduction) {
+          throw badRequest(
+            ErrorCode.VAULT_RECOVERY_UNAVAILABLE,
+            "The recovery code could not be emailed. Please try again later.",
+          );
+        }
       }
     } catch (err) {
+      if (
+        err instanceof Error &&
+        err.message.includes("could not be emailed")
+      ) {
+        throw err;
+      }
       this.logger.error(
         `Failed to send vault recovery OTP email to ${user.email}`,
         err,
       );
+      if (this.configService.isProduction) {
+        throw badRequest(
+          ErrorCode.VAULT_RECOVERY_UNAVAILABLE,
+          "The recovery code could not be emailed. Please try again later.",
+        );
+      }
     }
 
     return {

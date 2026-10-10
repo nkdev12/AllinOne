@@ -1213,12 +1213,53 @@ const FINANCE_GROUP_FIELDS: ReadonlyArray<DocumentField> = [
   },
 ];
 
+/**
+ * The amounts-omitted half of a split payload's `shares`: a participant and the
+ * weight the server divides by, with no `owedAmountMinor` at all.
+ *
+ * `group-validation` keeps this rule to itself (`validShareTargets`) because only
+ * its allocator needs it, so the wire check spells the same thing with the one
+ * clause that differs — an absent amount, not an invalid one — and lets
+ * `allocateExpenseShares` judge the rest. Summing is deliberately not checked
+ * here: 3333/3333/3333 for 10000 is a payload this path must accept.
+ */
+function weightOnlyShares(value: unknown): boolean {
+  if (!Array.isArray(value) || !value.length || value.length > 100)
+    return false;
+  const ids = new Set<string>();
+  return value.every((share: any) => {
+    if (
+      !share ||
+      typeof share.userId !== "string" ||
+      !share.userId.trim() ||
+      ids.has(share.userId) ||
+      share.owedAmountMinor !== undefined ||
+      (share.shareUnits != null &&
+        (typeof share.shareUnits !== "number" ||
+          !Number.isFinite(share.shareUnits) ||
+          share.shareUnits < 0))
+    )
+      return false;
+    ids.add(share.userId);
+    return true;
+  });
+}
+
 const FINANCE_SHARED_EXPENSE_FIELDS: ReadonlyArray<DocumentField> = [
   {
     key: "shares",
     required: false,
-    accepts: validShares,
-    expected: "unique participants with non-negative integer shares",
+    // Two halves, on purpose. `validShares` is the shared predicate and stays the
+    // authority for a list that states its amounts. The other half is the list
+    // that does not: `owedAmountMinor` is optional on the REST side too
+    // (`ExpenseShareItemDto`), because `EQUAL`, `PERCENTAGE` and `SHARES` leave
+    // the arithmetic to the server's largest-remainder split. Refusing the
+    // weight-only shape here is the half of the transport disagreement this file
+    // owns — the projection then decides what a valid weight set is, by way of
+    // `allocateExpenseShares`, which is one implementation and not a second.
+    accepts: (value) => validShares(value) || weightOnlyShares(value),
+    expected:
+      "unique participants with non-negative integer shares, or unique participants carrying a non-negative weight",
   },
   {
     key: "groupId",

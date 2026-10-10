@@ -15,6 +15,7 @@ import {
   ChangeOperation,
   FinanceRecurringFrequency,
   FinanceTransactionType,
+  Prisma,
 } from "@prisma/client";
 
 export function formatRecurringResponse(rule: any) {
@@ -58,36 +59,93 @@ export function recurringChangePayload(rule: any): Record<string, any> {
   };
 }
 
+/**
+ * Last day of a UTC month, given as `year` / zero-based `monthIndex`.
+ * Day 0 of the following month is what `Date.UTC` normalises to that.
+ */
+function daysInUtcMonth(year: number, monthIndex: number): number {
+  return new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate();
+}
+
+function addUtcDays(from: Date, daysToAdd: number): Date {
+  return new Date(
+    Date.UTC(
+      from.getUTCFullYear(),
+      from.getUTCMonth(),
+      from.getUTCDate() + daysToAdd,
+      from.getUTCHours(),
+      from.getUTCMinutes(),
+      from.getUTCSeconds(),
+      from.getUTCMilliseconds(),
+    ),
+  );
+}
+
+/**
+ * Month-aware step, entirely in UTC.
+ *
+ * The target month's day is `Math.min(anchorDay, daysInMonth(target))`, so a
+ * rule that started on the 31st runs Jan 31 -> Feb 28 -> Mar 31 -> Apr 30.
+ * Rolling the month with `setUTCMonth` instead overflowed Feb 31 onto Mar 3,
+ * which both skipped February's bill and drifted the anchor one day per month
+ * — and the Flutter client clamps to the last day of Feb locally, so the two
+ * halves disagreed about when a bill was due.
+ */
+function addUtcMonths(
+  from: Date,
+  monthsToAdd: number,
+  anchorDay: number,
+): Date {
+  const totalMonths =
+    from.getUTCFullYear() * 12 + from.getUTCMonth() + monthsToAdd;
+  const year = Math.floor(totalMonths / 12);
+  const month = totalMonths - year * 12;
+  const day = Math.min(Math.max(anchorDay, 1), daysInUtcMonth(year, month));
+
+  return new Date(
+    Date.UTC(
+      year,
+      month,
+      day,
+      from.getUTCHours(),
+      from.getUTCMinutes(),
+      from.getUTCSeconds(),
+      from.getUTCMilliseconds(),
+    ),
+  );
+}
+
+/**
+ * @param anchorDate the rule's `startDate`. Month- and year-length frequencies
+ * take their calendar day from it rather than from `from`, so a bill clamped to
+ * Feb 28 still returns to the 31st in March instead of decaying to the 28th.
+ */
 export function calculateNextOccurrence(
   from: Date,
   frequency: FinanceRecurringFrequency,
   interval: number = 1,
+  anchorDate?: Date | null,
 ): Date {
-  const next = new Date(from.getTime());
+  const step =
+    Number.isFinite(interval) && interval >= 1 ? Math.floor(interval) : 1;
+  const anchorDay = (anchorDate ?? from).getUTCDate();
+
   switch (frequency) {
     case FinanceRecurringFrequency.DAILY:
-      next.setUTCDate(next.getUTCDate() + interval);
-      break;
+      return addUtcDays(from, step);
     case FinanceRecurringFrequency.WEEKLY:
-      next.setUTCDate(next.getUTCDate() + interval * 7);
-      break;
+      return addUtcDays(from, step * 7);
     case FinanceRecurringFrequency.BIWEEKLY:
-      next.setUTCDate(next.getUTCDate() + interval * 14);
-      break;
+      return addUtcDays(from, step * 14);
     case FinanceRecurringFrequency.MONTHLY:
-      next.setUTCMonth(next.getUTCMonth() + interval);
-      break;
+      return addUtcMonths(from, step, anchorDay);
     case FinanceRecurringFrequency.QUARTERLY:
-      next.setUTCMonth(next.getUTCMonth() + interval * 3);
-      break;
+      return addUtcMonths(from, step * 3, anchorDay);
     case FinanceRecurringFrequency.YEARLY:
-      next.setUTCFullYear(next.getUTCFullYear() + interval);
-      break;
+      return addUtcMonths(from, step * 12, anchorDay);
     default:
-      next.setUTCMonth(next.getUTCMonth() + interval);
-      break;
+      return addUtcMonths(from, step, anchorDay);
   }
-  return next;
 }
 
 @Injectable()
@@ -97,6 +155,41 @@ export class RecurringService {
     @Optional() private readonly syncNotifications?: SyncNotificationService,
   ) {}
 
+  /**
+   * A rule may only bill against an account the caller owns. Without this, one
+   * user could point a rule at another user's account id and have that account's
+   * balance moved by their own amount — on `POST /finance/recurring/process-due`
+   * or on the `finance` cron — with the victim's account row then projected into
+   * the attacker's pull stream.
+   */
+  private async assertAccountOwned(userId: string, accountId: string) {
+    const account = await this.prisma.financeAccount.findFirst({
+      where: { id: accountId, userId, deletedAt: null },
+    });
+    if (!account) {
+      throw new NotFoundException(`Account with ID '${accountId}' not found`);
+    }
+    return account;
+  }
+
+  /**
+   * Same shape as the account check, but tolerates global system categories
+   * (`userId: null`), which every user is allowed to reference.
+   */
+  private async assertCategoryUsable(userId: string, categoryId: string) {
+    const category = await this.prisma.financeCategory.findFirst({
+      where: {
+        id: categoryId,
+        deletedAt: null,
+        OR: [{ userId }, { userId: null }],
+      },
+    });
+    if (!category) {
+      throw new NotFoundException(`Category with ID '${categoryId}' not found`);
+    }
+    return category;
+  }
+
   async createRecurringRule(userId: string, dto: CreateRecurringDto) {
     const account = await this.prisma.financeAccount.findFirst({
       where: { id: dto.accountId, userId, deletedAt: null },
@@ -105,6 +198,10 @@ export class RecurringService {
       throw new BadRequestException(
         `Account with ID ${dto.accountId} not found`,
       );
+    }
+
+    if (dto.categoryId) {
+      await this.assertCategoryUsable(userId, dto.categoryId);
     }
 
     const startDate = new Date(dto.startDate);
@@ -168,6 +265,38 @@ export class RecurringService {
     return formatRecurringResponse(rule);
   }
 
+  /**
+   * Takes a rule out of the due queue and logs the mutation the way every other
+   * recurring mutation is logged.
+   *
+   * Used when a rule has run past its `endDate` or lost the account it bills
+   * against. Both would otherwise keep matching `nextDueDate <= now`, so the
+   * scheduler would re-fetch and re-skip them on every tick while still
+   * reporting them as work done. Flipping `autoGenerate` off — which the due
+   * query already filters on — settles the rule without a new status column.
+   */
+  private async settleRule(
+    tx: Prisma.TransactionClient,
+    rule: { id: string; userId: string },
+  ): Promise<void> {
+    const settled = await tx.financeRecurringRule.update({
+      where: { id: rule.id },
+      data: {
+        autoGenerate: false,
+        version: { increment: 1 },
+      },
+    });
+
+    await appendChange(tx, {
+      entityType: "finance_recurring_rule",
+      entityId: settled.id,
+      operation: ChangeOperation.UPDATE,
+      version: settled.version,
+      payload: recurringChangePayload(settled),
+      userId: rule.userId,
+    });
+  }
+
   async processDueRules(userId?: string): Promise<{ processed: number }> {
     const now = new Date();
     const dueRules = await this.prisma.financeRecurringRule.findMany({
@@ -182,27 +311,57 @@ export class RecurringService {
     let processedCount = 0;
 
     for (const rule of dueRules) {
-      if (rule.endDate && rule.endDate < now) {
-        continue;
-      }
+      const occurrence = rule.nextDueDate;
 
-      await this.prisma.$transaction(async (tx) => {
+      const generated = await this.prisma.$transaction(async (tx) => {
+        // Gate on the occurrence, not on `now`: a rule scheduled for 10-31 with
+        // `endDate` 11-02 still owes that bill when it is first picked up on
+        // 11-05, while a rule due 10-20 that ends 10-15 must never mint a bill
+        // past its end.
+        if (rule.endDate && occurrence > rule.endDate) {
+          await this.settleRule(tx, rule);
+          return false;
+        }
+
         const account = await tx.financeAccount.findFirst({
-          where: { id: rule.accountId, deletedAt: null },
+          where: {
+            id: rule.accountId,
+            userId: rule.userId,
+            deletedAt: null,
+          },
         });
-        if (!account) return;
+        if (!account) {
+          await this.settleRule(tx, rule);
+          return false;
+        }
+
+        // Same ownership scope as the account, but a category is metadata
+        // rather than money: a foreign or deleted id left over from before this
+        // check is dropped from the generated transaction instead of blocking
+        // the bill.
+        let categoryId: string | null = rule.categoryId ?? null;
+        if (categoryId) {
+          const category = await tx.financeCategory.findFirst({
+            where: {
+              id: categoryId,
+              deletedAt: null,
+              OR: [{ userId: rule.userId }, { userId: null }],
+            },
+          });
+          if (!category) categoryId = null;
+        }
 
         // 1. Create transaction
         const newTx = await tx.financeTransaction.create({
           data: {
             userId: rule.userId,
             accountId: rule.accountId,
-            categoryId: rule.categoryId,
+            categoryId,
             type: rule.type,
             amountMinor: rule.amountMinor,
             currency: account.currency,
             title: rule.title,
-            transactionDate: rule.nextDueDate,
+            transactionDate: occurrence,
             recurringRuleId: rule.id,
           },
         });
@@ -213,19 +372,25 @@ export class RecurringService {
             ? rule.amountMinor
             : -rule.amountMinor;
 
+        // `{ increment }`, not an absolute value read outside this statement: a
+        // concurrent `createTransaction` moves the same row (it uses increment
+        // too), and an absolute write would drop that movement permanently.
+        // The row returned here carries the post-update balance and version, so
+        // the account Change below projects what is actually stored.
         const updatedAccount = await tx.financeAccount.update({
           where: { id: account.id },
           data: {
-            currentBalanceMinor: account.currentBalanceMinor + balanceDelta,
+            currentBalanceMinor: { increment: balanceDelta },
             version: { increment: 1 },
           },
         });
 
-        // 3. Advance nextDueDate
+        // 3. Advance nextDueDate, anchored on the day the rule started on.
         const nextDue = calculateNextOccurrence(
-          rule.nextDueDate,
+          occurrence,
           rule.frequency,
           rule.interval,
+          rule.startDate,
         );
 
         const updatedRule = await tx.financeRecurringRule.update({
@@ -264,9 +429,13 @@ export class RecurringService {
           payload: recurringChangePayload(updatedRule),
           userId: rule.userId,
         });
+
+        return true;
       });
 
-      processedCount++;
+      // Only a rule that actually minted a bill counts as processed; settled
+      // rules are not work, and counting them hid an ever-growing due queue.
+      if (generated) processedCount++;
     }
 
     return { processed: processedCount };
@@ -282,6 +451,15 @@ export class RecurringService {
     });
     if (!existing) {
       throw new NotFoundException(`Recurring rule with ID ${id} not found`);
+    }
+
+    // Moving a rule onto an account is precisely the cross-user write the create
+    // path refuses, so re-home it only against an account this user owns.
+    if (dto.accountId !== undefined && dto.accountId !== existing.accountId) {
+      await this.assertAccountOwned(userId, dto.accountId);
+    }
+    if (dto.categoryId && dto.categoryId !== existing.categoryId) {
+      await this.assertCategoryUsable(userId, dto.categoryId);
     }
 
     let highestCursor: bigint | undefined;

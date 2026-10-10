@@ -24,6 +24,7 @@ import { JwtAuthGuard } from "@/auth/guards/jwt-auth.guard";
 import { GetUser } from "@/auth/decorators/get-user.decorator";
 import { CreateBudgetDto } from "./dto/create-budget.dto";
 import { UpdateBudgetDto } from "./dto/update-budget.dto";
+import { BudgetListQueryDto } from "./dto/budget-list-query.dto";
 
 @ApiTags("Finance Budgets")
 @Controller("finance/budgets")
@@ -45,22 +46,28 @@ export class BudgetsController {
   @Get()
   @ApiOperation({ summary: "List all budgets or with spending tracking" })
   @ApiQuery({ name: "withSpending", required: false, type: Boolean })
-  @ApiQuery({ name: "month", required: false, type: Number })
+  @ApiQuery({
+    name: "month",
+    required: false,
+    type: Number,
+    description: "Calendar month, 1-based and UTC (1 = January).",
+  })
   @ApiQuery({ name: "year", required: false, type: Number })
   @ApiResponse({ status: 200, description: "List of budgets" })
+  @ApiResponse({
+    status: 400,
+    description: "month/year are not integers inside their allowed range.",
+  })
   async getBudgets(
     @GetUser("id") userId: string,
-    @Query("withSpending") withSpending?: string,
-    @Query("month") month?: string,
-    @Query("year") year?: string,
+    @Query() query: BudgetListQueryDto,
   ) {
-    if (withSpending === "true") {
-      const parsedMonth = month !== undefined ? parseInt(month, 10) : undefined;
-      const parsedYear = year !== undefined ? parseInt(year, 10) : undefined;
+    if (query.withSpending) {
+      // `month` stays 1-based all the way into the window maths.
       return this.budgetsService.getBudgetsWithSpending(
         userId,
-        parsedMonth,
-        parsedYear,
+        query.month,
+        query.year,
       );
     }
     return this.budgetsService.getBudgets(userId);

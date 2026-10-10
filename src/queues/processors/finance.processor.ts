@@ -33,8 +33,14 @@ export class FinanceProcessor {
       `[FinanceProcessor] Checking budget thresholds... Job #${job.id}`,
     );
     const now = new Date();
+    // `BudgetsService.getBudgetsWithSpending` builds its window with `Date.UTC`,
+    // so the alert cycle has to start on the UTC first of the month too. Using
+    // the local `getMonth()`/`getFullYear()` here made the two disagree either
+    // side of a month boundary in a non-UTC zone: in +05:30 the first hours of
+    // a UTC month were compared against the previous month's spend window, so a
+    // fresh-cycle budget was judged against stale spending and re-alerted.
     const startOfMonth = new Date(
-      Date.UTC(now.getFullYear(), now.getMonth(), 1),
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0),
     );
 
     const usersWithBudgets = await this.prisma.financeBudget.findMany({
@@ -55,20 +61,20 @@ export class FinanceProcessor {
           b.alertSentAt && new Date(b.alertSentAt) >= startOfMonth;
 
         if (!alreadyAlertedThisCycle) {
-          let shouldAlert = false;
-          let alertMsg = "";
+          let thresholdCrossed: "exceeded" | "warning" | null = null;
 
           if (b.alertAt100 && percent >= 100) {
-            shouldAlert = true;
-            alertMsg = `Budget limit exceeded: you have spent ${b.spentMinor / 100} of your ${b.amountMinor / 100} budget.`;
+            thresholdCrossed = "exceeded";
           } else if (b.alertAt80 && percent >= 80) {
-            shouldAlert = true;
-            alertMsg = `Budget threshold warning: you have used ${percent.toFixed(1)}% of your budget.`;
+            thresholdCrossed = "warning";
           }
 
-          if (shouldAlert) {
+          if (thresholdCrossed) {
+            // Spend and limit amounts are financial data and this line ships to
+            // the cluster's log aggregator, so only the threshold event plus the
+            // ids needed to trace it are logged.
             this.logger.warn(
-              `[FinanceProcessor] ${alertMsg} for user ${userId}, budget ${b.id}`,
+              `[FinanceProcessor] Budget limit ${thresholdCrossed} for user ${userId}, budget ${b.id}`,
             );
             await this.prisma.financeBudget.update({
               where: { id: b.id },
