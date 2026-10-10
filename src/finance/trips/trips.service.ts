@@ -1,8 +1,4 @@
-import {
-  Injectable,
-  NotFoundException,
-  Optional,
-} from "@nestjs/common";
+import { Injectable, NotFoundException, Optional } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { SyncNotificationService } from "@/sync/sync-notification.service";
 import { CreateTripDto } from "./dto/create-trip.dto";
@@ -19,7 +15,9 @@ export function formatTripResponse(trip: any) {
       trip.totalBudgetMinor !== null && trip.totalBudgetMinor !== undefined
         ? Number(trip.totalBudgetMinor)
         : null,
-    itineraryItems: (trip.itineraryItems || []).map(formatItineraryItemResponse),
+    itineraryItems: (trip.itineraryItems || []).map(
+      formatItineraryItemResponse,
+    ),
   };
 }
 
@@ -65,9 +63,7 @@ export function itineraryChangePayload(item: any): Record<string, any> {
     tripId: item.tripId,
     dayIndex: item.dayIndex,
     date:
-      item.date instanceof Date
-        ? item.date.toISOString()
-        : (item.date ?? null),
+      item.date instanceof Date ? item.date.toISOString() : (item.date ?? null),
     title: item.title,
     plannedCostMinor:
       item.plannedCostMinor !== null && item.plannedCostMinor !== undefined
@@ -206,7 +202,9 @@ export class TripsService {
               }
             : {}),
           ...(dto.notes !== undefined ? { notes: dto.notes } : {}),
-          ...(dto.isArchived !== undefined ? { isArchived: dto.isArchived } : {}),
+          ...(dto.isArchived !== undefined
+            ? { isArchived: dto.isArchived }
+            : {}),
           version: { increment: 1 },
         },
         include: {
@@ -382,11 +380,7 @@ export class TripsService {
     return formatItineraryItemResponse(updated);
   }
 
-  async deleteItineraryItem(
-    userId: string,
-    tripId: string,
-    itemId: string,
-  ) {
+  async deleteItineraryItem(userId: string, tripId: string, itemId: string) {
     await this.getTripById(userId, tripId);
 
     const existing = await this.prisma.financeTripItinerary.findFirst({

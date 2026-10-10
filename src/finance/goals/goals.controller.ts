@@ -33,11 +33,11 @@ export class GoalsController {
 
   @Post()
   @ApiOperation({ summary: "Create a new savings goal" })
-  @ApiResponse({ status: 201, description: "Savings goal created successfully" })
-  async createGoal(
-    @GetUser("id") userId: string,
-    @Body() dto: CreateGoalDto,
-  ) {
+  @ApiResponse({
+    status: 201,
+    description: "Savings goal created successfully",
+  })
+  async createGoal(@GetUser("id") userId: string, @Body() dto: CreateGoalDto) {
     return this.goalsService.createGoal(userId, dto);
   }
 
@@ -71,7 +71,10 @@ export class GoalsController {
 
   @Patch(":id")
   @ApiOperation({ summary: "Update a savings goal" })
-  @ApiResponse({ status: 200, description: "Savings goal updated successfully" })
+  @ApiResponse({
+    status: 200,
+    description: "Savings goal updated successfully",
+  })
   async updateGoal(
     @GetUser("id") userId: string,
     @Param("id", ParseUUIDPipe) id: string,

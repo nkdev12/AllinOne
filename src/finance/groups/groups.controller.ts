@@ -169,12 +169,17 @@ export class GroupsController {
   // -------------------------------------------------------------
 
   @Get(":id/balances")
-  @ApiOperation({ summary: "Get net balances and Min-Cash-Flow simplified settlements" })
+  @ApiOperation({
+    summary: "Get net balances and Min-Cash-Flow simplified settlements",
+  })
   @ApiResponse({ status: 200, description: "Net balances & simplified debts" })
   async getGroupBalancesAndSimplifiedDebts(
     @GetUser("id") userId: string,
     @Param("id", ParseUUIDPipe) groupId: string,
   ) {
-    return this.groupsService.getGroupBalancesAndSimplifiedDebts(userId, groupId);
+    return this.groupsService.getGroupBalancesAndSimplifiedDebts(
+      userId,
+      groupId,
+    );
   }
 }

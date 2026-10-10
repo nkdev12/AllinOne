@@ -28,7 +28,13 @@ export class OtpService {
 
     await this.prisma.otpToken.upsert({
       where: { userId_purpose: { userId, purpose } },
-      create: { userId, purpose, codeHash: this.hash(code), expiresAt, attempts: 0 },
+      create: {
+        userId,
+        purpose,
+        codeHash: this.hash(code),
+        expiresAt,
+        attempts: 0,
+      },
       update: { codeHash: this.hash(code), expiresAt, attempts: 0 },
     });
 

@@ -49,8 +49,8 @@ describe("Disaster Recovery & Restore Consistency (E2E)", () => {
 
   beforeAll(async () => {
     const fakePrisma: any = {
-      $transaction: jest.fn(async (cb: (tx: any) => Promise<any>): Promise<any> =>
-        cb(fakePrisma),
+      $transaction: jest.fn(
+        async (cb: (tx: any) => Promise<any>): Promise<any> => cb(fakePrisma),
       ),
       device: {
         findFirst: jest.fn(async ({ where }: any) => {

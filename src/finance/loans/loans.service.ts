@@ -1,8 +1,4 @@
-import {
-  Injectable,
-  NotFoundException,
-  Optional,
-} from "@nestjs/common";
+import { Injectable, NotFoundException, Optional } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { SyncNotificationService } from "@/sync/sync-notification.service";
 import { CreateLoanDto } from "./dto/create-loan.dto";

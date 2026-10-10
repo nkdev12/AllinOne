@@ -732,15 +732,13 @@ const FINANCE_ACCOUNT_FIELDS: ReadonlyArray<DocumentField> = [
   {
     key: "openingBalanceMinor",
     required: true,
-    accepts: (value) =>
-      typeof value === "number" || typeof value === "string",
+    accepts: (value) => typeof value === "number" || typeof value === "string",
     expected: "a number or string representation of integer",
   },
   {
     key: "currentBalanceMinor",
     required: false,
-    accepts: (value) =>
-      typeof value === "number" || typeof value === "string",
+    accepts: (value) => typeof value === "number" || typeof value === "string",
     expected: "a number or string representation of integer",
   },
   {

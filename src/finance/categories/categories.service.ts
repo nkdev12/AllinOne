@@ -28,22 +28,102 @@ export function categoryChangePayload(cat: any): Record<string, any> {
 }
 
 const DEFAULT_CATEGORIES = [
-  { name: "Food & Dining", type: FinanceTransactionType.EXPENSE, iconKey: "utensils", color: "#FF5722" },
-  { name: "Groceries", type: FinanceTransactionType.EXPENSE, iconKey: "shopping-cart", color: "#4CAF50" },
-  { name: "Transportation", type: FinanceTransactionType.EXPENSE, iconKey: "car", color: "#2196F3" },
-  { name: "Utilities", type: FinanceTransactionType.EXPENSE, iconKey: "zap", color: "#FFC107" },
-  { name: "Housing & Rent", type: FinanceTransactionType.EXPENSE, iconKey: "home", color: "#9C27B0" },
-  { name: "Entertainment", type: FinanceTransactionType.EXPENSE, iconKey: "film", color: "#E91E63" },
-  { name: "Healthcare", type: FinanceTransactionType.EXPENSE, iconKey: "activity", color: "#00BCD4" },
-  { name: "Shopping", type: FinanceTransactionType.EXPENSE, iconKey: "bag", color: "#FF9800" },
-  { name: "Education", type: FinanceTransactionType.EXPENSE, iconKey: "book", color: "#3F51B5" },
-  { name: "Personal Care", type: FinanceTransactionType.EXPENSE, iconKey: "heart", color: "#F06292" },
-  { name: "Salary", type: FinanceTransactionType.INCOME, iconKey: "briefcase", color: "#4CAF50" },
-  { name: "Investments", type: FinanceTransactionType.INCOME, iconKey: "trending-up", color: "#009688" },
-  { name: "Freelance", type: FinanceTransactionType.INCOME, iconKey: "laptop", color: "#8BC34A" },
-  { name: "Gifts", type: FinanceTransactionType.INCOME, iconKey: "gift", color: "#AB47BC" },
-  { name: "Other Income", type: FinanceTransactionType.INCOME, iconKey: "plus-circle", color: "#26A69A" },
-  { name: "Other Expense", type: FinanceTransactionType.EXPENSE, iconKey: "more-horizontal", color: "#78909C" },
+  {
+    name: "Food & Dining",
+    type: FinanceTransactionType.EXPENSE,
+    iconKey: "utensils",
+    color: "#FF5722",
+  },
+  {
+    name: "Groceries",
+    type: FinanceTransactionType.EXPENSE,
+    iconKey: "shopping-cart",
+    color: "#4CAF50",
+  },
+  {
+    name: "Transportation",
+    type: FinanceTransactionType.EXPENSE,
+    iconKey: "car",
+    color: "#2196F3",
+  },
+  {
+    name: "Utilities",
+    type: FinanceTransactionType.EXPENSE,
+    iconKey: "zap",
+    color: "#FFC107",
+  },
+  {
+    name: "Housing & Rent",
+    type: FinanceTransactionType.EXPENSE,
+    iconKey: "home",
+    color: "#9C27B0",
+  },
+  {
+    name: "Entertainment",
+    type: FinanceTransactionType.EXPENSE,
+    iconKey: "film",
+    color: "#E91E63",
+  },
+  {
+    name: "Healthcare",
+    type: FinanceTransactionType.EXPENSE,
+    iconKey: "activity",
+    color: "#00BCD4",
+  },
+  {
+    name: "Shopping",
+    type: FinanceTransactionType.EXPENSE,
+    iconKey: "bag",
+    color: "#FF9800",
+  },
+  {
+    name: "Education",
+    type: FinanceTransactionType.EXPENSE,
+    iconKey: "book",
+    color: "#3F51B5",
+  },
+  {
+    name: "Personal Care",
+    type: FinanceTransactionType.EXPENSE,
+    iconKey: "heart",
+    color: "#F06292",
+  },
+  {
+    name: "Salary",
+    type: FinanceTransactionType.INCOME,
+    iconKey: "briefcase",
+    color: "#4CAF50",
+  },
+  {
+    name: "Investments",
+    type: FinanceTransactionType.INCOME,
+    iconKey: "trending-up",
+    color: "#009688",
+  },
+  {
+    name: "Freelance",
+    type: FinanceTransactionType.INCOME,
+    iconKey: "laptop",
+    color: "#8BC34A",
+  },
+  {
+    name: "Gifts",
+    type: FinanceTransactionType.INCOME,
+    iconKey: "gift",
+    color: "#AB47BC",
+  },
+  {
+    name: "Other Income",
+    type: FinanceTransactionType.INCOME,
+    iconKey: "plus-circle",
+    color: "#26A69A",
+  },
+  {
+    name: "Other Expense",
+    type: FinanceTransactionType.EXPENSE,
+    iconKey: "more-horizontal",
+    color: "#78909C",
+  },
 ];
 
 @Injectable()
@@ -97,7 +177,9 @@ export class CategoriesService {
     });
 
     if (!category) {
-      throw new NotFoundException(`Finance category with ID '${id}' not found.`);
+      throw new NotFoundException(
+        `Finance category with ID '${id}' not found.`,
+      );
     }
 
     return category;
@@ -142,7 +224,9 @@ export class CategoriesService {
     });
 
     if (!existing) {
-      throw new NotFoundException(`Finance category with ID '${id}' not found.`);
+      throw new NotFoundException(
+        `Finance category with ID '${id}' not found.`,
+      );
     }
 
     let highestCursor: bigint | undefined;
@@ -183,7 +267,9 @@ export class CategoriesService {
     });
 
     if (!existing) {
-      throw new NotFoundException(`Finance category with ID '${id}' not found.`);
+      throw new NotFoundException(
+        `Finance category with ID '${id}' not found.`,
+      );
     }
 
     if (existing.isSystem) {

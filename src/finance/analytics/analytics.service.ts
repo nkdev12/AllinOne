@@ -133,8 +133,18 @@ export class AnalyticsService {
     });
 
     const monthNames = [
-      "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec",
     ];
 
     const months: CashFlowMonth[] = Array.from({ length: 12 }, (_, i) => ({
@@ -167,7 +177,10 @@ export class AnalyticsService {
     }
 
     const totalIncomeMinor = months.reduce((acc, m) => acc + m.incomeMinor, 0);
-    const totalExpenseMinor = months.reduce((acc, m) => acc + m.expenseMinor, 0);
+    const totalExpenseMinor = months.reduce(
+      (acc, m) => acc + m.expenseMinor,
+      0,
+    );
     const totalNetSavingsMinor = totalIncomeMinor - totalExpenseMinor;
     const overallSavingsRate =
       totalIncomeMinor > 0
@@ -281,10 +294,10 @@ export class AnalyticsService {
       currency: tx.currency,
       accountName: accountMap.get(tx.accountId) ?? "Unknown",
       toAccountName: tx.toAccountId
-        ? accountMap.get(tx.toAccountId) ?? "Unknown"
+        ? (accountMap.get(tx.toAccountId) ?? "Unknown")
         : null,
       categoryName: tx.categoryId
-        ? categoryMap.get(tx.categoryId) ?? "Uncategorized"
+        ? (categoryMap.get(tx.categoryId) ?? "Uncategorized")
         : "Uncategorized",
       notes: tx.notes ?? "",
     }));

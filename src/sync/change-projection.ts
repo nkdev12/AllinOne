@@ -165,16 +165,34 @@ export async function projectAcceptedChange(
     return projectFinanceCategoryChange(tx, userId, change, payloadOf(change));
   }
   if (change.entityType === "finance_transaction" && tx?.financeTransaction) {
-    return projectFinanceTransactionChange(tx, userId, change, payloadOf(change));
+    return projectFinanceTransactionChange(
+      tx,
+      userId,
+      change,
+      payloadOf(change),
+    );
   }
   if (change.entityType === "finance_budget" && tx?.financeBudget) {
     return projectFinanceBudgetChange(tx, userId, change, payloadOf(change));
   }
   if (change.entityType === "finance_savings_goal" && tx?.financeSavingsGoal) {
-    return projectFinanceSavingsGoalChange(tx, userId, change, payloadOf(change));
+    return projectFinanceSavingsGoalChange(
+      tx,
+      userId,
+      change,
+      payloadOf(change),
+    );
   }
-  if (change.entityType === "finance_recurring_rule" && tx?.financeRecurringRule) {
-    return projectFinanceRecurringRuleChange(tx, userId, change, payloadOf(change));
+  if (
+    change.entityType === "finance_recurring_rule" &&
+    tx?.financeRecurringRule
+  ) {
+    return projectFinanceRecurringRuleChange(
+      tx,
+      userId,
+      change,
+      payloadOf(change),
+    );
   }
   if (change.entityType === "finance_loan" && tx?.financeLoan) {
     return projectFinanceLoanChange(tx, userId, change, payloadOf(change));
@@ -182,17 +200,38 @@ export async function projectAcceptedChange(
   if (change.entityType === "finance_group" && tx?.financeGroup) {
     return projectFinanceGroupChange(tx, userId, change, payloadOf(change));
   }
-  if (change.entityType === "finance_shared_expense" && tx?.financeSharedExpense) {
-    return projectFinanceSharedExpenseChange(tx, userId, change, payloadOf(change));
+  if (
+    change.entityType === "finance_shared_expense" &&
+    tx?.financeSharedExpense
+  ) {
+    return projectFinanceSharedExpenseChange(
+      tx,
+      userId,
+      change,
+      payloadOf(change),
+    );
   }
   if (change.entityType === "finance_settlement" && tx?.financeSettlement) {
-    return projectFinanceSettlementChange(tx, userId, change, payloadOf(change));
+    return projectFinanceSettlementChange(
+      tx,
+      userId,
+      change,
+      payloadOf(change),
+    );
   }
   if (change.entityType === "finance_trip" && tx?.financeTrip) {
     return projectFinanceTripChange(tx, userId, change, payloadOf(change));
   }
-  if (change.entityType === "finance_trip_itinerary" && tx?.financeTripItinerary) {
-    return projectFinanceTripItineraryChange(tx, userId, change, payloadOf(change));
+  if (
+    change.entityType === "finance_trip_itinerary" &&
+    tx?.financeTripItinerary
+  ) {
+    return projectFinanceTripItineraryChange(
+      tx,
+      userId,
+      change,
+      payloadOf(change),
+    );
   }
 }
 
@@ -489,7 +528,8 @@ function taskColumns(payload: Record<string, any>): Record<string, any> {
   const columns: Record<string, any> = {};
 
   if (typeof payload.title === "string") columns.title = payload.title;
-  if (isTextOrNull(payload.description)) columns.description = payload.description;
+  if (isTextOrNull(payload.description))
+    columns.description = payload.description;
   if (isTextOrNull(payload.projectId)) columns.projectId = payload.projectId;
   if (isTextOrNull(payload.sectionId)) columns.sectionId = payload.sectionId;
   if (isTextOrNull(payload.parentId)) columns.parentId = payload.parentId;
@@ -516,14 +556,16 @@ function taskColumns(payload: Record<string, any>): Record<string, any> {
     columns.dueDate = null;
   }
   if (isTextOrNull(payload.dueTime)) columns.dueTime = payload.dueTime;
-  if (isTextOrNull(payload.recurrenceRule)) columns.recurrenceRule = payload.recurrenceRule;
+  if (isTextOrNull(payload.recurrenceRule))
+    columns.recurrenceRule = payload.recurrenceRule;
   if (typeof payload.completedAt === "string") {
     const d = new Date(payload.completedAt);
     if (!Number.isNaN(d.getTime())) columns.completedAt = d;
   } else if (payload.completedAt === null) {
     columns.completedAt = null;
   }
-  if (typeof payload.sortOrder === "number") columns.sortOrder = payload.sortOrder;
+  if (typeof payload.sortOrder === "number")
+    columns.sortOrder = payload.sortOrder;
 
   return columns;
 }
@@ -607,9 +649,11 @@ function eventColumns(payload: Record<string, any>): Record<string, any> {
   const columns: Record<string, any> = {};
 
   if (typeof payload.title === "string") columns.title = payload.title;
-  if (isTextOrNull(payload.description)) columns.description = payload.description;
+  if (isTextOrNull(payload.description))
+    columns.description = payload.description;
   if (isTextOrNull(payload.location)) columns.location = payload.location;
-  if (typeof payload.calendarId === "string") columns.calendarId = payload.calendarId;
+  if (typeof payload.calendarId === "string")
+    columns.calendarId = payload.calendarId;
   if (typeof payload.startAt === "string") {
     const d = new Date(payload.startAt);
     if (!Number.isNaN(d.getTime())) columns.startAt = d;
@@ -618,8 +662,10 @@ function eventColumns(payload: Record<string, any>): Record<string, any> {
     const d = new Date(payload.endAt);
     if (!Number.isNaN(d.getTime())) columns.endAt = d;
   }
-  if (typeof payload.isAllDay === "boolean") columns.isAllDay = payload.isAllDay;
-  if (isTextOrNull(payload.recurrenceRule)) columns.recurrenceRule = payload.recurrenceRule;
+  if (typeof payload.isAllDay === "boolean")
+    columns.isAllDay = payload.isAllDay;
+  if (isTextOrNull(payload.recurrenceRule))
+    columns.recurrenceRule = payload.recurrenceRule;
   if (
     typeof payload.status === "string" &&
     Object.values(EventStatus).includes(payload.status as EventStatus)
@@ -688,7 +734,8 @@ function calendarColumns(payload: Record<string, any>): Record<string, any> {
 
   if (typeof payload.name === "string") columns.name = payload.name;
   if (isTextOrNull(payload.color)) columns.color = payload.color;
-  if (typeof payload.isPrimary === "boolean") columns.isPrimary = payload.isPrimary;
+  if (typeof payload.isPrimary === "boolean")
+    columns.isPrimary = payload.isPrimary;
 
   return columns;
 }
@@ -841,9 +888,7 @@ async function projectFinanceCategoryChange(
         : {}),
       ...(isTextOrNull(payload.iconKey) ? { iconKey: payload.iconKey } : {}),
       ...(isTextOrNull(payload.color) ? { color: payload.color } : {}),
-      ...(isTextOrNull(payload.parentId)
-        ? { parentId: payload.parentId }
-        : {}),
+      ...(isTextOrNull(payload.parentId) ? { parentId: payload.parentId } : {}),
       version: change.version,
       deletedAt: null,
     },
@@ -1047,7 +1092,9 @@ async function projectFinanceBudgetChange(
           }
         : {}),
       ...(payload.amountMinor !== undefined ? { amountMinor } : {}),
-      ...(payload.period !== undefined ? { period: payload.period as any } : {}),
+      ...(payload.period !== undefined
+        ? { period: payload.period as any }
+        : {}),
       ...(payload.startDate !== undefined
         ? { startDate: payload.startDate ? new Date(payload.startDate) : null }
         : {}),
@@ -1138,7 +1185,9 @@ async function projectFinanceSavingsGoalChange(
         : {}),
       ...(payload.targetDate !== undefined
         ? {
-            targetDate: payload.targetDate ? new Date(payload.targetDate) : null,
+            targetDate: payload.targetDate
+              ? new Date(payload.targetDate)
+              : null,
           }
         : {}),
       ...(payload.color !== undefined
@@ -1507,9 +1556,7 @@ async function projectFinanceSharedExpenseChange(
           ? payload.payerAccountId
           : null,
         title:
-          typeof payload.title === "string"
-            ? payload.title
-            : "Shared Expense",
+          typeof payload.title === "string" ? payload.title : "Shared Expense",
         totalAmountMinor,
         currency: payload.currency ?? "INR",
         splitType: (payload.splitType as any) ?? "EQUAL",
@@ -1583,7 +1630,12 @@ async function projectFinanceSettlementChange(
 
   const existing = await delegate.findUnique({
     where: { id: change.entityId },
-    select: { fromUserId: true, toUserId: true, deletedAt: true, version: true },
+    select: {
+      fromUserId: true,
+      toUserId: true,
+      deletedAt: true,
+      version: true,
+    },
   });
 
   if (change.operation === ChangeOperation.DELETE) {
@@ -1595,9 +1647,7 @@ async function projectFinanceSettlementChange(
     return;
   }
 
-  const amountMinor = BigInt(
-    Math.round(Number(payload.amountMinor ?? 0)),
-  );
+  const amountMinor = BigInt(Math.round(Number(payload.amountMinor ?? 0)));
   const date = payload.date ? new Date(payload.date) : new Date();
 
   if (!existing) {
@@ -1692,7 +1742,9 @@ async function projectFinanceTripChange(
     return;
   }
 
-  const startDate = payload.startDate ? new Date(payload.startDate) : new Date();
+  const startDate = payload.startDate
+    ? new Date(payload.startDate)
+    : new Date();
   const endDate = payload.endDate ? new Date(payload.endDate) : startDate;
   const totalBudgetMinor =
     payload.totalBudgetMinor !== undefined && payload.totalBudgetMinor !== null
@@ -1789,9 +1841,7 @@ async function projectFinanceTripItineraryChange(
         dayIndex: typeof payload.dayIndex === "number" ? payload.dayIndex : 1,
         date,
         title:
-          typeof payload.title === "string"
-            ? payload.title
-            : "Itinerary item",
+          typeof payload.title === "string" ? payload.title : "Itinerary item",
         plannedCostMinor,
         notes: isTextOrNull(payload.notes) ? payload.notes : null,
         sortOrder:
@@ -1826,6 +1876,3 @@ async function projectFinanceTripItineraryChange(
     },
   });
 }
-
-
-

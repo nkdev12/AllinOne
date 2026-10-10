@@ -1,11 +1,7 @@
 export type ShareRole = "VIEWER" | "EDITOR" | "ADMIN";
 
 export type ResourceType =
-  | "NOTE"
-  | "PROJECT"
-  | "CALENDAR"
-  | "EXPENSE_GROUP"
-  | "TRIP";
+  "NOTE" | "PROJECT" | "CALENDAR" | "EXPENSE_GROUP" | "TRIP";
 
 /**
  * The response shape `/collaboration` publishes — keys are load-bearing for

@@ -82,7 +82,12 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
    */
   private extractToken(client: AuthenticatedSocket): string | undefined {
     const auth = client.handshake.auth;
-    if (auth && typeof auth === "object" && typeof auth.token === "string" && auth.token.trim()) {
+    if (
+      auth &&
+      typeof auth === "object" &&
+      typeof auth.token === "string" &&
+      auth.token.trim()
+    ) {
       return auth.token.trim();
     }
 

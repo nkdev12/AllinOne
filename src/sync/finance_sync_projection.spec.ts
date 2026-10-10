@@ -119,4 +119,3 @@ describe("Finance Sync Projection", () => {
     expect(tx.financeTransaction.update).not.toHaveBeenCalled();
   });
 });
-

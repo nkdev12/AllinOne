@@ -137,10 +137,9 @@ describe("SyncGateway", () => {
 
       await gateway.handleConnection(mockClient);
 
-      expect(jwtService.verifyAsync).toHaveBeenCalledWith(
-        "valid-query-token",
-        { secret: "access-secret" },
-      );
+      expect(jwtService.verifyAsync).toHaveBeenCalledWith("valid-query-token", {
+        secret: "access-secret",
+      });
       expect(mockClient.join).toHaveBeenCalledWith("user:user-uuid-123");
     });
 

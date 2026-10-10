@@ -1,8 +1,4 @@
-import {
-  Injectable,
-  NotFoundException,
-  Optional,
-} from "@nestjs/common";
+import { Injectable, NotFoundException, Optional } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { SyncNotificationService } from "@/sync/sync-notification.service";
 import { CreateGroupDto } from "./dto/create-group.dto";
@@ -185,10 +181,14 @@ export class GroupsService {
         where: { id: existing.id },
         data: {
           ...(dto.name !== undefined ? { name: dto.name } : {}),
-          ...(dto.description !== undefined ? { description: dto.description } : {}),
+          ...(dto.description !== undefined
+            ? { description: dto.description }
+            : {}),
           ...(dto.currency !== undefined ? { currency: dto.currency } : {}),
           ...(dto.iconKey !== undefined ? { iconKey: dto.iconKey } : {}),
-          ...(dto.isArchived !== undefined ? { isArchived: dto.isArchived } : {}),
+          ...(dto.isArchived !== undefined
+            ? { isArchived: dto.isArchived }
+            : {}),
           version: { increment: 1 },
         },
       });

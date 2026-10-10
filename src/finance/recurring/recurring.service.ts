@@ -102,7 +102,9 @@ export class RecurringService {
       where: { id: dto.accountId, userId, deletedAt: null },
     });
     if (!account) {
-      throw new BadRequestException(`Account with ID ${dto.accountId} not found`);
+      throw new BadRequestException(
+        `Account with ID ${dto.accountId} not found`,
+      );
     }
 
     const startDate = new Date(dto.startDate);

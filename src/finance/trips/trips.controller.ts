@@ -37,10 +37,7 @@ export class TripsController {
   @Post()
   @ApiOperation({ summary: "Create a new travel trip" })
   @ApiResponse({ status: 201, description: "Trip created successfully" })
-  async createTrip(
-    @GetUser("id") userId: string,
-    @Body() dto: CreateTripDto,
-  ) {
+  async createTrip(@GetUser("id") userId: string, @Body() dto: CreateTripDto) {
     return this.tripsService.createTrip(userId, dto);
   }
 

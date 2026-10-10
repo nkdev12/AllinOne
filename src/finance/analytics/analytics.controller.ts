@@ -1,9 +1,4 @@
-import {
-  Controller,
-  Get,
-  Query,
-  UseGuards,
-} from "@nestjs/common";
+import { Controller, Get, Query, UseGuards } from "@nestjs/common";
 import {
   ApiTags,
   ApiOperation,
@@ -23,7 +18,9 @@ export class AnalyticsController {
   constructor(private readonly analyticsService: AnalyticsService) {}
 
   @Get("spending-by-category")
-  @ApiOperation({ summary: "Get spending breakdown by category for a date range" })
+  @ApiOperation({
+    summary: "Get spending breakdown by category for a date range",
+  })
   @ApiQuery({ name: "startDate", required: false, type: String })
   @ApiQuery({ name: "endDate", required: false, type: String })
   @ApiResponse({ status: 200, description: "Category spending breakdown" })
@@ -32,11 +29,17 @@ export class AnalyticsController {
     @Query("startDate") startDate?: string,
     @Query("endDate") endDate?: string,
   ) {
-    return this.analyticsService.getSpendingByCategory(userId, startDate, endDate);
+    return this.analyticsService.getSpendingByCategory(
+      userId,
+      startDate,
+      endDate,
+    );
   }
 
   @Get("cash-flow")
-  @ApiOperation({ summary: "Get monthly income, expense, and net savings for a year" })
+  @ApiOperation({
+    summary: "Get monthly income, expense, and net savings for a year",
+  })
   @ApiQuery({ name: "year", required: false, type: Number })
   @ApiResponse({ status: 200, description: "Monthly cash flow" })
   async getCashFlow(

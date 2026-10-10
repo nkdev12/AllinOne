@@ -144,7 +144,10 @@ export class TransactionsService {
         await this.adjustAccount(tx, userId, dto.accountId, amountMinor);
       } else if (dto.type === FinanceTransactionType.EXPENSE) {
         await this.adjustAccount(tx, userId, dto.accountId, -amountMinor);
-      } else if (dto.type === FinanceTransactionType.TRANSFER && dto.toAccountId) {
+      } else if (
+        dto.type === FinanceTransactionType.TRANSFER &&
+        dto.toAccountId
+      ) {
         await this.adjustAccount(tx, userId, dto.accountId, -amountMinor);
         await this.adjustAccount(tx, userId, dto.toAccountId, amountMinor);
       }
@@ -184,7 +187,8 @@ export class TransactionsService {
 
     if (query.startDate || query.endDate) {
       where.transactionDate = {};
-      if (query.startDate) where.transactionDate.gte = new Date(query.startDate);
+      if (query.startDate)
+        where.transactionDate.gte = new Date(query.startDate);
       if (query.endDate) where.transactionDate.lte = new Date(query.endDate);
     }
 
@@ -229,7 +233,9 @@ export class TransactionsService {
     });
 
     if (!tx) {
-      throw new NotFoundException(`Finance transaction with ID '${id}' not found.`);
+      throw new NotFoundException(
+        `Finance transaction with ID '${id}' not found.`,
+      );
     }
 
     return formatTransactionResponse(tx);
@@ -245,7 +251,9 @@ export class TransactionsService {
     });
 
     if (!oldTx) {
-      throw new NotFoundException(`Finance transaction with ID '${id}' not found.`);
+      throw new NotFoundException(
+        `Finance transaction with ID '${id}' not found.`,
+      );
     }
 
     const targetAccountId = dto.accountId ?? oldTx.accountId;
@@ -275,22 +283,68 @@ export class TransactionsService {
     const updated = await this.prisma.$transaction(async (tx) => {
       // 1. Revert old balance adjustment
       if (oldTx.type === FinanceTransactionType.INCOME) {
-        await this.adjustAccount(tx, userId, oldTx.accountId, -oldTx.amountMinor);
+        await this.adjustAccount(
+          tx,
+          userId,
+          oldTx.accountId,
+          -oldTx.amountMinor,
+        );
       } else if (oldTx.type === FinanceTransactionType.EXPENSE) {
-        await this.adjustAccount(tx, userId, oldTx.accountId, oldTx.amountMinor);
-      } else if (oldTx.type === FinanceTransactionType.TRANSFER && oldTx.toAccountId) {
-        await this.adjustAccount(tx, userId, oldTx.accountId, oldTx.amountMinor);
-        await this.adjustAccount(tx, userId, oldTx.toAccountId, -oldTx.amountMinor);
+        await this.adjustAccount(
+          tx,
+          userId,
+          oldTx.accountId,
+          oldTx.amountMinor,
+        );
+      } else if (
+        oldTx.type === FinanceTransactionType.TRANSFER &&
+        oldTx.toAccountId
+      ) {
+        await this.adjustAccount(
+          tx,
+          userId,
+          oldTx.accountId,
+          oldTx.amountMinor,
+        );
+        await this.adjustAccount(
+          tx,
+          userId,
+          oldTx.toAccountId,
+          -oldTx.amountMinor,
+        );
       }
 
       // 2. Apply new balance adjustment
       if (targetType === FinanceTransactionType.INCOME) {
-        await this.adjustAccount(tx, userId, targetAccountId, targetAmountMinor);
+        await this.adjustAccount(
+          tx,
+          userId,
+          targetAccountId,
+          targetAmountMinor,
+        );
       } else if (targetType === FinanceTransactionType.EXPENSE) {
-        await this.adjustAccount(tx, userId, targetAccountId, -targetAmountMinor);
-      } else if (targetType === FinanceTransactionType.TRANSFER && targetToAccountId) {
-        await this.adjustAccount(tx, userId, targetAccountId, -targetAmountMinor);
-        await this.adjustAccount(tx, userId, targetToAccountId, targetAmountMinor);
+        await this.adjustAccount(
+          tx,
+          userId,
+          targetAccountId,
+          -targetAmountMinor,
+        );
+      } else if (
+        targetType === FinanceTransactionType.TRANSFER &&
+        targetToAccountId
+      ) {
+        await this.adjustAccount(
+          tx,
+          userId,
+          targetAccountId,
+          -targetAmountMinor,
+        );
+        await this.adjustAccount(
+          tx,
+          userId,
+          targetToAccountId,
+          targetAmountMinor,
+        );
       }
 
       // 3. Update transaction record
@@ -299,7 +353,8 @@ export class TransactionsService {
         data: {
           accountId: targetAccountId,
           toAccountId: targetToAccountId,
-          categoryId: dto.categoryId !== undefined ? dto.categoryId : oldTx.categoryId,
+          categoryId:
+            dto.categoryId !== undefined ? dto.categoryId : oldTx.categoryId,
           type: targetType,
           amountMinor: targetAmountMinor,
           currency: dto.currency ?? oldTx.currency,
@@ -344,7 +399,9 @@ export class TransactionsService {
     });
 
     if (!existing) {
-      throw new NotFoundException(`Finance transaction with ID '${id}' not found.`);
+      throw new NotFoundException(
+        `Finance transaction with ID '${id}' not found.`,
+      );
     }
 
     let highestCursor: bigint | undefined;
@@ -352,12 +409,35 @@ export class TransactionsService {
     const deleted = await this.prisma.$transaction(async (tx) => {
       // Revert balance effect
       if (existing.type === FinanceTransactionType.INCOME) {
-        await this.adjustAccount(tx, userId, existing.accountId, -existing.amountMinor);
+        await this.adjustAccount(
+          tx,
+          userId,
+          existing.accountId,
+          -existing.amountMinor,
+        );
       } else if (existing.type === FinanceTransactionType.EXPENSE) {
-        await this.adjustAccount(tx, userId, existing.accountId, existing.amountMinor);
-      } else if (existing.type === FinanceTransactionType.TRANSFER && existing.toAccountId) {
-        await this.adjustAccount(tx, userId, existing.accountId, existing.amountMinor);
-        await this.adjustAccount(tx, userId, existing.toAccountId, -existing.amountMinor);
+        await this.adjustAccount(
+          tx,
+          userId,
+          existing.accountId,
+          existing.amountMinor,
+        );
+      } else if (
+        existing.type === FinanceTransactionType.TRANSFER &&
+        existing.toAccountId
+      ) {
+        await this.adjustAccount(
+          tx,
+          userId,
+          existing.accountId,
+          existing.amountMinor,
+        );
+        await this.adjustAccount(
+          tx,
+          userId,
+          existing.toAccountId,
+          -existing.amountMinor,
+        );
       }
 
       const transaction = await tx.financeTransaction.update({

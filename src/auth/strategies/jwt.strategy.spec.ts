@@ -70,7 +70,11 @@ describe("JwtStrategy", () => {
 
   it("still accepts tokens that carry no session as long as type is access", async () => {
     await expect(
-      strategy.validate({ sub: "user-1", email: "test@example.com", type: "access" }),
+      strategy.validate({
+        sub: "user-1",
+        email: "test@example.com",
+        type: "access",
+      }),
     ).resolves.toMatchObject({ id: "user-1" });
 
     expect(usersService.isSessionLive).not.toHaveBeenCalled();

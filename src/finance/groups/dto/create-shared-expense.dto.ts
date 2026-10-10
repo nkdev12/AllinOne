@@ -16,7 +16,10 @@ import { Type } from "class-transformer";
 import { FinanceSplitType } from "@prisma/client";
 
 export class ExpenseShareItemDto {
-  @ApiProperty({ example: "user_uuid_or_name", description: "User ID or participant identifier" })
+  @ApiProperty({
+    example: "user_uuid_or_name",
+    description: "User ID or participant identifier",
+  })
   @IsNotEmpty()
   @IsString()
   userId!: string;
@@ -33,7 +36,10 @@ export class ExpenseShareItemDto {
 }
 
 export class CreateSharedExpenseDto {
-  @ApiProperty({ example: "Dinner at Fisherman's Wharf", description: "Title of shared expense" })
+  @ApiProperty({
+    example: "Dinner at Fisherman's Wharf",
+    description: "Title of shared expense",
+  })
   @IsNotEmpty()
   @IsString()
   @MaxLength(150)
@@ -55,12 +61,18 @@ export class CreateSharedExpenseDto {
   @IsString()
   paidByUserId!: string;
 
-  @ApiPropertyOptional({ example: "account_uuid", description: "Account used to pay" })
+  @ApiPropertyOptional({
+    example: "account_uuid",
+    description: "Account used to pay",
+  })
   @IsOptional()
   @IsString()
   payerAccountId?: string;
 
-  @ApiPropertyOptional({ enum: FinanceSplitType, default: FinanceSplitType.EQUAL })
+  @ApiPropertyOptional({
+    enum: FinanceSplitType,
+    default: FinanceSplitType.EQUAL,
+  })
   @IsOptional()
   @IsEnum(FinanceSplitType)
   splitType?: FinanceSplitType;
@@ -70,7 +82,10 @@ export class CreateSharedExpenseDto {
   @IsISO8601()
   date!: string;
 
-  @ApiPropertyOptional({ example: "Seafood dinner", description: "Optional notes" })
+  @ApiPropertyOptional({
+    example: "Seafood dinner",
+    description: "Optional notes",
+  })
   @IsOptional()
   @IsString()
   @MaxLength(500)
@@ -81,12 +96,17 @@ export class CreateSharedExpenseDto {
   @IsString()
   receiptAttachmentId?: string;
 
-  @ApiPropertyOptional({ description: "Optional trip ID if associated with a trip" })
+  @ApiPropertyOptional({
+    description: "Optional trip ID if associated with a trip",
+  })
   @IsOptional()
   @IsString()
   tripId?: string;
 
-  @ApiProperty({ type: [ExpenseShareItemDto], description: "List of participant shares" })
+  @ApiProperty({
+    type: [ExpenseShareItemDto],
+    description: "List of participant shares",
+  })
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => ExpenseShareItemDto)

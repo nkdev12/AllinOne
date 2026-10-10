@@ -19,10 +19,7 @@ describe("OtpService", () => {
     };
 
     const module: TestingModule = await Test.createTestingModule({
-      providers: [
-        OtpService,
-        { provide: PrismaService, useValue: prisma },
-      ],
+      providers: [OtpService, { provide: PrismaService, useValue: prisma }],
     }).compile();
 
     service = module.get<OtpService>(OtpService);
@@ -34,7 +31,12 @@ describe("OtpService", () => {
     expect(code).toMatch(/^\d{6}$/);
     expect(prisma.otpToken.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { userId_purpose: { userId: "user-1", purpose: OtpPurpose.PASSWORD_RESET } },
+        where: {
+          userId_purpose: {
+            userId: "user-1",
+            purpose: OtpPurpose.PASSWORD_RESET,
+          },
+        },
         create: expect.objectContaining({
           userId: "user-1",
           purpose: OtpPurpose.PASSWORD_RESET,
@@ -59,7 +61,11 @@ describe("OtpService", () => {
       expiresAt: new Date(Date.now() + 10 * 60 * 1000),
     });
 
-    const result = await service.consume("user-1", OtpPurpose.PASSWORD_RESET, "123456");
+    const result = await service.consume(
+      "user-1",
+      OtpPurpose.PASSWORD_RESET,
+      "123456",
+    );
 
     expect(result).toBe(true);
     expect(prisma.otpToken.deleteMany).toHaveBeenCalledWith({
@@ -79,7 +85,11 @@ describe("OtpService", () => {
       expiresAt: new Date(Date.now() - 1000),
     });
 
-    const result = await service.consume("user-1", OtpPurpose.PASSWORD_RESET, "123456");
+    const result = await service.consume(
+      "user-1",
+      OtpPurpose.PASSWORD_RESET,
+      "123456",
+    );
 
     expect(result).toBe(false);
     expect(prisma.otpToken.deleteMany).toHaveBeenCalledWith({
@@ -89,7 +99,10 @@ describe("OtpService", () => {
 
   it("increments attempts on incorrect code without deleting token before max", async () => {
     const correctCode = "123456";
-    const codeHash = crypto.createHash("sha256").update(correctCode).digest("hex");
+    const codeHash = crypto
+      .createHash("sha256")
+      .update(correctCode)
+      .digest("hex");
 
     prisma.otpToken.findUnique.mockResolvedValue({
       userId: "user-1",
@@ -99,11 +112,20 @@ describe("OtpService", () => {
       expiresAt: new Date(Date.now() + 10 * 60 * 1000),
     });
 
-    const result = await service.consume("user-1", OtpPurpose.PASSWORD_RESET, "999999");
+    const result = await service.consume(
+      "user-1",
+      OtpPurpose.PASSWORD_RESET,
+      "999999",
+    );
 
     expect(result).toBe(false);
     expect(prisma.otpToken.update).toHaveBeenCalledWith({
-      where: { userId_purpose: { userId: "user-1", purpose: OtpPurpose.PASSWORD_RESET } },
+      where: {
+        userId_purpose: {
+          userId: "user-1",
+          purpose: OtpPurpose.PASSWORD_RESET,
+        },
+      },
       data: { attempts: { increment: 1 } },
     });
     expect(prisma.otpToken.deleteMany).not.toHaveBeenCalled();
@@ -111,7 +133,10 @@ describe("OtpService", () => {
 
   it("deletes token and returns false when max attempts reached on incorrect code", async () => {
     const correctCode = "123456";
-    const codeHash = crypto.createHash("sha256").update(correctCode).digest("hex");
+    const codeHash = crypto
+      .createHash("sha256")
+      .update(correctCode)
+      .digest("hex");
 
     prisma.otpToken.findUnique.mockResolvedValue({
       userId: "user-1",
@@ -121,7 +146,11 @@ describe("OtpService", () => {
       expiresAt: new Date(Date.now() + 10 * 60 * 1000),
     });
 
-    const result = await service.consume("user-1", OtpPurpose.PASSWORD_RESET, "999999");
+    const result = await service.consume(
+      "user-1",
+      OtpPurpose.PASSWORD_RESET,
+      "999999",
+    );
 
     expect(result).toBe(false);
     expect(prisma.otpToken.deleteMany).toHaveBeenCalledWith({

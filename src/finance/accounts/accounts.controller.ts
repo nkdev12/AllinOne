@@ -50,10 +50,7 @@ export class AccountsController {
     @GetUser("id") userId: string,
     @Query("includeArchived") includeArchived?: string,
   ) {
-    return this.accountsService.getAccounts(
-      userId,
-      includeArchived === "true",
-    );
+    return this.accountsService.getAccounts(userId, includeArchived === "true");
   }
 
   @Get(":id")

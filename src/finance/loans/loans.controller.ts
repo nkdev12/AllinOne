@@ -37,10 +37,7 @@ export class LoansController {
   @Post()
   @ApiOperation({ summary: "Create a new lent or borrowed loan" })
   @ApiResponse({ status: 201, description: "Loan created successfully" })
-  async createLoan(
-    @GetUser("id") userId: string,
-    @Body() dto: CreateLoanDto,
-  ) {
+  async createLoan(@GetUser("id") userId: string, @Body() dto: CreateLoanDto) {
     return this.loansService.createLoan(userId, dto);
   }
 
@@ -74,7 +71,10 @@ export class LoansController {
 
   @Post(":id/repayment")
   @ApiOperation({ summary: "Record a repayment towards a loan" })
-  @ApiResponse({ status: 200, description: "Repayment recorded, balance updated" })
+  @ApiResponse({
+    status: 200,
+    description: "Repayment recorded, balance updated",
+  })
   async recordRepayment(
     @GetUser("id") userId: string,
     @Param("id", ParseUUIDPipe) id: string,

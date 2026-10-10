@@ -57,13 +57,20 @@ export class TransactionsController {
   @ApiOperation({ summary: "Get cash flow summary for a date range" })
   @ApiQuery({ name: "startDate", required: false })
   @ApiQuery({ name: "endDate", required: false })
-  @ApiResponse({ status: 200, description: "Cash flow summary (income, expense, net)" })
+  @ApiResponse({
+    status: 200,
+    description: "Cash flow summary (income, expense, net)",
+  })
   async getCashFlowSummary(
     @GetUser("id") userId: string,
     @Query("startDate") startDate?: string,
     @Query("endDate") endDate?: string,
   ) {
-    return this.transactionsService.getCashFlowSummary(userId, startDate, endDate);
+    return this.transactionsService.getCashFlowSummary(
+      userId,
+      startDate,
+      endDate,
+    );
   }
 
   @Get(":id")

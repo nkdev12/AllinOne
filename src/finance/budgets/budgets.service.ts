@@ -1,8 +1,4 @@
-import {
-  Injectable,
-  NotFoundException,
-  Optional,
-} from "@nestjs/common";
+import { Injectable, NotFoundException, Optional } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { SyncNotificationService } from "@/sync/sync-notification.service";
 import { CreateBudgetDto } from "./dto/create-budget.dto";
@@ -105,8 +101,12 @@ export class BudgetsService {
     const targetYear = year ?? now.getFullYear();
     const targetMonth = month !== undefined ? month : now.getMonth();
 
-    const startOfMonth = new Date(Date.UTC(targetYear, targetMonth, 1, 0, 0, 0, 0));
-    const endOfMonth = new Date(Date.UTC(targetYear, targetMonth + 1, 0, 23, 59, 59, 999));
+    const startOfMonth = new Date(
+      Date.UTC(targetYear, targetMonth, 1, 0, 0, 0, 0),
+    );
+    const endOfMonth = new Date(
+      Date.UTC(targetYear, targetMonth + 1, 0, 23, 59, 59, 999),
+    );
 
     const [budgets, expenses] = await Promise.all([
       this.prisma.financeBudget.findMany({

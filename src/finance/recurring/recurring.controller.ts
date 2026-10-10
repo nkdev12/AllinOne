@@ -52,7 +52,9 @@ export class RecurringController {
 
   @Post("process-due")
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: "Manually trigger processing of due recurring rules" })
+  @ApiOperation({
+    summary: "Manually trigger processing of due recurring rules",
+  })
   @ApiResponse({ status: 200, description: "Processed count returned" })
   async processDueRules(@GetUser("id") userId: string) {
     return this.recurringService.processDueRules(userId);
