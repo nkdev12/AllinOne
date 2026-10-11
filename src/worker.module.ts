@@ -34,12 +34,9 @@ import { QueuesModule } from "@/queues/queues.module";
         OBJECT_STORAGE_SECRET_KEY: Joi.string().required(),
         OBJECT_STORAGE_BUCKET: Joi.string().required(),
         ENCRYPTION_KEY: Joi.string().min(32).required(),
-        SMTP_HOST: Joi.string().default("localhost"),
-        SMTP_PORT: Joi.number().default(587),
-        SMTP_USER: Joi.string().allow("").optional(),
-        SMTP_PASSWORD: Joi.string().allow("").optional(),
-        SMTP_FROM: Joi.string().default("noreply@localhost"),
-        SMTP_TLS: Joi.boolean().default(false),
+        RESEND_API_KEY: Joi.string().allow("").optional(),
+        EMAIL_FROM: Joi.string().allow("").optional(),
+        EMAIL_REPLY_TO: Joi.string().allow("").optional(),
         // Admin access keys are declared here too so `ConfigurationService`
         // sees one schema across both processes. Optional, no default: unset
         // means no admin admit path, and the worker serves no /admin routes.

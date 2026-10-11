@@ -50,12 +50,9 @@ const WORKER_ENV: Record<string, string> = {
   OBJECT_STORAGE_SECRET_KEY: "test-secret-key",
   OBJECT_STORAGE_BUCKET: "test-bucket",
   ENCRYPTION_KEY: "x".repeat(32),
-  SMTP_HOST: "localhost",
-  SMTP_PORT: "587",
-  SMTP_USER: "",
-  SMTP_PASSWORD: "",
-  SMTP_FROM: "noreply@localhost",
-  SMTP_TLS: "false",
+  RESEND_API_KEY: "",
+  EMAIL_FROM: "",
+  EMAIL_REPLY_TO: "",
 };
 
 interface FakeQueue {
@@ -107,7 +104,7 @@ function createFakeMailService() {
   };
 }
 
-/** Compiles WorkerModule with Bull/Prisma/SMTP infrastructure replaced. */
+/** Compiles WorkerModule with Bull/Prisma/email infrastructure replaced. */
 async function compileHeadlessWorker() {
   const queues = createFakeQueues();
   const prisma = createFakePrisma();

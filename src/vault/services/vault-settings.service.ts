@@ -312,7 +312,7 @@ export class VaultSettingsService {
       RECOVERY_OTP_TTL_MINUTES,
     );
 
-    // Dev-only console fallback so the code is visible even if SMTP is down.
+    // Dev-only console fallback so the code is visible even if email delivery is down.
     if (!this.configService.isProduction) {
       this.logger.debug(`VAULT RECOVERY OTP FOR ${user.email}: ${otp}`);
     }
@@ -324,7 +324,7 @@ export class VaultSettingsService {
       );
       if (!sent) {
         this.logger.warn(
-          `Vault recovery OTP could not be delivered to ${user.email}. Check SMTP configuration.`,
+          `Vault recovery OTP could not be delivered to ${user.email}. Check Resend configuration.`,
         );
         if (this.configService.isProduction) {
           throw badRequest(

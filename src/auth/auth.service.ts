@@ -968,7 +968,7 @@ export class AuthService {
         ],
       });
 
-      // Dev-only console fallback so OTP is visible even if SMTP is down.
+      // Dev-only console fallback so OTP is visible even if email delivery is down.
       if (!this.configService.isProduction) {
         this.logger.debug(
           `OTP CODE FOR ${user.email}: ${otp} (expires in 60 minutes)`,
@@ -980,7 +980,7 @@ export class AuthService {
         const sent = await this.mailService?.sendOtpEmail(user.email, otp);
         if (!sent) {
           this.logger.warn(
-            `OTP email could not be delivered to ${user.email}. Check SMTP configuration.`,
+            `OTP email could not be delivered to ${user.email}. Check Resend configuration.`,
           );
         }
       } catch (err) {
@@ -1070,7 +1070,7 @@ export class AuthService {
         this.RESET_OTP_TTL_MINUTES,
       );
 
-      // Dev-only console fallback so the code is visible even if SMTP is down.
+      // Dev-only console fallback so the code is visible even if email delivery is down.
       if (!this.configService.isProduction) {
         this.logger.debug(`PASSWORD RESET OTP FOR ${user.email}: ${otp}`);
       }
@@ -1082,7 +1082,7 @@ export class AuthService {
         );
         if (!sent) {
           this.logger.warn(
-            `Password reset OTP could not be delivered to ${user.email}. Check SMTP configuration.`,
+            `Password reset OTP could not be delivered to ${user.email}. Check Resend configuration.`,
           );
         }
       } catch (err) {

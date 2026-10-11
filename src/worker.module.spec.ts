@@ -25,7 +25,7 @@ import { FinanceProcessor } from "@/queues/processors/finance.processor";
  * Infrastructure is stubbed, never reached: the four Bull queues are replaced
  * with recording doubles (so no ioredis socket is opened), and PrismaService and
  * MailService are replaced before their constructors can connect to Mongo or
- * verify SMTP. No Redis, no MongoDB, no network.
+ * verify configuration. No Redis, no MongoDB, no network.
  */
 
 const QUEUE_NAMES = [
@@ -55,12 +55,9 @@ const WORKER_ENV: Record<string, string> = {
   OBJECT_STORAGE_SECRET_KEY: "test-secret-key",
   OBJECT_STORAGE_BUCKET: "test-bucket",
   ENCRYPTION_KEY: "x".repeat(32),
-  SMTP_HOST: "localhost",
-  SMTP_PORT: "587",
-  SMTP_USER: "",
-  SMTP_PASSWORD: "",
-  SMTP_FROM: "noreply@localhost",
-  SMTP_TLS: "false",
+  RESEND_API_KEY: "",
+  EMAIL_FROM: "",
+  EMAIL_REPLY_TO: "",
 };
 
 /** Stand-in for a Bull `Queue`: records what the module graph hands out. */

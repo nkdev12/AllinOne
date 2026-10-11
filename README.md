@@ -39,7 +39,7 @@ Allinone is a **100% free, self-hosted** backend that combines:
 | **Database** | MongoDB 7.0 | ✅ |
 | **Cache & Queues** | Redis + BullMQ | ✅ |
 | **Object Storage** | MinIO (S3-compatible) | ✅ |
-| **Email** | SMTP (Mailpit for dev) | ✅ |
+| **Email** | Resend HTTPS API | ✅ |
 | **Reverse Proxy** | Caddy with auto HTTPS | ✅ |
 | **Monitoring** | Prometheus + Grafana | ✅ |
 | **Logging** | Structured JSON logs | ✅ |
@@ -90,7 +90,6 @@ Services running:
 - **MongoDB** → localhost:27017
 - **Redis** → localhost:6379
 - **MinIO** → http://localhost:9000 (username/password: `minioadmin`)
-- **Mailpit** (email testing) → http://localhost:8025
 - **Prometheus** → http://localhost:9090
 - **Grafana** → http://localhost:3001 (admin/admin)
 
@@ -172,7 +171,7 @@ All variables are documented in [`.env.example`](.env.example):
 - `JWT_REFRESH_SECRET` — Refresh token secret (generate: `openssl rand -hex 32`)
 - `ENCRYPTION_KEY` — Data encryption key (min 32 chars)
 - `OBJECT_STORAGE_*` — MinIO configuration
-- `SMTP_*` — Email configuration
+- `RESEND_API_KEY`, `EMAIL_FROM`, and `EMAIL_REPLY_TO` — Email configuration
 
 ### Scripts
 

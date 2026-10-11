@@ -49,14 +49,15 @@ APP_ENV=development
 APP_PORT=3000
 DATABASE_URL=mongodb://localhost:27017/allinone_dev
 REDIS_URL=redis://localhost:6379
-SMTP_HOST=mailpit
-SMTP_PORT=1025
+RESEND_API_KEY=
+EMAIL_FROM=onboarding@resend.dev
+EMAIL_REPLY_TO=yourname@proton.me
 ```
 
 Two caveats about the files as committed:
 
 - `.env.example` ships `DATABASE_URL="mongodb://localhost:27017/allinone_dev"` and a note that the server must be a replica set member. Check it anyway: the line was a `postgresql://…:5432/…` URL as recently as commit `538cc50`, and the datasource is `provider = "mongodb"`, so a Postgres URL cannot work no matter what is in the file.
-- `SMTP_HOST=mailpit` only resolves inside the Compose network. When the API runs on your own machine with `npm run start:dev`, use `localhost`, because `docker-compose.dev.yml` publishes Mailpit's SMTP port as `1025:1025`.
+- Email delivery uses Resend's HTTPS API. Set `RESEND_API_KEY`, `EMAIL_FROM`, and `EMAIL_REPLY_TO` when testing email features.
 
 **⚠️ Important**: These defaults are only for development. For production, change:
 
@@ -101,7 +102,6 @@ The stack has no API container in development: `docker-compose.dev.yml` defines 
 | MongoDB    | localhost:27017       | Main database  |
 | Redis      | localhost:6379        | Cache & queues |
 | MinIO      | http://localhost:9000 | File storage   |
-| Mailpit    | http://localhost:8025 | Email testing  |
 | Prometheus | http://localhost:9090 | Metrics        |
 | Grafana    | http://localhost:3001 | Dashboards     |
 
@@ -263,16 +263,9 @@ Before committing, always run:
 npm run lint && npm run typecheck && npm run test
 ```
 
-## Using Mailpit for Email Testing
+## Using Resend for Email
 
-When the backend sends emails, they appear in Mailpit instead of being sent to the internet.
-
-1. Open **http://localhost:8025**
-2. Send an email via the API
-3. See it appear in Mailpit UI
-4. Inspect email content, headers, and attachments
-
-Perfect for testing email features without a real SMTP server!
+Set `RESEND_API_KEY`, `EMAIL_FROM`, and `EMAIL_REPLY_TO` in your environment. Email requests are sent over HTTPS to Resend, so the same configuration works locally and on Railway.
 
 ## Using MinIO for File Storage
 
@@ -430,7 +423,7 @@ npm install
 
 **Q: Can I use the backend without Docker?**
 
-A: Yes, but you'll need to manually install and run MongoDB (as a replica set, because the transaction endpoints reject a standalone `mongod`), Redis, MinIO, and Mailpit. Docker Compose is recommended for simplicity.
+A: Yes, but you'll need to manually install and run MongoDB (as a replica set, because the transaction endpoints reject a standalone `mongod`), Redis, and MinIO. You also need Resend credentials for email delivery. Docker Compose is recommended for simplicity.
 
 **Q: How do I reset my local database?**
 

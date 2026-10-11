@@ -341,7 +341,7 @@ Both are raised before any change is read, so a refused sync writes nothing.
 - **Access**: `@Public()`
 - **Rate Limit**: 3 per minute
 - **Body**: `{ "email": "user@example.com" }`
-- **Response**: `200 OK` `{"message": "Password reset instructions dispatched"}` — again constant regardless of whether the account exists. Delivery goes through `MailService`, which is `@Optional()` in `AuthModule`; if SMTP is not configured the OTP is created but the mail is skipped, and the caller still sees this message.
+- **Response**: `200 OK` `{"message": "Password reset instructions dispatched"}` — again constant regardless of whether the account exists. Delivery goes through `MailService`, which is `@Optional()` in `AuthModule`; if Resend is not configured the OTP is created but the mail is skipped, and the caller still sees this message.
 
 #### `POST /auth/reset-password`
 

@@ -129,13 +129,10 @@ OBJECT_STORAGE_BUCKET=allinone-prod
 OBJECT_STORAGE_ACCESS_KEY=minioadmin
 OBJECT_STORAGE_SECRET_KEY=STRONG_PASSWORD
 
-# SMTP (your mail server)
-SMTP_HOST=mail.example.com
-SMTP_PORT=587
-SMTP_USER=noreply@example.com
-SMTP_PASSWORD=STRONG_PASSWORD
-SMTP_FROM=noreply@example.com
-SMTP_TLS=true
+# Resend (HTTPS email delivery; works on Railway Free/Trial/Hobby plans)
+RESEND_API_KEY=re_xxxxxxxxx
+EMAIL_FROM=onboarding@resend.dev
+EMAIL_REPLY_TO=yourname@proton.me
 
 # Encryption (generate: openssl rand -base64 32)
 ENCRYPTION_KEY=your-base64-encryption-key

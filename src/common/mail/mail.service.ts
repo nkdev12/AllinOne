@@ -1,64 +1,72 @@
 import { Injectable, Logger } from "@nestjs/common";
-import * as nodemailer from "nodemailer";
 import { ConfigurationService } from "@/config/configuration.service";
+
+interface ResendMail {
+  from: string;
+  to: string;
+  subject: string;
+  text: string;
+  html: string;
+}
 
 @Injectable()
 export class MailService {
   private readonly logger = new Logger(MailService.name);
-  private transporter: nodemailer.Transporter;
 
   constructor(private readonly configService: ConfigurationService) {
-    const smtpUser = configService.smtpUser;
-    const smtpPassword = configService.smtpPassword;
-    const port = configService.smtpPort;
-
-    // Port 465 = implicit TLS (secure:true). Port 587 = STARTTLS
-    // (secure:false + requireTLS). SMTP_TLS env flag forces STARTTLS.
-    const isImplicitTls = port === 465;
-    const useStartTls = !isImplicitTls && configService.smtpTls;
-
-    this.transporter = nodemailer.createTransport({
-      host: configService.smtpHost,
-      port,
-      secure: isImplicitTls,
-      requireTLS: useStartTls,
-      auth:
-        smtpUser && smtpPassword
-          ? { user: smtpUser, pass: smtpPassword }
-          : undefined,
-    });
-
-    // Non-blocking startup check so misconfiguration is visible in logs.
-    this.transporter.verify((error) => {
-      if (error) {
-        this.logger.error(
-          `SMTP connection failed (${configService.smtpHost}:${port}). OTP emails will NOT be delivered.`,
-          error.message,
-        );
-      } else {
-        this.logger.log(
-          `SMTP ready (${configService.smtpHost}:${port}, from: ${configService.smtpFrom})`,
-        );
-      }
-    });
+    if (!this.isConfigured) {
+      this.logger.warn(
+        "Resend is not configured. OTP and verification emails will not be delivered.",
+      );
+    } else {
+      this.logger.log(
+        `Resend email delivery ready (from: ${configService.emailFrom})`,
+      );
+    }
   }
 
   get isConfigured(): boolean {
     return Boolean(
-      this.configService.smtpHost &&
-      this.configService.smtpUser &&
-      this.configService.smtpPassword,
+      this.configService.resendApiKey && this.configService.emailFrom,
     );
+  }
+
+  private async sendMail(mail: ResendMail): Promise<void> {
+    if (!this.isConfigured) {
+      throw new Error("RESEND_API_KEY and EMAIL_FROM are required");
+    }
+
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.configService.resendApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: mail.from,
+        to: [mail.to],
+        reply_to: this.configService.emailReplyTo || undefined,
+        subject: mail.subject,
+        text: mail.text,
+        html: mail.html,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!response.ok) {
+      const details = (await response.text()).slice(0, 500);
+      throw new Error(`Resend API returned ${response.status}: ${details}`);
+    }
   }
 
   /**
    * Send a 6-digit OTP code to the candidate. Used for email verification.
-   * Returns true when the mail was accepted by the SMTP server.
+   * Returns true when the mail was accepted by the Resend API.
    * Never throws — callers must not fail registration just because mail is down.
    */
   async sendOtpEmail(email: string, otp: string): Promise<boolean> {
     const mailOptions = {
-      from: this.configService.smtpFrom,
+      from: this.configService.emailFrom,
       to: email,
       subject: "Your Allinone verification code",
       text: `Welcome to Allinone! Your verification code is: ${otp}\n\nThis code expires in 60 minutes. If you did not request this, please ignore this email.`,
@@ -76,7 +84,7 @@ export class MailService {
     };
 
     try {
-      await this.transporter.sendMail(mailOptions);
+      await this.sendMail(mailOptions);
       this.logger.log(`OTP email sent to ${email}`);
       return true;
     } catch (error) {
@@ -93,7 +101,7 @@ export class MailService {
     const verifyUrl = `${this.configService.appUrl}/auth/verify-email?token=${token}`;
     const displayCode = otp || token;
     const mailOptions = {
-      from: this.configService.smtpFrom,
+      from: this.configService.emailFrom,
       to: email,
       subject: "Verify your Allinone email address",
       text: `Welcome to Allinone! Your verification code is: ${displayCode}
@@ -119,7 +127,7 @@ This will expire in 24 hours.`,
     };
 
     try {
-      await this.transporter.sendMail(mailOptions);
+      await this.sendMail(mailOptions);
       this.logger.log(`Verification email sent to ${email}`);
       return true;
     } catch (error) {
@@ -140,7 +148,7 @@ This will expire in 24 hours.`,
     otp: string,
   ): Promise<boolean> {
     const mailOptions = {
-      from: this.configService.smtpFrom,
+      from: this.configService.emailFrom,
       to: email,
       subject: "Your Allinone password reset code",
       text: `You requested a password reset for your Allinone account. Your reset code is: ${otp}\n\nThis code expires in 15 minutes. If you did not request it, your password is unchanged — please ignore this email.`,
@@ -158,7 +166,7 @@ This will expire in 24 hours.`,
     };
 
     try {
-      await this.transporter.sendMail(mailOptions);
+      await this.sendMail(mailOptions);
       this.logger.log(`Password reset OTP email sent to ${email}`);
       return true;
     } catch (error) {
@@ -179,7 +187,7 @@ This will expire in 24 hours.`,
     otp: string,
   ): Promise<boolean> {
     const mailOptions = {
-      from: this.configService.smtpFrom,
+      from: this.configService.emailFrom,
       to: email,
       subject: "Your Allinone vault recovery code",
       text: `A password vault recovery was requested for your Allinone account. Your recovery code is: ${otp}\n\nThis code expires in 15 minutes and can be used once. If you did not request it, your vault is unchanged — please ignore this email.`,
@@ -197,7 +205,7 @@ This will expire in 24 hours.`,
     };
 
     try {
-      await this.transporter.sendMail(mailOptions);
+      await this.sendMail(mailOptions);
       this.logger.log(`Vault recovery OTP email sent to ${email}`);
       return true;
     } catch (error) {

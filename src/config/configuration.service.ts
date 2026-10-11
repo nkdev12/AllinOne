@@ -146,9 +146,7 @@ export class ConfigurationService {
   }
 
   // ========================================================================
-  // Legacy optional infrastructure configuration
-  // These accessors remain for inactive mail/Redis helper modules. The API
-  // itself no longer initializes either service.
+  // Optional infrastructure configuration
   // ========================================================================
 
   get redisUrl(): string {
@@ -158,32 +156,18 @@ export class ConfigurationService {
     );
   }
 
-  get smtpHost(): string {
-    return this.configService.get<string>("SMTP_HOST", "localhost");
+  get resendApiKey(): string | undefined {
+    return (
+      this.configService.get<string>("RESEND_API_KEY")?.trim() || undefined
+    );
   }
 
-  get smtpPort(): number {
-    // Env vars are always strings — coerce so nodemailer gets a real number.
-    return Number(this.configService.get("SMTP_PORT", 1025));
+  get emailFrom(): string {
+    return this.configService.get<string>("EMAIL_FROM")?.trim() || "";
   }
 
-  get smtpUser(): string | undefined {
-    return this.configService.get<string>("SMTP_USER");
-  }
-
-  get smtpPassword(): string | undefined {
-    return this.configService.get<string>("SMTP_PASSWORD");
-  }
-
-  get smtpFrom(): string {
-    return this.configService.get<string>("SMTP_FROM", "no-reply@localhost");
-  }
-
-  get smtpTls(): boolean {
-    // Env vars are always strings — the string "false" is truthy, so compare.
-    const raw = this.configService.get("SMTP_TLS", false);
-    if (typeof raw === "boolean") return raw;
-    return String(raw).toLowerCase() === "true";
+  get emailReplyTo(): string {
+    return this.configService.get<string>("EMAIL_REPLY_TO")?.trim() || "";
   }
 
   get emailVerifyEnabled(): boolean {
