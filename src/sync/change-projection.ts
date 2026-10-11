@@ -1790,6 +1790,34 @@ async function assertRegisteredGroupMembers(
  * the whole push over a case difference in a value the projection then
  * normalises anyway.
  */
+type FinanceGroupScope = Prisma.FinanceGroupGetPayload<{
+  select: { ownerId: true; deletedAt: true; currency: true };
+}>;
+
+type FinanceTripScope = Prisma.FinanceTripGetPayload<{
+  select: { ownerId: true; deletedAt: true; baseCurrency: true };
+}>;
+
+async function findFinanceGroupScope(
+  tx: ChangeProjectionClient,
+  id: string,
+): Promise<FinanceGroupScope | null | undefined> {
+  return tx.financeGroup?.findUnique({
+    where: { id },
+    select: { ownerId: true, deletedAt: true, currency: true },
+  });
+}
+
+async function findFinanceTripScope(
+  tx: ChangeProjectionClient,
+  id: string,
+): Promise<FinanceTripScope | null | undefined> {
+  return tx.financeTrip?.findUnique({
+    where: { id },
+    select: { ownerId: true, deletedAt: true, baseCurrency: true },
+  });
+}
+
 async function assertSharedScope(
   tx: ChangeProjectionClient,
   userId: string,
@@ -1800,9 +1828,7 @@ async function assertSharedScope(
     throw new BadRequestException("A group or trip is required.");
   }
   if (refs.groupId) {
-    const parent = await tx.financeGroup?.findUnique({
-      where: { id: refs.groupId },
-    });
+    const parent = await findFinanceGroupScope(tx, refs.groupId);
     if (
       !parent ||
       parent.deletedAt ||
@@ -1819,9 +1845,7 @@ async function assertSharedScope(
     }
   }
   if (refs.tripId) {
-    const parent = await tx.financeTrip?.findUnique({
-      where: { id: refs.tripId },
-    });
+    const parent = await findFinanceTripScope(tx, refs.tripId);
     if (!parent || parent.ownerId !== userId || parent.deletedAt) {
       throw new ForbiddenException("This trip is not available to you.");
     }
