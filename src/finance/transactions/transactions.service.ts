@@ -36,7 +36,7 @@ export function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export function formatTransactionResponse(tx: any) {
+function formatTransactionResponse(tx: any) {
   return {
     ...tx,
     amountMinor: Number(tx.amountMinor),

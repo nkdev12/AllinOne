@@ -11,7 +11,7 @@ import {
   MaxLength,
 } from "class-validator";
 
-export class GroupMemberDto {
+class GroupMemberDto {
   @IsString() @IsNotEmpty() @MaxLength(100) id!: string;
   @IsString() @IsNotEmpty() @MaxLength(80) name!: string;
   @IsOptional() @IsBoolean() active?: boolean;

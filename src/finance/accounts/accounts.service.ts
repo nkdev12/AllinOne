@@ -42,7 +42,7 @@ export function toMinorUnits(
   return BigInt(value);
 }
 
-export function formatAccountResponse(account: any) {
+function formatAccountResponse(account: any) {
   return {
     ...account,
     openingBalanceMinor: Number(account.openingBalanceMinor),

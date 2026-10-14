@@ -6,7 +6,7 @@ import { UsersService } from "@/users/users.service";
 import { ErrorCode } from "@/common/errors/error-code";
 import { unauthorized } from "@/common/errors/http-errors";
 
-export interface JwtPayload {
+interface JwtPayload {
   sub: string;
   email: string;
   sessionId?: string;

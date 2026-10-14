@@ -18,14 +18,14 @@ import {
   Prisma,
 } from "@prisma/client";
 
-export function formatRecurringResponse(rule: any) {
+function formatRecurringResponse(rule: any) {
   return {
     ...rule,
     amountMinor: Number(rule.amountMinor),
   };
 }
 
-export function recurringChangePayload(rule: any): Record<string, any> {
+function recurringChangePayload(rule: any): Record<string, any> {
   return {
     accountId: rule.accountId,
     categoryId: rule.categoryId ?? null,
@@ -148,6 +148,31 @@ export function calculateNextOccurrence(
   }
 }
 
+/**
+ * Validates that `iso` is a real calendar date (e.g. rejects 2026-02-30).
+ * JavaScript's `Date` constructor silently overflows Feb 30 → Mar 2, so we
+ * compare the UTC fields back against the original year/month/day integers.
+ */
+function assertCalendarDate(iso: string, fieldName: string): void {
+  const parsed = new Date(iso);
+  if (isNaN(parsed.getTime())) {
+    throw new BadRequestException(`${fieldName} is not a valid date`);
+  }
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  if (match) {
+    const [, y, m, d] = match.map(Number);
+    if (
+      parsed.getUTCFullYear() !== y ||
+      parsed.getUTCMonth() + 1 !== m ||
+      parsed.getUTCDate() !== d
+    ) {
+      throw new BadRequestException(
+        `${fieldName} '${iso}' is not a valid calendar date (e.g. February 30 does not exist)`,
+      );
+    }
+  }
+}
+
 @Injectable()
 export class RecurringService {
   constructor(
@@ -202,6 +227,12 @@ export class RecurringService {
 
     if (dto.categoryId) {
       await this.assertCategoryUsable(userId, dto.categoryId);
+    }
+
+    assertCalendarDate(dto.startDate, 'startDate');
+    if (dto.endDate) assertCalendarDate(dto.endDate, 'endDate');
+    if (dto.endDate && new Date(dto.endDate) < new Date(dto.startDate)) {
+      throw new BadRequestException('endDate must be on or after startDate');
     }
 
     const startDate = new Date(dto.startDate);
@@ -460,6 +491,14 @@ export class RecurringService {
     }
     if (dto.categoryId && dto.categoryId !== existing.categoryId) {
       await this.assertCategoryUsable(userId, dto.categoryId);
+    }
+
+    if (dto.startDate !== undefined) assertCalendarDate(dto.startDate, 'startDate');
+    if (dto.endDate !== undefined && dto.endDate) assertCalendarDate(dto.endDate, 'endDate');
+    const effectiveStart = dto.startDate ?? existing.startDate.toISOString();
+    const effectiveEnd = dto.endDate !== undefined ? dto.endDate : existing.endDate?.toISOString();
+    if (effectiveEnd && new Date(effectiveEnd) < new Date(effectiveStart)) {
+      throw new BadRequestException('endDate must be on or after startDate');
     }
 
     let highestCursor: bigint | undefined;

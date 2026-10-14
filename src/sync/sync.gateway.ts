@@ -10,7 +10,7 @@ import { JwtService } from "@nestjs/jwt";
 import { ConfigurationService } from "@/config/configuration.service";
 import { UsersService } from "@/users/users.service";
 
-export interface AuthenticatedSocket extends Socket {
+interface AuthenticatedSocket extends Socket {
   data: {
     userId: string;
     deviceId?: string;

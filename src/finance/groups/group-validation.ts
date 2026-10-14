@@ -57,12 +57,12 @@ export function validShares(value: unknown): boolean {
  */
 const EXACT_SPLIT_TYPES = new Set(["EXACT", "ITEMIZED"]);
 
-export function isExactSplit(splitType: unknown): boolean {
+function isExactSplit(splitType: unknown): boolean {
   if (splitType === undefined || splitType === null) return true;
   return EXACT_SPLIT_TYPES.has(String(splitType));
 }
 
-export interface AllocatedShare {
+interface AllocatedShare {
   userId: string;
   owedAmountMinor: number;
   shareUnits: number | null;
@@ -228,29 +228,4 @@ export function allocateExpenseShares(
     void remainder;
     return part;
   });
-}
-
-/**
- * `splitType` is optional and defaults to the exact behaviour so the sync
- * projection, which is handed the amounts a device already stored, keeps its
- "sum must equal the total" contract. The REST write path passes the real split
- * type and lets `allocateExpenseShares` produce the amounts.
- */
-export function assertExpenseShares(
-  total: number,
-  shares: unknown,
-  splitType?: unknown,
-) {
-  if (
-    !Number.isSafeInteger(total) ||
-    total <= 0 ||
-    !validShares(shares) ||
-    (isExactSplit(splitType) &&
-      (shares as { owedAmountMinor: number }[]).reduce(
-        (sum, share) => sum + share.owedAmountMinor,
-        0,
-      ) !== total)
-  ) {
-    throw new BadRequestException(SHARE_MESSAGE);
-  }
 }

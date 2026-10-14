@@ -80,7 +80,7 @@ export class SuggestTagsDto {
   noteId?: string;
 }
 
-export class ExtractedTaskItemDto {
+class ExtractedTaskItemDto {
   @ApiProperty({ example: "Review database backup retention" })
   @IsString()
   @IsNotEmpty()

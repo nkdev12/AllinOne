@@ -12,7 +12,7 @@ import { QueryTasksDto } from "../dto/query-tasks.dto";
 import { appendChange } from "@/sync/change-cursor";
 import { ChangeOperation, TaskStatus } from "@prisma/client";
 
-export function taskChangePayload(task: any): Record<string, any> {
+function taskChangePayload(task: any): Record<string, any> {
   return {
     title: task.title ?? "",
     description: task.description ?? null,

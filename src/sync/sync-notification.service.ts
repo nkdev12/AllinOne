@@ -4,7 +4,7 @@ import { SyncGateway } from "./sync.gateway";
 /**
  * One mutation a REST write path just committed, in the words the wake-up needs.
  */
-export interface SyncMutationNotice {
+interface SyncMutationNotice {
   userId: string;
   /**
    * The device that made the write, when the request carried one. Every REST

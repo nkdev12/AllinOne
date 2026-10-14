@@ -6,7 +6,7 @@ import { Prisma } from "@prisma/client";
  * interactive transaction and straight off the client, so any module that owns a
  * `change.create` can adopt the same cursor without depending on `src/sync`.
  */
-export type ChangeCursorClient = Pick<
+type ChangeCursorClient = Pick<
   Prisma.TransactionClient,
   "change" | "syncCursor"
 >;

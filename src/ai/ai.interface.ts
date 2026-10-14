@@ -3,7 +3,7 @@ export type SummaryFormat = "paragraph" | "bullet_points";
 export type TaskPriority = "LOW" | "MEDIUM" | "HIGH";
 
 /** Who answered an `/ai` request. See the per-result notes below. */
-export type AiProvider = "gemini" | "heuristic";
+type AiProvider = "gemini" | "heuristic";
 
 export interface SummaryResult {
   summary: string;

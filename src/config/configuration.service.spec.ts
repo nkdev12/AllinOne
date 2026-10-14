@@ -137,4 +137,29 @@ describe("ConfigurationService token lifetimes", () => {
     expect(service.jwtAccessExpiresInSeconds).toBe(3600);
     expect(service.jwtRefreshExpiresInSeconds).toBe(30 * 24 * 60 * 60);
   });
+
+  it("refuses template or reused secrets in production", () => {
+    expect(
+      () =>
+        new ConfigurationService(
+          config({
+            ...PRESENT,
+            APP_ENV: "production",
+            JWT_ACCESS_SECRET:
+              "your-super-secret-access-token-key-change-in-production",
+          }),
+        ),
+    ).toThrow(/JWT_ACCESS_SECRET/);
+
+    expect(
+      () =>
+        new ConfigurationService(
+          config({
+            ...PRESENT,
+            APP_ENV: "production",
+            JWT_REFRESH_SECRET: PRESENT.JWT_ACCESS_SECRET,
+          }),
+        ),
+    ).toThrow(/must be different/);
+  });
 });

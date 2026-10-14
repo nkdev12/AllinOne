@@ -1,11 +1,3 @@
-export interface PasskeyCredentialData {
-  credentialId: string;
-  publicKey: string;
-  counter: number;
-  transports?: string[];
-  deviceName?: string;
-}
-
 export interface RegistrationOptionsResponse {
   challenge: string;
   rp: {

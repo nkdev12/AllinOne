@@ -18,7 +18,7 @@ import {
   ReminderChannel,
 } from "@prisma/client";
 
-export function eventChangePayload(event: any): Record<string, any> {
+function eventChangePayload(event: any): Record<string, any> {
   const reminderMinutes =
     event.reminders && event.reminders.length > 0
       ? event.reminders[0].minutesBefore

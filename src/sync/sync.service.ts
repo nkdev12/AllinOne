@@ -26,7 +26,7 @@ export interface SyncConflictEntry {
  * a ~32 MB response; anything larger is a client bug or a denial-of-service
  * attempt, and it is answered with a shorter page instead of an error.
  */
-export const MAX_PULL_PAGE_SIZE = 500;
+const MAX_PULL_PAGE_SIZE = 500;
 
 @Injectable()
 export class SyncService {

@@ -100,6 +100,7 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
         // spellings itself (`true`/`1`/`yes`/`on`) and a boolean here would
         // reject values the code supports.
         CORS_ORIGIN: Joi.string().allow("").optional(),
+        CORS_ORIGINS: Joi.string().allow("").optional(),
         WS_CORS_ORIGINS: Joi.string().allow("").optional(),
         WS_CORS_ALLOW_NULL_ORIGIN: Joi.string().allow("").optional(),
         WS_REDIS_ADAPTER: Joi.string().allow("").optional(),

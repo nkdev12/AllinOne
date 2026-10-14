@@ -384,6 +384,56 @@ export class CollaborationService {
     }
   }
 
+  /**
+   * Revoking a finance-group grant must remove its locally synced ledger too.
+   * Access checks alone are insufficient: without tombstones the recipient
+   * keeps a readable offline copy after they have been removed from the group.
+   */
+  private async queueGroupRemoval(
+    tx: Prisma.TransactionClient,
+    resourceType: ResourceType,
+    groupId: string,
+    recipientId: string,
+  ) {
+    if (resourceType !== "EXPENSE_GROUP") return;
+    const group = await tx.financeGroup.findUnique({ where: { id: groupId } });
+    if (!group) return;
+
+    await appendChange(tx, {
+      userId: recipientId,
+      entityType: "finance_group",
+      entityId: group.id,
+      operation: ChangeOperation.DELETE,
+      version: group.version,
+      payload: {},
+    });
+
+    const [expenses, settlements] = await Promise.all([
+      tx.financeSharedExpense.findMany({ where: { groupId, deletedAt: null } }),
+      tx.financeSettlement.findMany({ where: { groupId, deletedAt: null } }),
+    ]);
+    for (const expense of expenses) {
+      await appendChange(tx, {
+        userId: recipientId,
+        entityType: "finance_shared_expense",
+        entityId: expense.id,
+        operation: ChangeOperation.DELETE,
+        version: expense.version,
+        payload: {},
+      });
+    }
+    for (const settlement of settlements) {
+      await appendChange(tx, {
+        userId: recipientId,
+        entityType: "finance_settlement",
+        entityId: settlement.id,
+        operation: ChangeOperation.DELETE,
+        version: settlement.version,
+        payload: {},
+      });
+    }
+  }
+
   async getSharesForResource(
     userId: string,
     resourceType: ResourceType,
@@ -469,9 +519,21 @@ export class CollaborationService {
     // Soft delete, mirroring the `deletedAt` the rest of the schema uses for
     // rows that must stop answering queries while keeping the grant trail: every
     // read here filters `deletedAt: null`.
-    await this.prisma.resourceShare.update({
-      where: { id: share.id },
-      data: { deletedAt: new Date() },
+    await this.prisma.$transaction(async (tx) => {
+      await tx.resourceShare.update({
+        where: { id: share.id },
+        data: { deletedAt: new Date() },
+      });
+      // Legacy rows created before recipients were required can have no user
+      // id. They never granted access, and should still be revocable.
+      if (share.sharedWithUserId) {
+        await this.queueGroupRemoval(
+          tx,
+          share.resourceType,
+          share.resourceId,
+          share.sharedWithUserId,
+        );
+      }
     });
 
     await this.auditLogService.recordAuditLog({

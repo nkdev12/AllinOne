@@ -1,7 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 
-export interface TerminusHealthResponse {
+interface TerminusHealthResponse {
   status: "ok" | "error";
   info: Record<string, { status: "up" | "down"; [key: string]: any }>;
   error: Record<string, { status: "up" | "down"; [key: string]: any }>;

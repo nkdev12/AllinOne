@@ -10,57 +10,19 @@ import { CreateLoanDto } from "./dto/create-loan.dto";
 import { UpdateLoanDto } from "./dto/update-loan.dto";
 import { RecordRepaymentDto } from "./dto/record-repayment.dto";
 import { appendChange } from "@/sync/change-cursor";
+import {
+  minorUnitsAfter,
+  toDateOrThrow,
+  toMinorUnits,
+} from "@/finance/finance.helpers";
 import { ChangeOperation, FinanceLoanType } from "@prisma/client";
 
-export function formatLoanResponse(loan: any) {
+function formatLoanResponse(loan: any) {
   return {
     ...loan,
     principalAmountMinor: Number(loan.principalAmountMinor),
     remainingAmountMinor: Number(loan.remainingAmountMinor),
   };
-}
-
-/**
- * `BigInt()` on a non-integer throws `RangeError` and on `Infinity`/`NaN` the
- * request dies as a 500, so fence the value first and answer 400 (same guard the
- * transaction service uses).
- */
-function toMinorUnits(value: number, field: string): bigint {
-  if (!Number.isSafeInteger(value)) {
-    throw new BadRequestException(`${field} must be a safe integer.`);
-  }
-  return BigInt(value);
-}
-
-function toDateOrThrow(value: string, field: string): Date {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    throw new BadRequestException(`${field} must be a valid ISO-8601 date.`);
-  }
-  return parsed;
-}
-
-/**
- * Resolve what a `$inc`/`$set` write actually left in the row.
- *
- * Prisma applies `{ decrement: n }` server-side and returns the post-update
- * document, so `posted` normally *is* the stored BigInt and already contains a
- * repayment that raced in between our read and our commit — which is the reason
- * the delta is written as an operator at all. A delegate that echoes the operator
- * object back instead of resolving it (the naive update mock in the shared service
- * harness; the account mock there does resolve) falls back to read + delta, so a
- * NaN amount never reaches the sync payload for every device to replay.
- */
-function minorUnitsAfter(
-  posted: unknown,
-  before: bigint,
-  delta: bigint,
-): bigint {
-  if (typeof posted === "bigint") return posted;
-  if (typeof posted === "number" && Number.isSafeInteger(posted)) {
-    return BigInt(posted);
-  }
-  return before + delta;
 }
 
 /** Outstanding above the amount borrowed is a bookkeeping error, not a loan. */
@@ -80,7 +42,7 @@ function assertRemainingWithinPrincipal(
   }
 }
 
-export function loanChangePayload(loan: any): Record<string, any> {
+function loanChangePayload(loan: any): Record<string, any> {
   return {
     type: loan.type,
     counterpartyName: loan.counterpartyName,

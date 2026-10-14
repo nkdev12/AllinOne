@@ -101,9 +101,7 @@ const MINOR_UNITS_PER_MAJOR: Record<string, number> = {
   XOF: 0,
 };
 
-export function normaliseCurrencyCode(
-  value?: string | null,
-): string | undefined {
+function normaliseCurrencyCode(value?: string | null): string | undefined {
   const trimmed = (value ?? "").trim().toUpperCase();
   return trimmed.length > 0 ? trimmed : undefined;
 }
@@ -125,7 +123,7 @@ function utcStartOfCurrentMonth(now: Date): Date {
  * month into the previous one, which made the category report and the budget
  * report disagree on the first day of every month.
  */
-export function parseReportDate(
+function parseReportDate(
   raw: string | undefined,
   field: "startDate" | "endDate",
   inclusiveEndOfDay = false,

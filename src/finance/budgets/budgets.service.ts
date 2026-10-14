@@ -9,6 +9,7 @@ import { SyncNotificationService } from "@/sync/sync-notification.service";
 import { CreateBudgetDto } from "./dto/create-budget.dto";
 import { UpdateBudgetDto } from "./dto/update-budget.dto";
 import { appendChange } from "@/sync/change-cursor";
+import { toDateOrThrow, toMinorUnits } from "@/finance/finance.helpers";
 import {
   ChangeOperation,
   FinanceBudgetPeriod,
@@ -29,7 +30,7 @@ const BUDGET_SPEND_CURRENCY = "INR";
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
-export type BudgetSpendWindow = { start: Date; end: Date };
+type BudgetSpendWindow = { start: Date; end: Date };
 
 /**
  * The calendar cycle the spend windows are anchored to. `monthOneBased` is 1 =
@@ -40,7 +41,7 @@ export type BudgetSpendWindow = { start: Date; end: Date };
  * disagreed with the UTC buckets the alert cycle and analytics use either side
  * of a month boundary in +05:30.
  */
-export type ReferenceCycle = {
+type ReferenceCycle = {
   year: number;
   monthOneBased: number;
   anchor: Date;
@@ -68,27 +69,6 @@ function utcCycleWindow(
 }
 
 /**
- * `BigInt()` on a non-integer throws a `RangeError` and on `Infinity`/`NaN` blows
- * up the whole request as a 500, so every conversion is fenced by the safe
- * integer check first and reported as a 400 (same guard the transaction service
- * uses).
- */
-function toMinorUnits(value: number, field: string): bigint {
-  if (!Number.isSafeInteger(value)) {
-    throw new BadRequestException(`${field} must be a safe integer.`);
-  }
-  return BigInt(value);
-}
-
-function toDateOrThrow(value: unknown, field: string): Date {
-  const parsed = new Date(value as string | number | Date);
-  if (Number.isNaN(parsed.getTime())) {
-    throw new BadRequestException(`${field} must be a valid ISO-8601 date.`);
-  }
-  return parsed;
-}
-
-/**
  * The window a budget's cap applies to, derived from the budget itself.
  *
  * `end` is exclusive. A CUSTOM budget lives between its own `startDate` and
@@ -96,7 +76,7 @@ function toDateOrThrow(value: unknown, field: string): Date {
  * reference cycle, and `startDate`/`endDate` then clamp that cycle so spend from
  * before the budget existed, or after it ended, is not charged to it.
  */
-export function resolveBudgetSpendWindow(
+function resolveBudgetSpendWindow(
   budget: {
     period?: FinanceBudgetPeriod | null;
     startDate?: Date | null;
@@ -168,14 +148,14 @@ export function resolveBudgetSpendWindow(
   return window;
 }
 
-export function formatBudgetResponse(budget: any) {
+function formatBudgetResponse(budget: any) {
   return {
     ...budget,
     amountMinor: Number(budget.amountMinor),
   };
 }
 
-export function budgetChangePayload(budget: any): Record<string, any> {
+function budgetChangePayload(budget: any): Record<string, any> {
   return {
     categoryId: budget.categoryId ?? null,
     amountMinor: Number(budget.amountMinor),

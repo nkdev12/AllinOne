@@ -7,7 +7,7 @@ import {
 } from "@nestjs/common";
 import { ErrorCode } from "./error-code";
 
-export interface ErrorBody {
+interface ErrorBody {
   code: ErrorCode;
   /**
    * What a developer needs to diagnose the case. The client shows its own copy
@@ -18,7 +18,7 @@ export interface ErrorBody {
   details?: Record<string, unknown>;
 }
 
-export function errorBody(
+function errorBody(
   code: ErrorCode,
   message: string | string[],
   details?: Record<string, unknown>,

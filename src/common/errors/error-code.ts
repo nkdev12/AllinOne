@@ -9,6 +9,7 @@
  */
 export enum ErrorCode {
   VALIDATION_ERROR = "VALIDATION_ERROR",
+  INVALID_DATE = "INVALID_DATE",
 
   // Credentials and session
   INVALID_CREDENTIALS = "INVALID_CREDENTIALS",

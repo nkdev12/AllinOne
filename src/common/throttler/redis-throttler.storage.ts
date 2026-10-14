@@ -3,7 +3,7 @@ import { ThrottlerStorage } from "@nestjs/throttler";
 import Redis from "ioredis";
 import { ConfigurationService } from "@/config/configuration.service";
 
-export interface ThrottlerStorageRecord {
+interface ThrottlerStorageRecord {
   totalHits: number;
   timeToExpire: number;
   isBlocked: boolean;

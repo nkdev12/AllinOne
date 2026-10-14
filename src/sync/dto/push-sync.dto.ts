@@ -20,7 +20,7 @@ import {
   SYNC_ENTITY_TYPES,
 } from "../change-payload.validator";
 
-export class ChangeItemDto {
+class ChangeItemDto {
   @ApiProperty({
     example: "note",
     enum: SYNC_ENTITY_TYPES,

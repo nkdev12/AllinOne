@@ -12,7 +12,7 @@ export interface WebSocketConfigReader {
 }
 
 /** The `/sync` namespace's CORS policy, once resolved from configuration. */
-export interface ResolvedWsCors {
+interface ResolvedWsCors {
   /** Exact origins that may connect, or `["*"]` if the operator asked for that. */
   origins: string[];
   credentials: boolean;
@@ -42,9 +42,9 @@ export const DEFAULT_WS_CORS_ORIGINS = "http://localhost:3000";
  * `CORS_ORIGINS` and then `CORS_ORIGIN` keeps a deployment that set either for
  * the HTTP app working without a second list to keep in step.
  */
-export const WS_CORS_ORIGINS_KEY = "WS_CORS_ORIGINS";
-export const SHARED_CORS_ORIGINS_KEY = "CORS_ORIGINS";
-export const HTTP_CORS_ORIGIN_KEY = "CORS_ORIGIN";
+const WS_CORS_ORIGINS_KEY = "WS_CORS_ORIGINS";
+const SHARED_CORS_ORIGINS_KEY = "CORS_ORIGINS";
+const HTTP_CORS_ORIGIN_KEY = "CORS_ORIGIN";
 
 /**
  * The escape hatch, and explicit about being one.
@@ -61,10 +61,10 @@ export const HTTP_CORS_ORIGIN_KEY = "CORS_ORIGIN";
  * default is `false`, and the answer to "the web build cannot connect" is to put
  * that build's origin in `WS_CORS_ORIGINS`, not to widen this.
  */
-export const WS_CORS_ALLOW_NULL_ORIGIN_KEY = "WS_CORS_ALLOW_NULL_ORIGIN";
+const WS_CORS_ALLOW_NULL_ORIGIN_KEY = "WS_CORS_ALLOW_NULL_ORIGIN";
 
 /** Whether the Redis pub/sub clustering adapter is attempted at all. */
-export const WS_REDIS_ADAPTER_KEY = "WS_REDIS_ADAPTER";
+const WS_REDIS_ADAPTER_KEY = "WS_REDIS_ADAPTER";
 
 const TRUTHY = ["true", "1", "yes", "on"];
 

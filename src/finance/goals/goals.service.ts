@@ -10,9 +10,14 @@ import { CreateGoalDto } from "./dto/create-goal.dto";
 import { DepositGoalDto } from "./dto/deposit-goal.dto";
 import { UpdateGoalDto } from "./dto/update-goal.dto";
 import { appendChange } from "@/sync/change-cursor";
+import {
+  minorUnitsAfter,
+  toDateOrThrow,
+  toMinorUnits,
+} from "@/finance/finance.helpers";
 import { ChangeOperation } from "@prisma/client";
 
-export function formatGoalResponse(goal: any) {
+function formatGoalResponse(goal: any) {
   return {
     ...goal,
     targetAmountMinor: Number(goal.targetAmountMinor),
@@ -20,51 +25,7 @@ export function formatGoalResponse(goal: any) {
   };
 }
 
-/**
- * `BigInt()` on a non-integer throws `RangeError`, and on `Infinity`/`NaN` the
- * request dies as a 500. Fence the value first and answer 400 instead (same
- * guard the transaction service uses).
- */
-function toMinorUnits(value: number, field: string): bigint {
-  if (!Number.isSafeInteger(value)) {
-    throw new BadRequestException(`${field} must be a safe integer.`);
-  }
-  return BigInt(value);
-}
-
-function toDateOrThrow(value: string, field: string): Date {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    throw new BadRequestException(`${field} must be a valid ISO-8601 date.`);
-  }
-  return parsed;
-}
-
-/**
- * Resolve what a `$inc`-style write actually left in the row.
- *
- * Prisma applies `{ increment: n }` / `{ decrement: n }` server-side and returns
- * the post-update document, so `posted` normally *is* the stored BigInt and
- * already contains a write that raced in between our read and our commit — which
- * is the whole reason the delta is written as an operator. A delegate that
- * echoes the operator object back instead of resolving it (the naive update mock
- * in the shared service harness; the account mock there does resolve) falls back
- * to read + delta. Falling back is deliberate: `Number(posted)` on an object is
- * NaN, and a NaN amount in the emitted payload is a NaN every device replays.
- */
-function minorUnitsAfter(
-  posted: unknown,
-  before: bigint,
-  delta: bigint,
-): bigint {
-  if (typeof posted === "bigint") return posted;
-  if (typeof posted === "number" && Number.isSafeInteger(posted)) {
-    return BigInt(posted);
-  }
-  return before + delta;
-}
-
-export function goalChangePayload(goal: any): Record<string, any> {
+function goalChangePayload(goal: any): Record<string, any> {
   return {
     name: goal.name,
     targetAmountMinor: Number(goal.targetAmountMinor),

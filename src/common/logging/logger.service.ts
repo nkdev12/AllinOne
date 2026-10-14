@@ -2,7 +2,7 @@ import { Injectable, Optional } from "@nestjs/common";
 import { ConfigurationService } from "@/config/configuration.service";
 import { TracingService } from "@/common/tracing/tracing.service";
 
-export interface LogContext {
+interface LogContext {
   requestId?: string;
   userId?: string;
   deviceId?: string;

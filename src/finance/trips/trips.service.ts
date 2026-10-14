@@ -12,7 +12,7 @@ import { UpdateItineraryItemDto } from "./dto/update-itinerary-item.dto";
 import { appendChange } from "@/sync/change-cursor";
 import { ChangeOperation } from "@prisma/client";
 
-export function formatTripResponse(trip: any) {
+function formatTripResponse(trip: any) {
   return {
     ...trip,
     totalBudgetMinor:
@@ -25,7 +25,7 @@ export function formatTripResponse(trip: any) {
   };
 }
 
-export function formatItineraryItemResponse(item: any) {
+function formatItineraryItemResponse(item: any) {
   return {
     ...item,
     plannedCostMinor:
@@ -35,7 +35,7 @@ export function formatItineraryItemResponse(item: any) {
   };
 }
 
-export function tripChangePayload(trip: any): Record<string, any> {
+function tripChangePayload(trip: any): Record<string, any> {
   return {
     title: trip.title,
     destinations: trip.destinations ?? [],
@@ -62,7 +62,7 @@ export function tripChangePayload(trip: any): Record<string, any> {
   };
 }
 
-export function itineraryChangePayload(item: any): Record<string, any> {
+function itineraryChangePayload(item: any): Record<string, any> {
   return {
     tripId: item.tripId,
     dayIndex: item.dayIndex,

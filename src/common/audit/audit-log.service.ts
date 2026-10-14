@@ -3,7 +3,7 @@ import { PrismaService } from "@/common/prisma/prisma.service";
 import { AuditAction } from "@prisma/client";
 import { v4 as uuidv4 } from "uuid";
 
-export interface RecordAuditLogParams {
+interface RecordAuditLogParams {
   userId: string;
   action: AuditAction;
   resourceType?: string;
@@ -15,7 +15,7 @@ export interface RecordAuditLogParams {
   metadata?: Record<string, any>;
 }
 
-export interface QueryAuditLogsDto {
+interface QueryAuditLogsDto {
   userId?: string;
   action?: AuditAction;
   resourceType?: string;

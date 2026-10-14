@@ -11,7 +11,7 @@ import { UpdateCategoryDto } from "./dto/update-category.dto";
 import { appendChange } from "@/sync/change-cursor";
 import { ChangeOperation, FinanceTransactionType } from "@prisma/client";
 
-export function categoryChangePayload(cat: any): Record<string, any> {
+function categoryChangePayload(cat: any): Record<string, any> {
   return {
     name: cat.name,
     type: cat.type,

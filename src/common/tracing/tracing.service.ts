@@ -11,7 +11,7 @@ import {
   formatTraceParent,
 } from "./tracing.interface";
 
-export type SpanExporter = (span: Span) => void | Promise<void>;
+type SpanExporter = (span: Span) => void | Promise<void>;
 
 @Injectable()
 export class TracingService {

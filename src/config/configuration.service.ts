@@ -102,6 +102,10 @@ export class ConfigurationService {
       throw new Error(message);
     }
 
+    if (this.isProduction) {
+      this.validateProductionSecrets();
+    }
+
     // Both lifetimes are parsed here even though nothing reads the seconds until
     // a login happens. `JWT_*_EXPIRATION` had to become a setting that works
     // when someone changed it, and a value `jsonwebtoken` would reject is a far
@@ -111,6 +115,32 @@ export class ConfigurationService {
     parseTokenLifetime(this.jwtRefreshExpiration, "JWT_REFRESH_EXPIRATION");
 
     this.logger.log("✓ All required configuration variables are present");
+  }
+
+  /** Refuse the placeholder values in the checked-in environment template. */
+  private validateProductionSecrets(): void {
+    const values = [
+      ["JWT_ACCESS_SECRET", this.jwtAccessSecret],
+      ["JWT_REFRESH_SECRET", this.jwtRefreshSecret],
+      ["ENCRYPTION_KEY", this.encryptionKey],
+    ] as const;
+
+    for (const [variable, value] of values) {
+      if (
+        value.trim().length < 32 ||
+        value.includes("change-in-production")
+      ) {
+        throw new Error(
+          `${variable} must be a unique, non-placeholder secret of at least 32 characters in production`,
+        );
+      }
+    }
+
+    if (this.jwtAccessSecret === this.jwtRefreshSecret) {
+      throw new Error(
+        "JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must be different in production",
+      );
+    }
   }
 
   // ========================================================================

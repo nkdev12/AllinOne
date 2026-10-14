@@ -395,6 +395,38 @@ describe("Recurring rule ownership and scheduling", () => {
       ).rejects.toThrow();
       expect(prisma.financeRecurringRule.create).not.toHaveBeenCalled();
     });
+
+    it("rejects impossible calendar dates like February 30 on create and update", async () => {
+      await expect(
+        service.createRecurringRule(USER, {
+          accountId: OWN_ACCOUNT,
+          type: FinanceTransactionType.EXPENSE,
+          amountMinor: 64900,
+          title: "Netflix",
+          startDate: "2026-02-30T00:00:00.000Z",
+        }),
+      ).rejects.toThrow("startDate '2026-02-30T00:00:00.000Z' is not a valid calendar date");
+
+      seedRule();
+      await expect(
+        service.updateRecurringRule(USER, RULE_ID, {
+          startDate: "2026-02-30T00:00:00.000Z",
+        }),
+      ).rejects.toThrow("startDate '2026-02-30T00:00:00.000Z' is not a valid calendar date");
+    });
+
+    it("rejects endDate earlier than startDate", async () => {
+      await expect(
+        service.createRecurringRule(USER, {
+          accountId: OWN_ACCOUNT,
+          type: FinanceTransactionType.EXPENSE,
+          amountMinor: 64900,
+          title: "Netflix",
+          startDate: "2026-05-15T00:00:00.000Z",
+          endDate: "2026-05-10T00:00:00.000Z",
+        }),
+      ).rejects.toThrow("endDate must be on or after startDate");
+    });
   });
 
   describe("processDueRules account scoping", () => {

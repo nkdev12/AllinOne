@@ -21,13 +21,13 @@ import { ChangeOperation, FinanceSplitType, Prisma } from "@prisma/client";
 
 type WriteClient = Prisma.TransactionClient;
 
-export function formatGroupResponse(group: any) {
+function formatGroupResponse(group: any) {
   return {
     ...group,
   };
 }
 
-export function formatSharedExpenseResponse(expense: any) {
+function formatSharedExpenseResponse(expense: any) {
   return {
     ...expense,
     totalAmountMinor: Number(expense.totalAmountMinor),
@@ -38,14 +38,14 @@ export function formatSharedExpenseResponse(expense: any) {
   };
 }
 
-export function formatSettlementResponse(settlement: any) {
+function formatSettlementResponse(settlement: any) {
   return {
     ...settlement,
     amountMinor: Number(settlement.amountMinor),
   };
 }
 
-export function groupChangePayload(group: any): Record<string, any> {
+function groupChangePayload(group: any): Record<string, any> {
   return {
     name: group.name,
     members: group.members ?? [],
@@ -61,7 +61,7 @@ export function groupChangePayload(group: any): Record<string, any> {
   };
 }
 
-export function sharedExpenseChangePayload(expense: any): Record<string, any> {
+function sharedExpenseChangePayload(expense: any): Record<string, any> {
   return {
     shares: (expense.shares ?? []).map((share: any) => ({
       userId: share.userId,
@@ -90,7 +90,7 @@ export function sharedExpenseChangePayload(expense: any): Record<string, any> {
   };
 }
 
-export function settlementChangePayload(settlement: any): Record<string, any> {
+function settlementChangePayload(settlement: any): Record<string, any> {
   return {
     groupId: settlement.groupId ?? null,
     tripId: settlement.tripId ?? null,
@@ -124,6 +124,55 @@ export class GroupsService {
     private readonly prisma: PrismaService,
     @Optional() private readonly syncNotifications?: SyncNotificationService,
   ) {}
+
+  /**
+   * A finance group has one shared ledger, so every mutation must be appended
+   * to every active participant's personal sync stream. The REST response is
+   * not enough: the Flutter finance UI reads its local projection.
+   */
+  private async appendGroupChange(
+    tx: WriteClient,
+    groupId: string,
+    ownerId: string,
+    actorId: string,
+    change: Omit<Prisma.ChangeUncheckedCreateInput, "cursor" | "userId">,
+  ): Promise<Map<string, bigint>> {
+    const recipients = new Set([ownerId, actorId]);
+    const resourceShare = (tx as any).resourceShare;
+    if (resourceShare?.findMany) {
+      const shares = await resourceShare.findMany({
+        where: {
+          resourceType: "EXPENSE_GROUP",
+          resourceId: groupId,
+          deletedAt: null,
+        },
+        select: { sharedWithUserId: true },
+      });
+      for (const share of shares) {
+        if (share.sharedWithUserId) recipients.add(share.sharedWithUserId);
+      }
+    }
+
+    const cursors = new Map<string, bigint>();
+    for (const userId of recipients) {
+      const logged = await appendChange(tx, { ...change, userId });
+      cursors.set(userId, logged.cursor);
+    }
+    return cursors;
+  }
+
+  private mergeChangeCursors(
+    target: Map<string, bigint>,
+    added: Map<string, bigint>,
+  ) {
+    for (const [userId, cursor] of added) target.set(userId, cursor);
+  }
+
+  private notifyGroupChanges(cursors: Map<string, bigint>) {
+    for (const [userId, highestCursor] of cursors) {
+      this.syncNotifications?.notifyMutation({ userId, highestCursor });
+    }
+  }
 
   // -------------------------------------------------------------
   // Group CRUD
@@ -236,7 +285,7 @@ export class GroupsService {
       throw new BadRequestException(
         "Group currency cannot be changed after creation.",
       );
-    let highestCursor: bigint | undefined;
+    const notificationCursors = new Map<string, bigint>();
 
     const updated = await this.prisma.$transaction(async (tx) => {
       const group = await tx.financeGroup.update({
@@ -266,20 +315,19 @@ export class GroupsService {
         },
       });
 
-      const logged = await appendChange(tx, {
+      const cursors = await this.appendGroupChange(tx, group.id, existing.ownerId, userId, {
         entityType: "finance_group",
         entityId: group.id,
         operation: ChangeOperation.UPDATE,
         version: group.version,
         payload: groupChangePayload(group),
-        userId,
       });
-      highestCursor = logged.cursor;
+      this.mergeChangeCursors(notificationCursors, cursors);
 
       return group;
     });
 
-    this.syncNotifications?.notifyMutation({ userId, highestCursor });
+    this.notifyGroupChanges(notificationCursors);
 
     return formatGroupResponse(updated);
   }
@@ -318,7 +366,7 @@ export class GroupsService {
       );
     }
     const deletedAt = new Date();
-    let highestCursor: bigint | undefined;
+    const notificationCursors = new Map<string, bigint>();
 
     await this.prisma.$transaction(async (tx) => {
       const updated = await tx.financeGroup.update({
@@ -329,15 +377,14 @@ export class GroupsService {
         },
       });
 
-      const logged = await appendChange(tx, {
+      const cursors = await this.appendGroupChange(tx, existing.id, existing.ownerId, userId, {
         entityType: "finance_group",
         entityId: existing.id,
         operation: ChangeOperation.DELETE,
         version: updated.version,
         payload: {},
-        userId,
       });
-      highestCursor = logged.cursor;
+      this.mergeChangeCursors(notificationCursors, cursors);
 
       // `onDelete: Cascade` in schema.prisma is decoration only on MongoDB —
       // nothing enforces it at write time. Tombstoning just the group left its
@@ -361,15 +408,14 @@ export class GroupsService {
           where: { id: expense.id },
           data: { deletedAt, version: { increment: 1 } },
         });
-        const childLogged = await appendChange(tx, {
+        const childCursors = await this.appendGroupChange(tx, existing.id, existing.ownerId, userId, {
           entityType: "finance_shared_expense",
           entityId: expense.id,
           operation: ChangeOperation.DELETE,
           version: child.version,
           payload: {},
-          userId,
         });
-        highestCursor = childLogged.cursor;
+        this.mergeChangeCursors(notificationCursors, childCursors);
       }
 
       for (const settlement of settlements) {
@@ -377,19 +423,18 @@ export class GroupsService {
           where: { id: settlement.id },
           data: { deletedAt, version: { increment: 1 } },
         });
-        const childLogged = await appendChange(tx, {
+        const childCursors = await this.appendGroupChange(tx, existing.id, existing.ownerId, userId, {
           entityType: "finance_settlement",
           entityId: settlement.id,
           operation: ChangeOperation.DELETE,
           version: child.version,
           payload: {},
-          userId,
         });
-        highestCursor = childLogged.cursor;
+        this.mergeChangeCursors(notificationCursors, childCursors);
       }
     });
 
-    this.syncNotifications?.notifyMutation({ userId, highestCursor });
+    this.notifyGroupChanges(notificationCursors);
 
     return { success: true };
   }
@@ -482,7 +527,7 @@ export class GroupsService {
       dto.payerAccountId,
     );
     await this.assertReceiptScope(userId, dto.receiptAttachmentId);
-    let highestCursor: bigint | undefined;
+    const notificationCursors = new Map<string, bigint>();
 
     const expense = await this.prisma.$transaction(async (tx) => {
       const created = await tx.financeSharedExpense.create({
@@ -509,20 +554,19 @@ export class GroupsService {
         include: { shares: true },
       });
 
-      const logged = await appendChange(tx, {
+      const cursors = await this.appendGroupChange(tx, groupId, group.ownerId, userId, {
         entityType: "finance_shared_expense",
         entityId: created.id,
         operation: ChangeOperation.CREATE,
         version: created.version,
         payload: sharedExpenseChangePayload(created),
-        userId,
       });
-      highestCursor = logged.cursor;
+      this.mergeChangeCursors(notificationCursors, cursors);
 
       return created;
     });
 
-    this.syncNotifications?.notifyMutation({ userId, highestCursor });
+    this.notifyGroupChanges(notificationCursors);
 
     return formatSharedExpenseResponse(expense);
   }
@@ -547,7 +591,7 @@ export class GroupsService {
     groupId: string,
     expenseId: string,
   ) {
-    await this.getGroupById(userId, groupId, true);
+    const group = await this.getGroupById(userId, groupId, true);
 
     const expense = await this.prisma.financeSharedExpense.findFirst({
       where: { id: expenseId, groupId, deletedAt: null },
@@ -557,7 +601,7 @@ export class GroupsService {
       throw new NotFoundException("Shared expense not found");
     }
 
-    let highestCursor: bigint | undefined;
+    const notificationCursors = new Map<string, bigint>();
 
     await this.prisma.$transaction(async (tx) => {
       const updated = await tx.financeSharedExpense.update({
@@ -568,18 +612,17 @@ export class GroupsService {
         },
       });
 
-      const logged = await appendChange(tx, {
+      const cursors = await this.appendGroupChange(tx, groupId, group.ownerId, userId, {
         entityType: "finance_shared_expense",
         entityId: expenseId,
         operation: ChangeOperation.DELETE,
         version: updated.version,
         payload: {},
-        userId,
       });
-      highestCursor = logged.cursor;
+      this.mergeChangeCursors(notificationCursors, cursors);
     });
 
-    this.syncNotifications?.notifyMutation({ userId, highestCursor });
+    this.notifyGroupChanges(notificationCursors);
 
     return { success: true };
   }
@@ -614,7 +657,7 @@ export class GroupsService {
       throw new BadRequestException(
         "This trip uses a different currency than the group.",
       );
-    let highestCursor: bigint | undefined;
+    const notificationCursors = new Map<string, bigint>();
 
     const settlement = await this.prisma.$transaction(async (tx) => {
       // Read inside the transaction. Balances read before it let two devices
@@ -645,20 +688,19 @@ export class GroupsService {
         },
       });
 
-      const logged = await appendChange(tx, {
+      const cursors = await this.appendGroupChange(tx, groupId, group.ownerId, userId, {
         entityType: "finance_settlement",
         entityId: created.id,
         operation: ChangeOperation.CREATE,
         version: created.version,
         payload: settlementChangePayload(created),
-        userId,
       });
-      highestCursor = logged.cursor;
+      this.mergeChangeCursors(notificationCursors, cursors);
 
       return created;
     });
 
-    this.syncNotifications?.notifyMutation({ userId, highestCursor });
+    this.notifyGroupChanges(notificationCursors);
 
     return formatSettlementResponse(settlement);
   }
@@ -682,7 +724,7 @@ export class GroupsService {
     groupId: string,
     settlementId: string,
   ) {
-    await this.getGroupById(userId, groupId, true);
+    const group = await this.getGroupById(userId, groupId, true);
 
     const settlement = await this.prisma.financeSettlement.findFirst({
       where: { id: settlementId, groupId, deletedAt: null },
@@ -692,7 +734,7 @@ export class GroupsService {
       throw new NotFoundException("Settlement not found");
     }
 
-    let highestCursor: bigint | undefined;
+    const notificationCursors = new Map<string, bigint>();
 
     await this.prisma.$transaction(async (tx) => {
       const updated = await tx.financeSettlement.update({
@@ -703,18 +745,17 @@ export class GroupsService {
         },
       });
 
-      const logged = await appendChange(tx, {
+      const cursors = await this.appendGroupChange(tx, groupId, group.ownerId, userId, {
         entityType: "finance_settlement",
         entityId: settlementId,
         operation: ChangeOperation.DELETE,
         version: updated.version,
         payload: {},
-        userId,
       });
-      highestCursor = logged.cursor;
+      this.mergeChangeCursors(notificationCursors, cursors);
     });
 
-    this.syncNotifications?.notifyMutation({ userId, highestCursor });
+    this.notifyGroupChanges(notificationCursors);
 
     return { success: true };
   }

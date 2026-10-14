@@ -1,7 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 
-export interface HttpRequestMetric {
+interface HttpRequestMetric {
   method: string;
   route: string;
   statusCode: number;

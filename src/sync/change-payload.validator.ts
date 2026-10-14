@@ -43,8 +43,6 @@ export const SYNC_ENTITY_TYPES = [
   "finance_trip_itinerary",
 ] as const;
 
-export type SyncEntityType = (typeof SYNC_ENTITY_TYPES)[number];
-
 export interface ChangeEnvelope {
   entityType: string;
   operation: ChangeOperation | string;

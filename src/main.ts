@@ -14,6 +14,7 @@ async function bootstrap() {
 
   const configService = app.get(ConfigService);
   const logger = new Logger("Bootstrap");
+  const environment = configService.get<string>("APP_ENV", "development");
 
   const expressApp = app.getHttpAdapter().getInstance();
   expressApp.set("trust proxy", 1);
@@ -37,12 +38,10 @@ async function bootstrap() {
   );
   const corsOriginConfig = configService.get<string>("CORS_ORIGIN", "");
   const corsOriginsConfig = configService.get<string>("CORS_ORIGINS", "");
-  const wsCorsOriginsConfig = configService.get<string>("WS_CORS_ORIGINS", "");
 
   const explicitAllowedOrigins = [
     corsOriginConfig,
     corsOriginsConfig,
-    wsCorsOriginsConfig,
   ]
     .flatMap((val) => val.split(","))
     .map((o) => o.trim())
@@ -53,38 +52,49 @@ async function bootstrap() {
     corsOriginsConfig === "*" ||
     explicitAllowedOrigins.includes("*");
 
+  const allowedOrigins =
+    explicitAllowedOrigins.length > 0
+      ? explicitAllowedOrigins
+      : ["http://localhost:3000"];
+
   app.enableCors({
     origin: (
       origin: string | undefined,
       callback: (err: Error | null, allow?: boolean) => void,
     ) => {
-      // Allow requests with no origin (e.g. mobile apps, curl, server-to-server)
-      if (!origin || origin === "null") {
+      // Native clients, curl and server-to-server requests have no Origin.
+      // A literal `null` origin is an opaque browser context and must not bypass
+      // the configured browser allow-list.
+      if (!origin) {
         return callback(null, true);
       }
+      if (origin === "null") {
+        return callback(null, false);
+      }
 
-      // If configured for wildcard '*', dynamically reflect the origin so credentials work
+      // A wildcard is an explicit operator choice. It never enables browser
+      // credentials, otherwise any site could make authenticated cookie calls.
       if (allowsWildcard) {
         return callback(null, true);
       }
 
-      // Always permit localhost / 127.0.0.1 on any port for local development & Flutter Web
-      if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+      // Local Flutter web builds can choose a port dynamically, but this
+      // convenience must never silently widen a deployed API.
+      if (
+        environment === "development" &&
+        /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
+      ) {
         return callback(null, true);
       }
 
-      // Check explicit allowed origins list (defaulting to http://localhost:3000 if none configured)
-      if (
-        explicitAllowedOrigins.length === 0 ||
-        explicitAllowedOrigins.includes(origin)
-      ) {
+      if (allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
 
       logger.warn(`[CORS] Blocked request from disallowed origin: ${origin}`);
       return callback(null, false);
     },
-    credentials: true,
+    credentials: !allowsWildcard,
     methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
     allowedHeaders: [
       "Content-Type",
@@ -173,8 +183,6 @@ async function bootstrap() {
   app.enableShutdownHooks();
 
   const port = configService.get<number>("APP_PORT", 3000);
-  const environment = configService.get<string>("APP_ENV", "development");
-
   await app.listen(port, "0.0.0.0");
 
   logger.log(`🚀 Allinone Backend started on http://localhost:${port}`);
