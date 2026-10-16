@@ -14,6 +14,7 @@ describe("AllExceptionsFilter", () => {
   let request: {
     method: string;
     url: string;
+    path?: string;
     headers: Record<string, string>;
   };
   let host: ArgumentsHost;
@@ -65,6 +66,19 @@ describe("AllExceptionsFilter", () => {
     request.headers = {};
     filter.catch(new BadRequestException("nope"), host);
     expect(body().requestId).toEqual(expect.any(String));
+  });
+
+  it("rejects malformed request ids and omits query strings from paths", () => {
+    request.headers["x-request-id"] = "x".repeat(129);
+    request.url = "/auth/login?token=secret";
+    request.path = "/auth/login";
+
+    filter.catch(new BadRequestException("nope"), host);
+
+    expect(body().requestId).not.toBe(request.headers["x-request-id"]);
+    expect(body().requestId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(body().path).toBe("/auth/login");
+    expect(JSON.stringify(body())).not.toContain("token=secret");
   });
 
   it("keeps raw database text out of the answer", () => {

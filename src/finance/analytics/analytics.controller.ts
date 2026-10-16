@@ -9,6 +9,8 @@ import { AnalyticsService } from "./analytics.service";
 import {
   CashFlowQueryDto,
   ExportTransactionsQueryDto,
+  FinancialCalendarQueryDto,
+  HealthCheckQueryDto,
   NetWorthQueryDto,
   SpendingByCategoryQueryDto,
 } from "./dto/analytics-query.dto";
@@ -84,6 +86,39 @@ export class AnalyticsController {
       query.startDate,
       query.endDate,
       query.currency,
+    );
+  }
+
+  @Get("health-check")
+  @ApiOperation({
+    summary: "Get comprehensive financial health checkup and indicators",
+  })
+  @ApiResponse({ status: 200, description: "Financial health overview" })
+  async getFinancialHealthCheck(
+    @GetUser("id") userId: string,
+    @Query() query: HealthCheckQueryDto,
+  ) {
+    return this.analyticsService.getFinancialHealthCheck(
+      userId,
+      query.currency ?? "INR",
+    );
+  }
+
+  @Get("calendar")
+  @ApiOperation({
+    summary:
+      "Get monthly financial calendar with paydays, bills, and running balance",
+  })
+  @ApiResponse({ status: 200, description: "Financial calendar month schedule" })
+  async getFinancialCalendar(
+    @GetUser("id") userId: string,
+    @Query() query: FinancialCalendarQueryDto,
+  ) {
+    return this.analyticsService.getFinancialCalendar(
+      userId,
+      query.year,
+      query.month,
+      query.currency ?? "INR",
     );
   }
 }

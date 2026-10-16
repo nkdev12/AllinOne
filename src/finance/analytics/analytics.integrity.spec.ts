@@ -6,6 +6,8 @@ import { allocatePercentages, formatMinorUnits } from "./analytics.service";
 import {
   CashFlowQueryDto,
   ExportTransactionsQueryDto,
+  FinancialCalendarQueryDto,
+  HealthCheckQueryDto,
   SpendingByCategoryQueryDto,
 } from "./dto/analytics-query.dto";
 import { createValidationPipe } from "@/common/errors/validation.pipe";
@@ -50,6 +52,9 @@ function prismaWith(transactions: any[]) {
       findFirst: jest.fn(),
     },
     financeLoan: { findMany: jest.fn().mockResolvedValue([]) },
+    financeBudget: { findMany: jest.fn().mockResolvedValue([]) },
+    financeRecurringRule: { findMany: jest.fn().mockResolvedValue([]) },
+    financeSavingsGoal: { findMany: jest.fn().mockResolvedValue([]) },
   } as any;
 }
 
@@ -356,8 +361,100 @@ describe("Analytics integrity", () => {
         ),
       ).resolves.toMatchObject({ format: "csv", currency: "usd" });
       await expect(
-        pipe.transform({ format: "xlsx" }, context(ExportTransactionsQueryDto)),
+        pipe.transform(
+          { currency: "inr" },
+          context(HealthCheckQueryDto),
+        ),
+      ).resolves.toMatchObject({ currency: "inr" });
+      await expect(
+        pipe.transform(
+          { year: "2026", month: "10", currency: "INR" },
+          context(FinancialCalendarQueryDto),
+        ),
+      ).resolves.toMatchObject({ year: 2026, month: 10, currency: "INR" });
+      await expect(
+        pipe.transform({ month: "13" }, context(FinancialCalendarQueryDto)),
       ).rejects.toThrow(BadRequestException);
+    });
+  });
+
+  describe("financial health check", () => {
+    it("computes 5 vitals, overall score, and grade", async () => {
+      const { service: analytics, db } = service([
+        tx({
+          type: FinanceTransactionType.INCOME,
+          amountMinor: 10000000n, // 100,000 INR
+          transactionDate: new Date(),
+        }),
+        tx({
+          type: FinanceTransactionType.EXPENSE,
+          amountMinor: 3000000n, // 30,000 INR
+          transactionDate: new Date(),
+        }),
+      ]);
+
+      db.financeAccount.findMany = jest.fn().mockResolvedValue([
+        {
+          id: "acc-1",
+          type: "BANK",
+          currentBalanceMinor: 20000000n, // 200,000 INR
+          currency: "INR",
+        },
+      ]);
+
+      const result = await analytics.getFinancialHealthCheck(USER, "INR");
+      expect(result.currency).toBe("INR");
+      expect(result.overallScore).toBeGreaterThanOrEqual(70);
+      expect(result.grade).toBe("strong");
+      expect(result.indicators.savingsRate.status).toBe("healthy");
+      expect(result.indicators.debtBurden.valueDisplay).toBe("Debt Free");
+      expect(result.indicators.emergencyRunway.status).toBe("healthy");
+      expect(result.actionItems).toBeDefined();
+    });
+  });
+
+  describe("financial calendar", () => {
+    it("builds calendar with daily running balance and scheduled events", async () => {
+      const { service: analytics, db } = service([]);
+      db.financeAccount.findMany = jest.fn().mockResolvedValue([
+        {
+          id: "acc-1",
+          type: "BANK",
+          currentBalanceMinor: 10000000n, // 100,000 INR
+          currency: "INR",
+        },
+      ]);
+      db.financeRecurringRule.findMany = jest.fn().mockResolvedValue([
+        {
+          id: "rule-salary",
+          type: "INCOME",
+          amountMinor: 8000000n,
+          title: "Salary",
+          frequency: "MONTHLY",
+          interval: 1,
+          startDate: new Date("2026-01-01T00:00:00.000Z"),
+          endDate: null,
+        },
+        {
+          id: "rule-rent",
+          type: "EXPENSE",
+          amountMinor: 2500000n,
+          title: "Rent",
+          frequency: "MONTHLY",
+          interval: 1,
+          startDate: new Date("2026-01-05T00:00:00.000Z"),
+          endDate: null,
+        },
+      ]);
+
+      const calendar = await analytics.getFinancialCalendar(USER, 2026, 10, "INR");
+      expect(calendar.year).toBe(2026);
+      expect(calendar.month).toBe(10);
+      expect(calendar.days.length).toBe(31);
+      expect(calendar.totalExpectedInflowMinor).toBe(8000000);
+      expect(calendar.totalExpectedOutflowMinor).toBe(2500000);
+      expect(calendar.startingBalanceMinor).toBe(10000000);
+      expect(calendar.projectedEndingBalanceMinor).toBe(10000000 + 8000000 - 2500000);
     });
   });
 

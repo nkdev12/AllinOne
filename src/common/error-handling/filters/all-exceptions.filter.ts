@@ -27,6 +27,21 @@ interface CanonicalErrorResponse {
 export class AllExceptionsFilter implements ExceptionFilter {
   private readonly logger = new Logger("ExceptionFilter");
 
+  private requestIdFrom(header: string | string[] | undefined): string {
+    if (
+      typeof header === "string" &&
+      /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(header)
+    ) {
+      return header;
+    }
+    return uuidv4();
+  }
+
+  private requestPath(request: Request): string {
+    if (typeof request.path === "string" && request.path) return request.path;
+    return (request.url || request.originalUrl || "").split("?", 1)[0];
+  }
+
   private getErrorCodeForStatus(status: number): string {
     switch (status) {
       case HttpStatus.BAD_REQUEST:
@@ -51,11 +66,8 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const response = ctx.getResponse<Response>();
     const request = ctx.getRequest<Request>();
 
-    const inboundRequestId = request.headers["x-request-id"];
-    const requestId =
-      typeof inboundRequestId === "string" && inboundRequestId
-        ? inboundRequestId
-        : uuidv4();
+    const requestId = this.requestIdFrom(request.headers["x-request-id"]);
+    const path = this.requestPath(request);
 
     const inboundTraceId =
       (request as any)?.traceId ||
@@ -75,9 +87,25 @@ export class AllExceptionsFilter implements ExceptionFilter {
       const exceptionResponse = exception.getResponse() as any;
 
       if (typeof exceptionResponse === "object" && exceptionResponse !== null) {
-        code = exceptionResponse.code || code;
-        message = exceptionResponse.message || message;
-        details = exceptionResponse.details;
+        if (typeof exceptionResponse.code === "string") {
+          code = exceptionResponse.code;
+        }
+        if (
+          typeof exceptionResponse.message === "string" ||
+          (Array.isArray(exceptionResponse.message) &&
+            exceptionResponse.message.every(
+              (entry: unknown) => typeof entry === "string",
+            ))
+        ) {
+          message = exceptionResponse.message;
+        }
+        if (
+          typeof exceptionResponse.details === "object" &&
+          exceptionResponse.details !== null &&
+          !Array.isArray(exceptionResponse.details)
+        ) {
+          details = exceptionResponse.details;
+        }
       } else if (typeof exceptionResponse === "string") {
         message = exceptionResponse;
       }
@@ -151,33 +179,36 @@ export class AllExceptionsFilter implements ExceptionFilter {
       requestId,
       ...(inboundTraceId ? { traceId: inboundTraceId } : {}),
       timestamp: new Date().toISOString(),
-      path: request.url || request.originalUrl,
+      path,
     };
 
     if (status >= 500) {
-      this.logger.error(
-        `[${request.method}] ${request.url} - ${status} - ${code}`,
-        {
-          requestId,
-          traceId: inboundTraceId,
-          method: request.method,
-          url: request.url,
-          statusCode: status,
-          errorCode: code,
-        },
-      );
+      this.logger.error(`[${request.method}] ${path} - ${status} - ${code}`, {
+        requestId,
+        traceId: inboundTraceId,
+        method: request.method,
+        path,
+        statusCode: status,
+        errorCode: code,
+      });
+    } else if (code === ErrorCode.VALIDATION_ERROR) {
+      this.logger.debug(`[${request.method}] ${path} - ${status} - ${code}`, {
+        requestId,
+        traceId: inboundTraceId,
+        method: request.method,
+        path,
+        statusCode: status,
+        errorCode: code,
+      });
     } else {
-      this.logger.warn(
-        `[${request.method}] ${request.url} - ${status} - ${code}`,
-        {
-          requestId,
-          traceId: inboundTraceId,
-          method: request.method,
-          url: request.url,
-          statusCode: status,
-          errorCode: code,
-        },
-      );
+      this.logger.warn(`[${request.method}] ${path} - ${status} - ${code}`, {
+        requestId,
+        traceId: inboundTraceId,
+        method: request.method,
+        path,
+        statusCode: status,
+        errorCode: code,
+      });
     }
 
     const res = response.status(status).header("X-Request-ID", requestId);

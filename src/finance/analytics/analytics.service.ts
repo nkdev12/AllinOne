@@ -678,6 +678,501 @@ export class AnalyticsService {
     };
   }
 
+  // -------------------------------------------------------------
+  // Financial Health Check (5 Vitals & Composite Grade)
+  // -------------------------------------------------------------
+
+  async getFinancialHealthCheck(userId: string, currency = "INR") {
+    const requested = normaliseCurrencyCode(currency) ?? "INR";
+
+    const [accounts, loans, budgets, categories] = await Promise.all([
+      this.prisma.financeAccount.findMany({
+        where: { userId, deletedAt: null, isArchived: false, currency: requested },
+      }),
+      this.prisma.financeLoan.findMany({
+        where: { userId, deletedAt: null, isSettled: false },
+      }),
+      this.prisma.financeBudget.findMany({
+        where: { userId, deletedAt: null },
+      }),
+      this.prisma.financeCategory.findMany({
+        where: { OR: [{ userId }, { isSystem: true }] },
+      }),
+    ]);
+
+    // Read last 90 days of transactions for baseline cash flow
+    const now = new Date();
+    const ninetyDaysAgo = new Date(now.getTime() - 90 * MS_PER_DAY);
+    const { rows: txns } = await this.fetchTransactions({
+      userId,
+      deletedAt: null,
+      currency: requested,
+      transactionDate: { gte: ninetyDaysAgo },
+    });
+
+    const categoryMap = new Map<string, string>();
+    for (const c of categories) categoryMap.set(c.id, c.name.toLowerCase());
+
+    const essentialKeywords = [
+      "rent", "mortgage", "housing", "grocer", "food", "utilit", "electric",
+      "water", "gas", "bill", "internet", "wifi", "broadband", "health",
+      "medic", "doctor", "pharmacy", "insuran", "tax", "educat", "tuition",
+      "transport", "transit", "fuel", "petrol"
+    ];
+
+    let totalIncomeMinor = 0;
+    let totalExpenseMinor = 0;
+    let essentialExpenseMinor = 0;
+
+    for (const tx of txns) {
+      const amt = Number(tx.amountMinor);
+      if (tx.type === FinanceTransactionType.INCOME) {
+        totalIncomeMinor += amt;
+      } else if (tx.type === FinanceTransactionType.EXPENSE) {
+        totalExpenseMinor += amt;
+        const catName = tx.categoryId ? categoryMap.get(tx.categoryId) ?? "" : "";
+        if (essentialKeywords.some((kw) => catName.includes(kw))) {
+          essentialExpenseMinor += amt;
+        }
+      }
+    }
+
+    // Liquid savings
+    let liquidSavingsMinor = 0;
+    for (const acc of accounts) {
+      const bal = Number(acc.currentBalanceMinor);
+      if (bal > 0 && (acc.type === "BANK" || acc.type === "CASH" || acc.type === "SAVINGS" || acc.type === "WALLET")) {
+        liquidSavingsMinor += bal;
+      }
+    }
+
+    // Remaining borrowed debt
+    let remainingBorrowedMinor = 0;
+    for (const loan of loans) {
+      if (loan.type === "BORROWED") {
+        remainingBorrowedMinor += Math.max(0, Number(loan.remainingAmountMinor));
+      }
+    }
+
+    // Indicator 1: Savings rate
+    const savingsRate = totalIncomeMinor > 0
+      ? roundRatioToPercent(totalIncomeMinor - totalExpenseMinor, totalIncomeMinor)
+      : 0;
+    let savingsScore = 50;
+    let savingsStatus: "healthy" | "moderate" | "needsAttention" = "moderate";
+    let savingsDesc = "No income recorded this period.";
+    let savingsRec = "Record your regular income or paycheck to establish an accurate savings baseline.";
+
+    if (totalIncomeMinor > 0) {
+      if (savingsRate >= 20) {
+        savingsScore = Math.min(100, Math.round(70 + (savingsRate - 20) * 1.5));
+        savingsStatus = "healthy";
+        savingsDesc = `You saved ${savingsRate}% of your income, comfortably above the 20% healthy benchmark.`;
+        savingsRec = "Consider directing surplus savings toward long-term goals or an interest-bearing account.";
+      } else if (savingsRate >= 5) {
+        savingsScore = Math.round(40 + (savingsRate / 20) * 30);
+        savingsStatus = "moderate";
+        savingsDesc = `You saved ${savingsRate}% of your income, positive but below the recommended 20% target.`;
+        savingsRec = "Review flexible spending categories to gradually lift your savings rate closer to 20%.";
+      } else {
+        savingsScore = savingsRate <= 0 ? 15 : 30;
+        savingsStatus = "needsAttention";
+        savingsDesc = savingsRate <= 0
+          ? `Spending exceeded earnings by ${Math.abs(totalIncomeMinor - totalExpenseMinor)} minor units.`
+          : `Savings rate is only ${savingsRate}%, leaving little margin for error.`;
+        savingsRec = "Pause discretionary spending until expenses fall back below incoming earnings.";
+      }
+    }
+
+    // Indicator 2: Essential Expenses
+    const essentialRatio = totalIncomeMinor > 0
+      ? roundRatioToPercent(essentialExpenseMinor, totalIncomeMinor)
+      : (totalExpenseMinor > 0 ? 100 : 0);
+    let essentialScore = 75;
+    let essentialStatus: "healthy" | "moderate" | "needsAttention" = "healthy";
+    let essentialDesc = "No living expenses recorded yet for this period.";
+    let essentialRec = "Categorize your bills, groceries, and housing to track your baseline living costs.";
+
+    if (totalIncomeMinor > 0 || totalExpenseMinor > 0) {
+      if (essentialRatio <= 50) {
+        essentialScore = 90;
+        essentialStatus = "healthy";
+        essentialDesc = `Essential living expenses take up ${essentialRatio}% of earnings, within the healthy 50% guideline.`;
+        essentialRec = "Your core cost of living is lean and sustainable.";
+      } else if (essentialRatio <= 70) {
+        essentialScore = 60;
+        essentialStatus = "moderate";
+        essentialDesc = `Essentials consume ${essentialRatio}% of income, leaving moderate breathing room.`;
+        essentialRec = "Check if utility, subscription, or grocery bills can be trimmed without sacrificing comfort.";
+      } else {
+        essentialScore = 30;
+        essentialStatus = "needsAttention";
+        essentialDesc = `Core expenses consume ${essentialRatio}% of earnings, creating high financial fixed overhead.`;
+        essentialRec = "Look for ways to reduce fixed recurring overheads (rent, subscriptions, utilities) to lower baseline stress.";
+      }
+    }
+
+    // Indicator 3: Debt Burden
+    let debtScore = 100;
+    let debtStatus: "healthy" | "moderate" | "needsAttention" = "healthy";
+    let debtDesc = "You have zero active borrowed debts recorded in your ledger.";
+    let debtRec = "Maintain your debt-free status and avoid unnecessary high-interest liabilities.";
+
+    if (remainingBorrowedMinor > 0) {
+      const monthlyRef = totalIncomeMinor > 0 ? (totalIncomeMinor / 3) : (totalExpenseMinor / 3);
+      if (monthlyRef > 0 && remainingBorrowedMinor <= monthlyRef) {
+        debtScore = 80;
+        debtStatus = "healthy";
+        debtDesc = "Outstanding borrowed debt is under 1 month of earnings, keeping debt risk low.";
+        debtRec = "Pay down this debt promptly to clear all obligations.";
+      } else if (monthlyRef > 0 && remainingBorrowedMinor <= monthlyRef * 3) {
+        debtScore = 55;
+        debtStatus = "moderate";
+        debtDesc = "Outstanding borrowed debt is moderate relative to your cash flow.";
+        debtRec = "Set a structured repayment plan to avoid letting interest or repayment deadlines accumulate.";
+      } else {
+        debtScore = 30;
+        debtStatus = "needsAttention";
+        debtDesc = "Total borrowed debt poses a notable financial liability.";
+        debtRec = "Focus on high-cost loan repayments first before allocating funds to non-essential spending.";
+      }
+    }
+
+    // Indicator 4: Emergency Savings Runway
+    const monthlyBurn = totalExpenseMinor > 0 ? (totalExpenseMinor / 3) : 1;
+    const runwayMonths = Math.round((liquidSavingsMinor / monthlyBurn) * 10) / 10;
+    let runwayScore = 20;
+    let runwayStatus: "healthy" | "moderate" | "needsAttention" = "needsAttention";
+    let runwayDesc = `Liquid emergency savings cover less than 1 month of typical expenses (${runwayMonths} mo).`;
+    let runwayRec = "Building an initial emergency safety net should be your top financial priority.";
+
+    if (runwayMonths >= 6) {
+      runwayScore = 100;
+      runwayStatus = "healthy";
+      runwayDesc = `Your liquid savings cover ${runwayMonths} months of typical expenses, providing a bulletproof safety cushion.`;
+      runwayRec = "You have achieved the gold standard 6-month emergency buffer.";
+    } else if (runwayMonths >= 3) {
+      runwayScore = 80;
+      runwayStatus = "healthy";
+      runwayDesc = `You have ${runwayMonths} months of emergency buffer in liquid accounts, meeting the standard 3-month safety mark.`;
+      runwayRec = "Aim to gradually build toward 6 months for added peace of mind.";
+    } else if (runwayMonths >= 1) {
+      runwayScore = 50;
+      runwayStatus = "moderate";
+      runwayDesc = `Liquid savings cover ${runwayMonths} month(s) of expenses. A minor disruption could strain your finances.`;
+      runwayRec = "Channel extra savings to build your emergency fund to at least 3 months of basic living costs.";
+    }
+
+    // Indicator 5: Budget Adherence
+    let budgetScore = 70;
+    let budgetStatus: "healthy" | "moderate" | "needsAttention" = "healthy";
+    let budgetDesc = "No monthly category budgets are set up yet.";
+    let budgetRec = "Creating spending budgets helps keep costs predictable.";
+    let adherenceRate = 100;
+
+    if (budgets.length > 0) {
+      const currentMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+      const currentMonthTxns = txns.filter(
+        (t) => t.transactionDate >= currentMonthStart && t.type === FinanceTransactionType.EXPENSE,
+      );
+      const spentByCat = new Map<string, number>();
+      for (const t of currentMonthTxns) {
+        if (t.categoryId) {
+          spentByCat.set(t.categoryId, (spentByCat.get(t.categoryId) ?? 0) + Number(t.amountMinor));
+        }
+      }
+      let onTrack = 0;
+      for (const b of budgets) {
+        const spent = b.categoryId ? (spentByCat.get(b.categoryId) ?? 0) : 0;
+        if (spent <= Number(b.amountMinor)) onTrack++;
+      }
+      adherenceRate = Math.round((onTrack / budgets.length) * 100);
+      if (adherenceRate >= 85) {
+        budgetScore = 95;
+        budgetStatus = "healthy";
+        budgetDesc = `${onTrack} of ${budgets.length} budgets are currently on track (${adherenceRate}% adherence).`;
+        budgetRec = "Great job staying disciplined with your spending limits.";
+      } else if (adherenceRate >= 60) {
+        budgetScore = 65;
+        budgetStatus = "moderate";
+        budgetDesc = `${onTrack} of ${budgets.length} budgets remain within limit (${adherenceRate}% adherence).`;
+        budgetRec = "Slow down purchases in categories that have exceeded or are near 100% of their limit.";
+      } else {
+        budgetScore = 35;
+        budgetStatus = "needsAttention";
+        budgetDesc = `Only ${onTrack} of ${budgets.length} budgets are within limit (${adherenceRate}% adherence).`;
+        budgetRec = "Review overspent categories and adjust spending habits or rebalance limits to match reality.";
+      }
+    }
+
+    const overallScore = Math.max(0, Math.min(100, Math.round(
+      savingsScore * 0.25 + essentialScore * 0.20 + debtScore * 0.20 + runwayScore * 0.20 + budgetScore * 0.15,
+    )));
+
+    let grade: "strong" | "stable" | "needsAttention" = "stable";
+    let summaryTitle = "Stable Foundation";
+    let summaryDesc = "Your finances are functioning steadily, with clear opportunities to boost emergency savings or trim expenses.";
+
+    if (overallScore >= 75) {
+      grade = "strong";
+      summaryTitle = "Strong & Resilient";
+      summaryDesc = "Your money vitals are in excellent shape with strong savings, low debt, and an active safety buffer.";
+    } else if (overallScore < 50) {
+      grade = "needsAttention";
+      summaryTitle = "Needs Attention";
+      summaryDesc = "High fixed commitments, debt burden, or low emergency savings indicate vulnerability to unexpected financial shocks.";
+    }
+
+    const actionItems: string[] = [];
+    if (savingsStatus !== "healthy") actionItems.push(savingsRec);
+    if (essentialStatus !== "healthy") actionItems.push(essentialRec);
+    if (debtStatus !== "healthy") actionItems.push(debtRec);
+    if (runwayStatus !== "healthy") actionItems.push(runwayRec);
+    if (budgetStatus !== "healthy") actionItems.push(budgetRec);
+    if (actionItems.length === 0) {
+      actionItems.push("Keep up your healthy financial routine and periodically review your savings goals.");
+    }
+
+    return {
+      currency: requested,
+      overallScore,
+      grade,
+      summaryTitle,
+      summaryDescription: summaryDesc,
+      indicators: {
+        savingsRate: {
+          name: "Savings Rate",
+          valueDisplay: `${savingsRate}%`,
+          score: savingsScore,
+          status: savingsStatus,
+          explanation: savingsDesc,
+          recommendation: savingsRec,
+        },
+        essentialExpenses: {
+          name: "Essential Living Costs",
+          valueDisplay: `${essentialRatio}% of income`,
+          score: essentialScore,
+          status: essentialStatus,
+          explanation: essentialDesc,
+          recommendation: essentialRec,
+        },
+        debtBurden: {
+          name: "Debt Burden",
+          valueDisplay: remainingBorrowedMinor === 0 ? "Debt Free" : `${remainingBorrowedMinor}`,
+          score: debtScore,
+          status: debtStatus,
+          explanation: debtDesc,
+          recommendation: debtRec,
+        },
+        emergencyRunway: {
+          name: "Emergency Savings Buffer",
+          valueDisplay: `${runwayMonths} months`,
+          score: runwayScore,
+          status: runwayStatus,
+          explanation: runwayDesc,
+          recommendation: runwayRec,
+        },
+        budgetAdherence: {
+          name: "Budget Discipline",
+          valueDisplay: budgets.length === 0 ? "Not Configured" : `${adherenceRate}% on track`,
+          score: budgetScore,
+          status: budgetStatus,
+          explanation: budgetDesc,
+          recommendation: budgetRec,
+        },
+      },
+      actionItems,
+    };
+  }
+
+  // -------------------------------------------------------------
+  // Financial Calendar & Payday Planner
+  // -------------------------------------------------------------
+
+  async getFinancialCalendar(
+    userId: string,
+    year?: number,
+    month?: number,
+    currency = "INR",
+  ) {
+    const requested = normaliseCurrencyCode(currency) ?? "INR";
+    const now = new Date();
+    const targetYear = year ?? now.getUTCFullYear();
+    const targetMonth = month ?? (now.getUTCMonth() + 1);
+
+    const daysInMonth = new Date(Date.UTC(targetYear, targetMonth, 0)).getUTCDate();
+
+    const [accounts, rules, loans, goals] = await Promise.all([
+      this.prisma.financeAccount.findMany({
+        where: { userId, deletedAt: null, isArchived: false, currency: requested },
+      }),
+      this.prisma.financeRecurringRule.findMany({
+        where: { userId, deletedAt: null },
+      }),
+      this.prisma.financeLoan.findMany({
+        where: { userId, deletedAt: null, isSettled: false },
+      }),
+      this.prisma.financeSavingsGoal.findMany({
+        where: { userId, deletedAt: null, isCompleted: false },
+      }),
+    ]);
+
+    let startingBalanceMinor = 0;
+    for (const acc of accounts) {
+      if (acc.type === "BANK" || acc.type === "CASH" || acc.type === "SAVINGS" || acc.type === "WALLET") {
+        startingBalanceMinor += Number(acc.currentBalanceMinor);
+      }
+    }
+
+    const eventsByDay = new Map<number, any[]>();
+    for (let d = 1; d <= daysInMonth; d++) eventsByDay.set(d, []);
+
+    // 1. Expand recurring rules
+    for (const rule of rules) {
+      const amt = Number(rule.amountMinor);
+      if (amt <= 0) continue;
+      const isIncome = rule.type === "INCOME";
+      const start = rule.startDate;
+      const end = rule.endDate;
+      const freq = (rule.frequency || "MONTHLY").toUpperCase();
+      const interval = Math.max(1, rule.interval || 1);
+
+      for (let d = 1; d <= daysInMonth; d++) {
+        const dt = new Date(Date.UTC(targetYear, targetMonth - 1, d));
+        if (dt < new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()))) continue;
+        if (end && dt > end) continue;
+
+        let matches = false;
+        if (freq === "DAILY") {
+          const diff = Math.round((dt.getTime() - start.getTime()) / MS_PER_DAY);
+          if (diff >= 0 && diff % interval === 0) matches = true;
+        } else if (freq === "WEEKLY") {
+          if (dt.getUTCDay() === start.getUTCDay()) {
+            const diffWeeks = Math.round((dt.getTime() - start.getTime()) / (7 * MS_PER_DAY));
+            if (diffWeeks >= 0 && diffWeeks % interval === 0) matches = true;
+          }
+        } else if (freq === "MONTHLY") {
+          const targetDay = Math.min(start.getUTCDate(), daysInMonth);
+          if (d === targetDay) {
+            const monthDiff = (targetYear - start.getUTCFullYear()) * 12 + (targetMonth - 1 - start.getUTCMonth());
+            if (monthDiff >= 0 && monthDiff % interval === 0) matches = true;
+          }
+        } else if (freq === "YEARLY") {
+          if (targetMonth - 1 === start.getUTCMonth() && d === Math.min(start.getUTCDate(), daysInMonth)) {
+            const yearDiff = targetYear - start.getUTCFullYear();
+            if (yearDiff >= 0 && yearDiff % interval === 0) matches = true;
+          }
+        }
+
+        if (matches) {
+          eventsByDay.get(d)!.push({
+            id: `rule_${rule.id}_${d}`,
+            title: rule.title,
+            date: dt.toISOString(),
+            amountMinor: amt,
+            isIncoming: isIncome,
+            type: isIncome ? "payday" : "bill",
+            subtitle: isIncome ? "Scheduled Payday / Inflow" : "Recurring Bill",
+          });
+        }
+      }
+    }
+
+    // 2. Expand loans
+    for (const loan of loans) {
+      if (!loan.dueDate) continue;
+      const due = loan.dueDate;
+      if (due.getUTCFullYear() === targetYear && due.getUTCMonth() === targetMonth - 1) {
+        const d = due.getUTCDate();
+        const isLent = loan.type === "LENT";
+        const rem = Math.max(0, Number(loan.remainingAmountMinor));
+        if (rem > 0) {
+          eventsByDay.get(d)?.push({
+            id: `loan_${loan.id}_${d}`,
+            title: isLent ? `Repayment from ${loan.counterpartyName}` : `Loan Due to ${loan.counterpartyName}`,
+            date: due.toISOString(),
+            amountMinor: rem,
+            isIncoming: isLent,
+            type: isLent ? "loanReceivable" : "loanRepayment",
+            subtitle: isLent ? "Expected Loan Collection" : "Loan Repayment Due",
+          });
+        }
+      }
+    }
+
+    // 3. Expand savings goals
+    for (const goal of goals) {
+      if (!goal.targetDate) continue;
+      const target = goal.targetDate;
+      if (target.getUTCFullYear() === targetYear && target.getUTCMonth() === targetMonth - 1) {
+        const d = target.getUTCDate();
+        const rem = Math.max(0, Number(goal.targetAmountMinor) - Number(goal.currentAmountMinor));
+        if (rem > 0) {
+          eventsByDay.get(d)?.push({
+            id: `goal_${goal.id}_${d}`,
+            title: `Goal Target: ${goal.name}`,
+            date: target.toISOString(),
+            amountMinor: rem,
+            isIncoming: false,
+            type: "savingsContribution",
+            subtitle: "Target Goal Date",
+          });
+        }
+      }
+    }
+
+    let currentBalance = startingBalanceMinor;
+    let totalInflow = 0;
+    let totalOutflow = 0;
+    let lowestBalance = startingBalanceMinor;
+    let lowestBalanceDay = 1;
+    const days: any[] = [];
+    const lowBalanceThreshold = 500000; // 5,000 INR
+
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dayEvents = eventsByDay.get(d) ?? [];
+      let dayInflow = 0;
+      let dayOutflow = 0;
+      for (const ev of dayEvents) {
+        if (ev.isIncoming) dayInflow += ev.amountMinor;
+        else dayOutflow += ev.amountMinor;
+      }
+      totalInflow += dayInflow;
+      totalOutflow += dayOutflow;
+      currentBalance = currentBalance + dayInflow - dayOutflow;
+
+      if (currentBalance < lowestBalance) {
+        lowestBalance = currentBalance;
+        lowestBalanceDay = d;
+      }
+
+      const isLow = currentBalance < lowBalanceThreshold;
+      days.push({
+        day: d,
+        date: new Date(Date.UTC(targetYear, targetMonth - 1, d)).toISOString(),
+        events: dayEvents,
+        totalInflowMinor: dayInflow,
+        totalOutflowMinor: dayOutflow,
+        projectedBalanceMinor: currentBalance,
+        isLowBalanceWarning: isLow,
+      });
+    }
+
+    return {
+      year: targetYear,
+      month: targetMonth,
+      currency: requested,
+      startingBalanceMinor,
+      projectedEndingBalanceMinor: currentBalance,
+      totalExpectedInflowMinor: totalInflow,
+      totalExpectedOutflowMinor: totalOutflow,
+      lowestBalanceMinor: lowestBalance,
+      lowestBalanceDay,
+      hasLowBalanceWarning: days.some((d) => d.isLowBalanceWarning),
+      days,
+    };
+  }
+
   /**
    * Reads every row matching `where` in bounded pages instead of one unbounded
    * `findMany`.

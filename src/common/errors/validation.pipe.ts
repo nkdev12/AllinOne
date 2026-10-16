@@ -19,21 +19,41 @@ function stripProperty(leaf: string, message: string): string {
     : message;
 }
 
+/** Turn class-validator's implementation-oriented copy into UI-safe text. */
+function humaniseConstraint(leaf: string, message: string): string {
+  const stripped = stripProperty(leaf, message).trim();
+  const lower = stripped.toLowerCase();
+
+  if (
+    leaf.toLowerCase().endsWith("email") &&
+    (lower.includes("invalid email") || lower.includes("must be an email"))
+  ) {
+    return "Enter a valid email address.";
+  }
+  if (lower.includes("should not exist")) {
+    return "This field is not allowed.";
+  }
+  if (
+    lower.includes("should not be empty") ||
+    lower.includes("must not be empty")
+  ) {
+    return "This field is required.";
+  }
+  if (!stripped) return "This field needs attention.";
+  return stripped.endsWith(".") ? stripped : `${stripped}.`;
+}
+
 function collect(error: ValidationError, prefix = ""): FieldValidationError[] {
   const path = prefix ? `${prefix}.${error.property}` : error.property;
   const own = error.constraints
     ? Object.values(error.constraints).map((message) =>
-        stripProperty(error.property, message),
+        humaniseConstraint(error.property, message),
       )
     : [];
   const nested = (error.children ?? []).flatMap((child) =>
     collect(child, path),
   );
   return own.length > 0 ? [{ field: path, messages: own }, ...nested] : nested;
-}
-
-function summarise(field: FieldValidationError): string[] {
-  return field.messages.map((message) => `${field.field}: ${message}`);
 }
 
 /**
@@ -51,12 +71,9 @@ export function createValidationPipe(): ValidationPipe {
     },
     exceptionFactory: (errors: ValidationError[]) => {
       const fields = errors.flatMap((error) => collect(error));
-      // The same failures, flattened for anyone reading a log line or a curl
-      // response. Structured callers use details.fields instead.
-      const summary = fields.flatMap(summarise);
       return badRequest(
         ErrorCode.VALIDATION_ERROR,
-        summary.length > 0 ? summary : "Some fields need attention.",
+        "Please correct the highlighted fields.",
         { fields },
       );
     },

@@ -38,16 +38,17 @@ describe("createValidationPipe", () => {
       expect(response.code).toBe(ErrorCode.VALIDATION_ERROR);
       expect(response.details.fields).toEqual(
         expect.arrayContaining([
-          { field: "email", messages: ["must be an email"] },
+          {
+            field: "email",
+            messages: ["Enter a valid email address."],
+          },
           {
             field: "password",
-            messages: ["must be longer than or equal to 8 characters"],
+            messages: ["must be longer than or equal to 8 characters."],
           },
         ]),
       );
-      expect(response.message).toEqual(
-        expect.arrayContaining(["email: must be an email"]),
-      );
+      expect(response.message).toBe("Please correct the highlighted fields.");
     }
   });
 
@@ -61,7 +62,10 @@ describe("createValidationPipe", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(BadRequestException);
       const response = (error as BadRequestException).getResponse() as any;
-      expect(response.message.join(" ")).toContain("isAdmin");
+      expect(response.details.fields).toContainEqual({
+        field: "isAdmin",
+        messages: ["This field is not allowed."],
+      });
     }
   });
 

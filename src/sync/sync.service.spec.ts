@@ -452,6 +452,113 @@ describe("SyncService", () => {
       expect(prismaService.change.create).toHaveBeenCalledTimes(2);
     });
 
+    it("accepts the history-preserving habit workflow used by the app", async () => {
+      prismaService.device.findFirst.mockResolvedValue(mockDevice);
+      prismaService.change.findFirst.mockResolvedValue(null);
+
+      const oldHabitId = "11111111-1111-4111-8111-111111111111";
+      const newHabitId = "22222222-2222-4222-8222-222222222222";
+      const habitPayload = {
+        name: "Read",
+        emoji: "📚",
+        color: "#42A5F5",
+        category: "Learning",
+        frequency: "daily",
+        weekdays: null,
+        targetPerPeriod: null,
+        targetAmount: 10,
+        unitLabel: "pages",
+        reminderTime: "20:00",
+        streakFreeze: true,
+        startDate: "2026-10-01",
+        sortOrder: 0,
+        archivedAt: null,
+      };
+
+      const result = await service.pushChanges(userId, {
+        deviceId,
+        changes: [
+          {
+            entityType: "habit",
+            entityId: oldHabitId,
+            operation: ChangeOperation.UPDATE,
+            version: 8,
+            payload: {
+              ...habitPayload,
+              archivedAt: "2026-10-16T08:00:00.000Z",
+            },
+          },
+          {
+            entityType: "habit",
+            entityId: newHabitId,
+            operation: ChangeOperation.CREATE,
+            version: 1,
+            payload: {
+              ...habitPayload,
+              targetAmount: 20,
+              startDate: "2026-10-16",
+            },
+          },
+          {
+            entityType: "habit_log",
+            entityId: "33333333-3333-4333-8333-333333333333",
+            operation: ChangeOperation.CREATE,
+            version: 1,
+            payload: {
+              habitId: newHabitId,
+              day: "2026-10-16",
+              amount: 20,
+              note: "Finished before bed",
+              completedAt: "2026-10-16T14:30:00.000Z",
+            },
+          },
+        ],
+      });
+
+      expect(result.conflicts).toEqual([]);
+      expect(result.accepted).toHaveLength(3);
+      expect(prismaService.change.create).toHaveBeenCalledTimes(3);
+      expect(prismaService.change.create).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          data: expect.objectContaining({
+            entityType: "habit",
+            entityId: oldHabitId,
+            operation: ChangeOperation.UPDATE,
+            payload: expect.objectContaining({
+              archivedAt: "2026-10-16T08:00:00.000Z",
+            }),
+          }),
+        }),
+      );
+      expect(prismaService.change.create).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          data: expect.objectContaining({
+            entityType: "habit",
+            entityId: newHabitId,
+            operation: ChangeOperation.CREATE,
+            payload: expect.objectContaining({
+              targetAmount: 20,
+              startDate: "2026-10-16",
+            }),
+          }),
+        }),
+      );
+      expect(prismaService.change.create).toHaveBeenNthCalledWith(
+        3,
+        expect.objectContaining({
+          data: expect.objectContaining({
+            entityType: "habit_log",
+            payload: expect.objectContaining({
+              habitId: newHabitId,
+              amount: 20,
+            }),
+          }),
+        }),
+      );
+    });
+
     it("detects intra-batch version conflict when subsequent change regresses version", async () => {
       prismaService.device.findFirst.mockResolvedValue(mockDevice);
       prismaService.change.findFirst.mockResolvedValue(null);
