@@ -41,7 +41,7 @@ async function bootstrap() {
 
   const explicitAllowedOrigins = [corsOriginConfig, corsOriginsConfig]
     .flatMap((val) => val.split(","))
-    .map((o) => o.trim())
+    .map((o) => o.trim().replace(/\/+$/, ""))
     .filter(Boolean);
 
   const allowsWildcard =
@@ -84,7 +84,8 @@ async function bootstrap() {
         return callback(null, true);
       }
 
-      if (allowedOrigins.includes(origin)) {
+      const normalizedOrigin = origin.replace(/\/+$/, "");
+      if (allowedOrigins.includes(normalizedOrigin)) {
         return callback(null, true);
       }
 

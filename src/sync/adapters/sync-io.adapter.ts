@@ -77,7 +77,7 @@ function asBoolean(value: unknown, fallback: boolean): boolean {
 function splitOriginList(raw: string): string[] {
   return raw
     .split(",")
-    .map((entry) => entry.trim())
+    .map((entry) => entry.trim().replace(/\/+$/, ""))
     .filter(Boolean);
 }
 
@@ -244,9 +244,11 @@ export class SyncIoAdapter extends RedisIoAdapter {
         origin: string | undefined,
         callback: (error: Error | null, allow?: boolean | string) => void,
       ) => {
+        const normalized =
+          typeof origin === "string" ? origin.replace(/\/+$/, "") : "";
         if (
           typeof origin === "string" &&
-          (allowed.has(origin) ||
+          (allowed.has(normalized) ||
             /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin))
         ) {
           return callback(null, true);
