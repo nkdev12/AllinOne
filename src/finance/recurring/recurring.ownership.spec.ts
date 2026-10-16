@@ -405,14 +405,18 @@ describe("Recurring rule ownership and scheduling", () => {
           title: "Netflix",
           startDate: "2026-02-30T00:00:00.000Z",
         }),
-      ).rejects.toThrow("startDate '2026-02-30T00:00:00.000Z' is not a valid calendar date");
+      ).rejects.toThrow(
+        "startDate '2026-02-30T00:00:00.000Z' is not a valid calendar date",
+      );
 
       seedRule();
       await expect(
         service.updateRecurringRule(USER, RULE_ID, {
           startDate: "2026-02-30T00:00:00.000Z",
         }),
-      ).rejects.toThrow("startDate '2026-02-30T00:00:00.000Z' is not a valid calendar date");
+      ).rejects.toThrow(
+        "startDate '2026-02-30T00:00:00.000Z' is not a valid calendar date",
+      );
     });
 
     it("rejects endDate earlier than startDate", async () => {
@@ -429,12 +433,12 @@ describe("Recurring rule ownership and scheduling", () => {
     });
   });
 
-  describe("processDueRules account scoping", () => {
+  describe("processAllDueRules account scoping", () => {
     it("mints nothing when the rule points at another user's account", async () => {
       seedRule({ accountId: FOREIGN_ACCOUNT });
       dueRules = [rulesById[RULE_ID]];
 
-      const result = await service.processDueRules();
+      const result = await service.processAllDueRules();
 
       expect(result).toEqual({ processed: 0 });
       expect(prisma.financeTransaction.create).not.toHaveBeenCalled();
@@ -464,7 +468,7 @@ describe("Recurring rule ownership and scheduling", () => {
       seedRule();
       dueRules = [rulesById[RULE_ID]];
 
-      await service.processDueRules();
+      await service.processAllDueRules();
 
       expect(prisma.financeAccount.findFirst).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -481,7 +485,7 @@ describe("Recurring rule ownership and scheduling", () => {
       seedRule();
       dueRules = [rulesById[RULE_ID]];
 
-      const result = await service.processDueRules();
+      const result = await service.processAllDueRules();
 
       expect(result).toEqual({ processed: 1 });
       const accountChange = changesFor("finance_account")[0];
@@ -495,7 +499,7 @@ describe("Recurring rule ownership and scheduling", () => {
       seedRule({ categoryId: FOREIGN_CATEGORY });
       dueRules = [rulesById[RULE_ID]];
 
-      await service.processDueRules();
+      await service.processAllDueRules();
 
       expect(prisma.financeTransaction.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -510,7 +514,7 @@ describe("Recurring rule ownership and scheduling", () => {
         dueRules = [rulesById[`rule-${categoryId}`]];
         prisma.financeTransaction.create.mockClear();
 
-        await service.processDueRules();
+        await service.processAllDueRules();
 
         expect(prisma.financeTransaction.create).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -521,13 +525,13 @@ describe("Recurring rule ownership and scheduling", () => {
     });
   });
 
-  describe("processDueRules balance write", () => {
+  describe("processAllDueRules balance write", () => {
     it("adjusts with an atomic increment instead of a stale absolute read", async () => {
       seedRule();
       dueRules = [rulesById[RULE_ID]];
       concurrentIncomeDeltaMinor = BigInt(5000);
 
-      await service.processDueRules();
+      await service.processAllDueRules();
 
       expect(prisma.financeAccount.update).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -554,7 +558,7 @@ describe("Recurring rule ownership and scheduling", () => {
       });
       dueRules = [rulesById[RULE_ID]];
 
-      await service.processDueRules();
+      await service.processAllDueRules();
 
       expect(prisma.financeAccount.update).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -657,21 +661,21 @@ describe("Recurring rule ownership and scheduling", () => {
       });
       dueRules = [rulesById[RULE_ID]];
 
-      await service.processDueRules();
+      await service.processAllDueRules();
       expect(iso(rulesById[RULE_ID].nextDueDate)).toBe(
         "2026-02-28T00:00:00.000Z",
       );
 
       rulesById[RULE_ID].nextDueDate = utc("2026-02-28T00:00:00.000Z");
       dueRules = [rulesById[RULE_ID]];
-      await service.processDueRules();
+      await service.processAllDueRules();
       expect(iso(rulesById[RULE_ID].nextDueDate)).toBe(
         "2026-03-31T00:00:00.000Z",
       );
     });
   });
 
-  describe("processDueRules end-of-schedule handling", () => {
+  describe("processAllDueRules end-of-schedule handling", () => {
     it("mints a late occurrence that still falls on or before endDate", async () => {
       // First picked up on 2026-11-05: the 10-31 bill is late but inside the
       // schedule, so it must be generated and the rule must move on.
@@ -682,7 +686,7 @@ describe("Recurring rule ownership and scheduling", () => {
       });
       dueRules = [rulesById[RULE_ID]];
 
-      const result = await service.processDueRules();
+      const result = await service.processAllDueRules();
 
       expect(result).toEqual({ processed: 1 });
       expect(prisma.financeTransaction.create).toHaveBeenCalledWith(
@@ -706,7 +710,7 @@ describe("Recurring rule ownership and scheduling", () => {
       });
       dueRules = [rulesById[RULE_ID]];
 
-      const result = await service.processDueRules();
+      const result = await service.processAllDueRules();
 
       expect(result).toEqual({ processed: 0 });
       expect(prisma.financeTransaction.create).not.toHaveBeenCalled();
@@ -720,7 +724,7 @@ describe("Recurring rule ownership and scheduling", () => {
       });
       dueRules = [rulesById[RULE_ID]];
 
-      const result = await service.processDueRules();
+      const result = await service.processAllDueRules();
 
       expect(result).toEqual({ processed: 0 });
       expect(rulesById[RULE_ID].autoGenerate).toBe(false);
@@ -748,7 +752,7 @@ describe("Recurring rule ownership and scheduling", () => {
       accounts[OWN_ACCOUNT].deletedAt = new Date("2026-10-01T00:00:00.000Z");
       dueRules = [rulesById[RULE_ID]];
 
-      const result = await service.processDueRules();
+      const result = await service.processAllDueRules();
 
       expect(result).toEqual({ processed: 0 });
       expect(prisma.financeTransaction.create).not.toHaveBeenCalled();

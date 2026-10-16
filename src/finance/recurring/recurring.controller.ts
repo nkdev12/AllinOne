@@ -57,7 +57,7 @@ export class RecurringController {
   })
   @ApiResponse({ status: 200, description: "Processed count returned" })
   async processDueRules(@GetUser("id") userId: string) {
-    return this.recurringService.processDueRules(userId);
+    return this.recurringService.processDueRulesForUser(userId);
   }
 
   @Get(":id")

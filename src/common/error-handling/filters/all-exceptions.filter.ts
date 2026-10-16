@@ -111,6 +111,19 @@ export class AllExceptionsFilter implements ExceptionFilter {
           code = ErrorCode.NOT_FOUND;
           message = "That item no longer exists.";
           break;
+        case "P2028":
+          status = HttpStatus.SERVICE_UNAVAILABLE;
+          code = "TRANSACTION_TIMEOUT";
+          message =
+            "The transaction timed out. Please retry with a smaller batch.";
+          details = { retryable: true };
+          break;
+        case "P2034":
+          status = HttpStatus.CONFLICT;
+          code = "TRANSACTION_CONFLICT";
+          message = "A transaction conflict occurred. Please retry.";
+          details = { retryable: true };
+          break;
       }
     } else if (exception instanceof Prisma.PrismaClientValidationError) {
       // A query the code built wrong: a bug to fix here, never a message to

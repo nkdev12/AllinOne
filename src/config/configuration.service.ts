@@ -126,10 +126,7 @@ export class ConfigurationService {
     ] as const;
 
     for (const [variable, value] of values) {
-      if (
-        value.trim().length < 32 ||
-        value.includes("change-in-production")
-      ) {
+      if (value.trim().length < 32 || value.includes("change-in-production")) {
         throw new Error(
           `${variable} must be a unique, non-placeholder secret of at least 32 characters in production`,
         );

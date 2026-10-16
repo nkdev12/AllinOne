@@ -315,13 +315,19 @@ export class GroupsService {
         },
       });
 
-      const cursors = await this.appendGroupChange(tx, group.id, existing.ownerId, userId, {
-        entityType: "finance_group",
-        entityId: group.id,
-        operation: ChangeOperation.UPDATE,
-        version: group.version,
-        payload: groupChangePayload(group),
-      });
+      const cursors = await this.appendGroupChange(
+        tx,
+        group.id,
+        existing.ownerId,
+        userId,
+        {
+          entityType: "finance_group",
+          entityId: group.id,
+          operation: ChangeOperation.UPDATE,
+          version: group.version,
+          payload: groupChangePayload(group),
+        },
+      );
       this.mergeChangeCursors(notificationCursors, cursors);
 
       return group;
@@ -377,13 +383,19 @@ export class GroupsService {
         },
       });
 
-      const cursors = await this.appendGroupChange(tx, existing.id, existing.ownerId, userId, {
-        entityType: "finance_group",
-        entityId: existing.id,
-        operation: ChangeOperation.DELETE,
-        version: updated.version,
-        payload: {},
-      });
+      const cursors = await this.appendGroupChange(
+        tx,
+        existing.id,
+        existing.ownerId,
+        userId,
+        {
+          entityType: "finance_group",
+          entityId: existing.id,
+          operation: ChangeOperation.DELETE,
+          version: updated.version,
+          payload: {},
+        },
+      );
       this.mergeChangeCursors(notificationCursors, cursors);
 
       // `onDelete: Cascade` in schema.prisma is decoration only on MongoDB —
@@ -408,13 +420,19 @@ export class GroupsService {
           where: { id: expense.id },
           data: { deletedAt, version: { increment: 1 } },
         });
-        const childCursors = await this.appendGroupChange(tx, existing.id, existing.ownerId, userId, {
-          entityType: "finance_shared_expense",
-          entityId: expense.id,
-          operation: ChangeOperation.DELETE,
-          version: child.version,
-          payload: {},
-        });
+        const childCursors = await this.appendGroupChange(
+          tx,
+          existing.id,
+          existing.ownerId,
+          userId,
+          {
+            entityType: "finance_shared_expense",
+            entityId: expense.id,
+            operation: ChangeOperation.DELETE,
+            version: child.version,
+            payload: {},
+          },
+        );
         this.mergeChangeCursors(notificationCursors, childCursors);
       }
 
@@ -423,13 +441,19 @@ export class GroupsService {
           where: { id: settlement.id },
           data: { deletedAt, version: { increment: 1 } },
         });
-        const childCursors = await this.appendGroupChange(tx, existing.id, existing.ownerId, userId, {
-          entityType: "finance_settlement",
-          entityId: settlement.id,
-          operation: ChangeOperation.DELETE,
-          version: child.version,
-          payload: {},
-        });
+        const childCursors = await this.appendGroupChange(
+          tx,
+          existing.id,
+          existing.ownerId,
+          userId,
+          {
+            entityType: "finance_settlement",
+            entityId: settlement.id,
+            operation: ChangeOperation.DELETE,
+            version: child.version,
+            payload: {},
+          },
+        );
         this.mergeChangeCursors(notificationCursors, childCursors);
       }
     });
@@ -554,13 +578,19 @@ export class GroupsService {
         include: { shares: true },
       });
 
-      const cursors = await this.appendGroupChange(tx, groupId, group.ownerId, userId, {
-        entityType: "finance_shared_expense",
-        entityId: created.id,
-        operation: ChangeOperation.CREATE,
-        version: created.version,
-        payload: sharedExpenseChangePayload(created),
-      });
+      const cursors = await this.appendGroupChange(
+        tx,
+        groupId,
+        group.ownerId,
+        userId,
+        {
+          entityType: "finance_shared_expense",
+          entityId: created.id,
+          operation: ChangeOperation.CREATE,
+          version: created.version,
+          payload: sharedExpenseChangePayload(created),
+        },
+      );
       this.mergeChangeCursors(notificationCursors, cursors);
 
       return created;
@@ -612,13 +642,19 @@ export class GroupsService {
         },
       });
 
-      const cursors = await this.appendGroupChange(tx, groupId, group.ownerId, userId, {
-        entityType: "finance_shared_expense",
-        entityId: expenseId,
-        operation: ChangeOperation.DELETE,
-        version: updated.version,
-        payload: {},
-      });
+      const cursors = await this.appendGroupChange(
+        tx,
+        groupId,
+        group.ownerId,
+        userId,
+        {
+          entityType: "finance_shared_expense",
+          entityId: expenseId,
+          operation: ChangeOperation.DELETE,
+          version: updated.version,
+          payload: {},
+        },
+      );
       this.mergeChangeCursors(notificationCursors, cursors);
     });
 
@@ -688,13 +724,19 @@ export class GroupsService {
         },
       });
 
-      const cursors = await this.appendGroupChange(tx, groupId, group.ownerId, userId, {
-        entityType: "finance_settlement",
-        entityId: created.id,
-        operation: ChangeOperation.CREATE,
-        version: created.version,
-        payload: settlementChangePayload(created),
-      });
+      const cursors = await this.appendGroupChange(
+        tx,
+        groupId,
+        group.ownerId,
+        userId,
+        {
+          entityType: "finance_settlement",
+          entityId: created.id,
+          operation: ChangeOperation.CREATE,
+          version: created.version,
+          payload: settlementChangePayload(created),
+        },
+      );
       this.mergeChangeCursors(notificationCursors, cursors);
 
       return created;
@@ -745,13 +787,19 @@ export class GroupsService {
         },
       });
 
-      const cursors = await this.appendGroupChange(tx, groupId, group.ownerId, userId, {
-        entityType: "finance_settlement",
-        entityId: settlementId,
-        operation: ChangeOperation.DELETE,
-        version: updated.version,
-        payload: {},
-      });
+      const cursors = await this.appendGroupChange(
+        tx,
+        groupId,
+        group.ownerId,
+        userId,
+        {
+          entityType: "finance_settlement",
+          entityId: settlementId,
+          operation: ChangeOperation.DELETE,
+          version: updated.version,
+          payload: {},
+        },
+      );
       this.mergeChangeCursors(notificationCursors, cursors);
     });
 

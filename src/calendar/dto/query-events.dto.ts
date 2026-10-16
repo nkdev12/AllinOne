@@ -7,6 +7,7 @@ import {
   IsString,
   IsUUID,
   Max,
+  MaxLength,
   Min,
 } from "class-validator";
 
@@ -39,10 +40,12 @@ export class QueryEventsDto {
 
   @ApiPropertyOptional({
     example: "Roadmap",
-    description: "Search term matching title, description, or location",
+    description:
+      "Search term matching title, description, or location, matched literally: regex metacharacters are escaped server-side because the MongoDB connector compiles this into $regex.",
   })
   @IsOptional()
   @IsString()
+  @MaxLength(80)
   search?: string;
 
   @ApiPropertyOptional({ example: 1, description: "Page number (default 1)" })

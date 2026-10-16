@@ -5,9 +5,15 @@ import {
   Logger,
 } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { escapeRegex } from "@/common/utils/regex";
 import { ChangeOperation, Prisma, User, UserStatus } from "@prisma/client";
 import { appendChange } from "@/sync/change-cursor";
 import { UpdateUserProfileDto } from "./dto/update-user-profile.dto";
+
+// Friend-picker bounds. A two-character prefix left directory enumeration just
+// a handful of requests away; see `suggestAccounts` for why the cap is here too.
+const SUGGESTION_MIN_TERM = 3;
+const SUGGESTION_LIMIT = 8;
 
 /**
  * One finance table's stake in an account: how the rows name their owner, and
@@ -112,33 +118,46 @@ export class UsersService {
 
   /**
    * A deliberately small, authenticated directory for finance-group friend
-   * selection. It returns only the identity needed by a picker, never profile
-   * settings or account status, and needs at least two characters so opening
-   * the dialog does not expose a directory of every account.
+   * selection: an id to put in the group's `members` and the label to render
+   * beside it. Nothing else.
+   *
+   * It used to return `email` as well, which let any authenticated account page
+   * through the whole user directory alphabet by alphabet — display names are
+   * still enumerable that way, so the projection is now the smaller one and
+   * email is not even matched on: a `where` on email would stay an existence
+   * oracle for addresses even when the address is not echoed back.
+   *
+   * Narrowing results to accounts the caller already shares money with is not
+   * cheap here: a group's members are an unindexed `Json` array on
+   * `FinanceGroup` (`prisma/schema.prisma`), not a join table, so the scope
+   * would be a scan of every group — and it would defeat the endpoint's purpose,
+   * which is to find someone you have not shared a group with yet. So the
+   * mitigation stays blunt: `SUGGESTION_MIN_TERM` characters minimum and
+   * `SUGGESTION_LIMIT` rows maximum per request.
    */
   async suggestAccounts(userId: string, query: string) {
     const term = query.trim();
-    if (term.length < 2) return [];
+    if (term.length < SUGGESTION_MIN_TERM) return [];
     const users = await this.prisma.user.findMany({
       where: {
         id: { not: userId },
         status: UserStatus.ACTIVE,
-        OR: [
-          { email: { contains: term.toLowerCase() } },
-          { displayName: { contains: term } },
-        ],
+        displayName: { contains: escapeRegex(term), mode: "insensitive" },
       },
-      select: { id: true, email: true, displayName: true, deletedAt: true },
-      take: 12,
+      // Over-fetch, then trim in code: a tombstoned account must not be able to
+      // occupy a slot in someone else's friend list (see `notDeleted`).
+      select: { id: true, displayName: true, deletedAt: true },
+      take: SUGGESTION_LIMIT * 2,
       orderBy: { displayName: "asc" },
     });
     return users
       .filter((user) => !user.deletedAt)
-      .slice(0, 8)
+      .slice(0, SUGGESTION_LIMIT)
       .map((user) => ({
         id: user.id,
-        email: user.email,
-        displayName: user.displayName,
+        // `displayName` is nullable, and a picker row with no label is unusable;
+        // the id is the only other thing this endpoint already hands out.
+        displayName: user.displayName ?? user.id,
       }));
   }
 

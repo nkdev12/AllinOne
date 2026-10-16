@@ -53,42 +53,56 @@ describe("UsersService", () => {
     });
   });
 
-  it("returns only active, non-deleted account suggestions", async () => {
+  it("returns only an id and a display label for account suggestions", async () => {
     prisma.user.findMany.mockResolvedValue([
-      {
-        id: "friend-1",
-        email: "priya@example.com",
-        displayName: "Priya",
-        deletedAt: null,
-      },
-      {
-        id: "deleted-1",
-        email: "old@example.com",
-        displayName: "Old account",
-        deletedAt: new Date(),
-      },
+      { id: "friend-1", displayName: "Priya", deletedAt: null },
+      { id: "deleted-1", displayName: "Old account", deletedAt: new Date() },
+      { id: "friend-2", displayName: null, deletedAt: null },
     ]);
 
-    await expect(service.suggestAccounts("user-1", "pr")).resolves.toEqual([
-      {
-        id: "friend-1",
-        email: "priya@example.com",
-        displayName: "Priya",
-      },
+    const result = await service.suggestAccounts("user-1", "pri");
+
+    expect(result).toEqual([
+      { id: "friend-1", displayName: "Priya" },
+      // No display name, so the label falls back to the only other thing this
+      // endpoint returns: a picker row has to render something.
+      { id: "friend-2", displayName: "friend-2" },
     ]);
+    // The enumeration guard is the field list: an email here is a directory
+    // entry, and this response is readable by any signed-in account.
+    expect(JSON.stringify(result)).not.toContain("email");
     expect(prisma.user.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({
+        where: {
           id: { not: "user-1" },
           status: "ACTIVE",
-        }),
-        take: 12,
+          displayName: { contains: "pri", mode: "insensitive" },
+        },
+        select: { id: true, displayName: true, deletedAt: true },
+        take: 16,
       }),
     );
   });
 
-  it("does not search accounts until there are two characters", async () => {
-    await expect(service.suggestAccounts("user-1", "p")).resolves.toEqual([]);
+  it("escapes regex metacharacters in a suggestion term", async () => {
+    prisma.user.findMany.mockResolvedValue([]);
+
+    await service.suggestAccounts("user-1", "a.(b+)+$");
+
+    expect(prisma.user.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          displayName: {
+            contains: "a\\.\\(b\\+\\)\\+\\$",
+            mode: "insensitive",
+          },
+        }),
+      }),
+    );
+  });
+
+  it("does not search accounts until there are three characters", async () => {
+    await expect(service.suggestAccounts("user-1", "pr")).resolves.toEqual([]);
     expect(prisma.user.findMany).not.toHaveBeenCalled();
   });
 });

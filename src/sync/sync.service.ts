@@ -54,145 +54,174 @@ export class SyncService {
     assertPushableChanges(dto.changes);
 
     const replicaRecipients = new Set<string>();
-    const result = await this.prisma.$transaction(async (tx) => {
-      const conflictsResolved = 0;
-      const accepted: string[] = [];
-      const conflicts: SyncConflictEntry[] = [];
-      let lastAssignedCursor: bigint | undefined;
+    const timeoutMs = Number(process.env.SYNC_TRANSACTION_TIMEOUT_MS) || 30000;
+    const maxWaitMs = Number(process.env.SYNC_TRANSACTION_MAX_WAIT_MS) || 10000;
 
-      for (const change of dto.changes) {
-        const existingChange = await tx.change.findFirst({
-          where: {
-            userId,
-            entityType: change.entityType,
-            entityId: change.entityId,
-          },
-          orderBy: { cursor: "desc" },
-        });
+    const result = await this.prisma.$transaction(
+      async (tx) => {
+        const conflictsResolved = 0;
+        const accepted: string[] = [];
+        const conflicts: SyncConflictEntry[] = [];
+        let lastAssignedCursor: bigint | undefined;
+        const latestInBatch = new Map<
+          string,
+          { version: number; payload?: any }
+        >();
 
-        const finalPayload = change.payload;
-
-        // A stale write is refused whole, never merged into what is already
-        // there. Merging would put a payload on the log that no device ever
-        // authored or signed — for a `vault_item` that is impossible anyway
-        // (the blob is opaque ciphertext), and for notes, tasks and events the
-        // client is the thing that knows what the user meant. This is the only
-        // conflict rule; the field-merge `ConflictResolverService` that used to
-        // sit beside it was deleted rather than wired in, for that reason.
-        //
-        // `<` and not `<=`, which makes an equal version a decision rather than
-        // an oversight. Two things arrive here at the version already stored:
-        // a retry — a push whose response was lost re-sends the same change at
-        // the same number, and refusing it would report a conflict over work the
-        // log already holds and drop the client's queue entry for it — and two
-        // devices that edited from the same version, which is a genuine
-        // concurrent write. Nothing here can tell the two apart: both
-        // are the same entity at the same version, and `deviceId` is not a tie
-        // break because a retry comes from the same device that made the edit.
-        // So both are accepted, and the concurrent pair resolves to whichever
-        // row the log reached last, in cursor order — every device converges on
-        // it, because they all replay the same log.
-        // The author whose version is overwritten does find out one layer up: the
-        // winner reaches their next pull, rewrites the note under them, and the
-        // client reloads the open editor rather than leaving the discarded text
-        // on screen to be typed over and re-pushed at a higher version
-        // (`SyncManager.rewrittenNotes` in the Flutter client). That makes the
-        // loss visible where the user is looking; recovering the discarded
-        // version is a product decision the log does not pretend to have made.
-        //
-        // The comparison is with the newest stored *version*, which the row
-        // carries whether or not it carries a payload: a DELETE is legitimately
-        // logged with `payload: null` (see `CONTENT_CARRYING_OPERATIONS`), and
-        // gating on the payload shape used to disarm the whole rule for that
-        // entity — once a delete tail sat there, a stale UPDATE at version 3
-        // against stored version 9 was accepted and resurrected the row on every
-        // device. `serverPayload` is still only echoed when it is an object.
-        if (existingChange) {
-          if (change.version < existingChange.version) {
-            conflicts.push({
-              entityId: change.entityId,
-              entityType: change.entityType,
-              reason: "VERSION_MISMATCH",
-              clientVersion: change.version,
-              serverVersion: existingChange.version,
-              serverPayload:
-                existingChange.payload &&
-                typeof existingChange.payload === "object"
-                  ? existingChange.payload
-                  : undefined,
+        for (const change of dto.changes) {
+          const entityKey = `${change.entityType}:${change.entityId}`;
+          let existingChange = latestInBatch.get(entityKey);
+          if (!existingChange) {
+            const storedChange = await tx.change.findFirst({
+              where: {
+                userId,
+                entityType: change.entityType,
+                entityId: change.entityId,
+              },
+              orderBy: { cursor: "desc" },
             });
-            continue;
+            if (storedChange) {
+              existingChange = {
+                version: storedChange.version,
+                payload: storedChange.payload,
+              };
+              latestInBatch.set(entityKey, existingChange);
+            }
           }
-        }
 
-        const createdChange = await appendChange(tx, {
-          userId,
-          deviceId: dto.deviceId,
-          entityType: change.entityType,
-          entityId: change.entityId,
-          operation: change.operation as any,
-          version: change.version,
-          payload: finalPayload,
-          // The device's own stamp for when the edit happened, kept separate
-          // from `createdAt` so a pull can hand back the edit time rather than
-          // this server's receive time. Nothing here decides conflicts with it.
-          clientTimestamp: change.clientTimestamp ?? null,
-        });
-        lastAssignedCursor = createdChange.cursor;
+          const finalPayload = change.payload;
 
-        // The row behind the log entry. Only a change that got this far is
-        // projected — a refused one is a write the log never accepted, and the
-        // mirror has to agree with the log rather than with whatever a device
-        // happened to try. Inside this transaction on purpose: a push that
-        // rolled back would otherwise leave a domain row edited by changes no
-        // device will ever be handed.
-        await projectAcceptedChange(tx, userId, change);
-        for (const recipient of await this.replicateGroupChange(
-          tx,
-          userId,
-          {
+          // A stale write is refused whole, never merged into what is already
+          // there. Merging would put a payload on the log that no device ever
+          // authored or signed — for a `vault_item` that is impossible anyway
+          // (the blob is opaque ciphertext), and for notes, tasks and events the
+          // client is the thing that knows what the user meant. This is the only
+          // conflict rule; the field-merge `ConflictResolverService` that used to
+          // sit beside it was deleted rather than wired in, for that reason.
+          //
+          // `<` and not `<=`, which makes an equal version a decision rather than
+          // an oversight. Two things arrive here at the version already stored:
+          // a retry — a push whose response was lost re-sends the same change at
+          // the same number, and refusing it would report a conflict over work the
+          // log already holds and drop the client's queue entry for it — and two
+          // devices that edited from the same version, which is a genuine
+          // concurrent write. Nothing here can tell the two apart: both
+          // are the same entity at the same version, and `deviceId` is not a tie
+          // break because a retry comes from the same device that made the edit.
+          // So both are accepted, and the concurrent pair resolves to whichever
+          // row the log reached last, in cursor order — every device converges on
+          // it, because they all replay the same log.
+          // The author whose version is overwritten does find out one layer up: the
+          // winner reaches their next pull, rewrites the note under them, and the
+          // client reloads the open editor rather than leaving the discarded text
+          // on screen to be typed over and re-pushed at a higher version
+          // (`SyncManager.rewrittenNotes` in the Flutter client). That makes the
+          // loss visible where the user is looking; recovering the discarded
+          // version is a product decision the log does not pretend to have made.
+          //
+          // The comparison is with the newest stored *version*, which the row
+          // carries whether or not it carries a payload: a DELETE is legitimately
+          // logged with `payload: null` (see `CONTENT_CARRYING_OPERATIONS`), and
+          // gating on the payload shape used to disarm the whole rule for that
+          // entity — once a delete tail sat there, a stale UPDATE at version 3
+          // against stored version 9 was accepted and resurrected the row on every
+          // device. `serverPayload` is still only echoed when it is an object.
+          if (existingChange) {
+            if (change.version < existingChange.version) {
+              conflicts.push({
+                entityId: change.entityId,
+                entityType: change.entityType,
+                reason: "VERSION_MISMATCH",
+                clientVersion: change.version,
+                serverVersion: existingChange.version,
+                serverPayload:
+                  existingChange.payload &&
+                  typeof existingChange.payload === "object"
+                    ? existingChange.payload
+                    : undefined,
+              });
+              continue;
+            }
+          }
+
+          const createdChange = await appendChange(tx, {
+            userId,
+            deviceId: dto.deviceId,
             entityType: change.entityType,
             entityId: change.entityId,
-            operation: change.operation as ChangeOperation,
+            operation: change.operation as any,
             version: change.version,
-          },
-          finalPayload as Prisma.InputJsonValue,
-          dto.deviceId,
-        )) {
-          replicaRecipients.add(recipient);
+            payload: finalPayload,
+            // The device's own stamp for when the edit happened, kept separate
+            // from `createdAt` so a pull can hand back the edit time rather than
+            // this server's receive time. Nothing here decides conflicts with it.
+            clientTimestamp: change.clientTimestamp ?? null,
+          });
+          lastAssignedCursor = createdChange.cursor;
+
+          // The row behind the log entry. Only a change that got this far is
+          // projected — a refused one is a write the log never accepted, and the
+          // mirror has to agree with the log rather than with whatever a device
+          // happened to try. Inside this transaction on purpose: a push that
+          // rolled back would otherwise leave a domain row edited by changes no
+          // device will ever be handed.
+          await projectAcceptedChange(tx, userId, change);
+          for (const recipient of await this.replicateGroupChange(
+            tx,
+            userId,
+            {
+              entityType: change.entityType,
+              entityId: change.entityId,
+              operation: change.operation as ChangeOperation,
+              version: change.version,
+            },
+            finalPayload as Prisma.InputJsonValue,
+            dto.deviceId,
+          )) {
+            replicaRecipients.add(recipient);
+          }
+
+          latestInBatch.set(entityKey, {
+            version: change.version,
+            payload: finalPayload,
+          });
+
+          accepted.push(createdChange.id);
         }
 
-        accepted.push(createdChange.id);
-      }
+        const updatedSyncState = await tx.deviceSyncState.upsert({
+          where: { deviceId: dto.deviceId },
+          create: {
+            deviceId: dto.deviceId,
+            lastPushedSequence: dto.changes.length,
+            lastSuccessfulSyncAt: new Date(),
+          },
+          update: {
+            lastPushedSequence: { increment: dto.changes.length },
+            lastSuccessfulSyncAt: new Date(),
+          },
+        });
 
-      const updatedSyncState = await tx.deviceSyncState.upsert({
-        where: { deviceId: dto.deviceId },
-        create: {
-          deviceId: dto.deviceId,
-          lastPushedSequence: dto.changes.length,
-          lastSuccessfulSyncAt: new Date(),
-        },
-        update: {
-          lastPushedSequence: { increment: dto.changes.length },
-          lastSuccessfulSyncAt: new Date(),
-        },
-      });
+        const highestCursor = (
+          lastAssignedCursor ?? (await getHighestChangeCursor(tx, userId))
+        ).toString();
 
-      const highestCursor = (
-        lastAssignedCursor ?? (await getHighestChangeCursor(tx, userId))
-      ).toString();
-
-      return {
-        success: true,
-        accepted,
-        conflicts,
-        newCursor: highestCursor,
-        processedCount: dto.changes.length,
-        conflictsResolved,
-        highestCursor,
-        lastPushedSequence: updatedSyncState.lastPushedSequence,
-      };
-    });
+        return {
+          success: true,
+          accepted,
+          conflicts,
+          newCursor: highestCursor,
+          processedCount: dto.changes.length,
+          conflictsResolved,
+          highestCursor,
+          lastPushedSequence: updatedSyncState.lastPushedSequence,
+        };
+      },
+      {
+        maxWait: maxWaitMs,
+        timeout: timeoutMs,
+      },
+    );
 
     if (this.syncNotifications) {
       this.syncNotifications.notifyMutation({

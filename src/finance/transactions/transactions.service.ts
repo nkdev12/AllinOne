@@ -5,6 +5,7 @@ import {
   Optional,
 } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { escapeRegex } from "@/common/utils/regex";
 import { SyncNotificationService } from "@/sync/sync-notification.service";
 import { CreateTransactionDto } from "./dto/create-transaction.dto";
 import { UpdateTransactionDto } from "./dto/update-transaction.dto";
@@ -25,16 +26,11 @@ const MAX_PAGE_SIZE = 200;
 const MAX_PAGE = 10000;
 
 /**
- * `contains` on the MongoDB connector is not a substring match: the value is
- * interpolated verbatim into `$regex` (verified against prisma 5.22 by logging
- * the emitted command — `contains: "a.b(c+)+$"` becomes
- * `regex: ".*a.b(c+)+$.*"`). Unescaped user text therefore either matches rows
- * it should not (`a.b` also hits `axb`) or hands Mongo a backtracking bomb such
- * as `(a+)+$`. Escaping first restores literal substring semantics.
+ * Re-exported so the finance specs and any existing importer keep resolving it
+ * from this module; the implementation and the reason it exists are in
+ * `@/common/utils/regex`, which every other search path uses too.
  */
-export function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+export { escapeRegex };
 
 function formatTransactionResponse(tx: any) {
   return {

@@ -1088,7 +1088,7 @@ describe("Finance Services", () => {
     });
 
     it("processes due recurring rules and generates transactions", async () => {
-      const result = await recurringService.processDueRules(userId);
+      const result = await recurringService.processDueRulesForUser(userId);
       expect(result.processed).toBe(1);
 
       // Transaction created

@@ -1423,8 +1423,9 @@ async function projectFinanceRecurringRuleChange(
   // The same reference rule the transaction branch applies, kept identical: a
   // rule bills against `accountId` for the rest of its life, and the processor
   // half of that chain (`recurring.service.ts` `assertAccountOwned`, and the
-  // `processDueRules` re-check that settles a rule whose account is gone) is
-  // already closed server-side — so the projection was the one door left open.
+  // `processDueRulesScoped` re-check that settles a rule whose account is gone)
+  // is already closed server-side — so the projection was the one door left
+  // open.
   // A foreign or unknown `accountId` drops the change whole; a label the caller
   // may not use costs the label and not the rule, exactly as the transaction
   // branch treats `categoryId`.

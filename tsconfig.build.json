@@ -1,0 +1,21 @@
+// The config `nest build` uses. `tsconfig.json` is the editor and typecheck
+// config and has to keep seeing the specs, otherwise every `@/...` import in a
+// test reads as unresolved; this file is that config minus everything that must
+// not reach a runtime image. `exclude` replaces the base list rather than
+// extending it, so `node_modules` and `dist` are repeated here.
+//
+// No `package.json` change is needed to point at it: `nest build` resolves its
+// tsconfig through the CLI's `getDefaultTsconfigPath()`, which returns this
+// filename when it exists in the project root and falls back to
+// `tsconfig.json` only when it does not.
+{
+  "extends": "./tsconfig.json",
+  "exclude": [
+    "node_modules",
+    "dist",
+    "test",
+    "src/types",
+    "**/*.spec.ts",
+    "**/*.test.ts"
+  ]
+}

@@ -20,7 +20,7 @@ export class FinanceProcessor {
     this.logger.log(
       `[FinanceProcessor] Processing due recurring rules... Job #${job.id}`,
     );
-    const result = await this.recurringService.processDueRules();
+    const result = await this.recurringService.processAllDueRules();
     this.logger.log(
       `[FinanceProcessor] Processed ${result.processed} due recurring rules.`,
     );

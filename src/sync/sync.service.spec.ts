@@ -422,6 +422,71 @@ describe("SyncService", () => {
         }),
       );
     });
+
+    it("handles multiple changes for the same entity in the same batch correctly", async () => {
+      prismaService.device.findFirst.mockResolvedValue(mockDevice);
+      prismaService.change.findFirst.mockResolvedValue(null);
+
+      const result = await service.pushChanges(userId, {
+        deviceId,
+        changes: [
+          {
+            entityType: "note",
+            entityId: "note-uuid-multi",
+            operation: ChangeOperation.CREATE,
+            version: 1,
+            payload: { title: "Draft", content: "Initial draft" },
+          },
+          {
+            entityType: "note",
+            entityId: "note-uuid-multi",
+            operation: ChangeOperation.UPDATE,
+            version: 2,
+            payload: { title: "Draft edited", content: "Refined draft" },
+          },
+        ],
+      });
+
+      expect(result.conflicts).toHaveLength(0);
+      expect(result.accepted).toHaveLength(2);
+      expect(prismaService.change.create).toHaveBeenCalledTimes(2);
+    });
+
+    it("detects intra-batch version conflict when subsequent change regresses version", async () => {
+      prismaService.device.findFirst.mockResolvedValue(mockDevice);
+      prismaService.change.findFirst.mockResolvedValue(null);
+
+      const result = await service.pushChanges(userId, {
+        deviceId,
+        changes: [
+          {
+            entityType: "note",
+            entityId: "note-uuid-stale-batch",
+            operation: ChangeOperation.UPDATE,
+            version: 3,
+            payload: { title: "Updated v3", content: "Third version" },
+          },
+          {
+            entityType: "note",
+            entityId: "note-uuid-stale-batch",
+            operation: ChangeOperation.UPDATE,
+            version: 2,
+            payload: { title: "Stale v2", content: "Regressed version" },
+          },
+        ],
+      });
+
+      expect(result.accepted).toHaveLength(1);
+      expect(result.conflicts).toHaveLength(1);
+      expect(result.conflicts[0]).toEqual(
+        expect.objectContaining({
+          entityId: "note-uuid-stale-batch",
+          reason: "VERSION_MISMATCH",
+          clientVersion: 2,
+          serverVersion: 3,
+        }),
+      );
+    });
   });
 
   describe("the reason a device cannot sync", () => {

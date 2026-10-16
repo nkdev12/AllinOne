@@ -7,16 +7,19 @@ import {
   IsString,
   IsUUID,
   Max,
+  MaxLength,
   Min,
 } from "class-validator";
 
 export class QueryNotesDto {
   @ApiPropertyOptional({
     example: "sprint",
-    description: "Search term matching title or content",
+    description:
+      "Search term matching title or content, matched literally: regex metacharacters are escaped server-side because the MongoDB connector compiles this into $regex.",
   })
   @IsOptional()
   @IsString()
+  @MaxLength(80)
   search?: string;
 
   @ApiPropertyOptional({

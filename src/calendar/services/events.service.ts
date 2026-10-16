@@ -5,6 +5,7 @@ import {
   Optional,
 } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { escapeRegex } from "@/common/utils/regex";
 import { SyncNotificationService } from "@/sync/sync-notification.service";
 import { CreateEventDto } from "../dto/create-event.dto";
 import { UpdateEventDto } from "../dto/update-event.dto";
@@ -179,10 +180,11 @@ export class EventsService {
     }
 
     if (query.search) {
+      const term = escapeRegex(query.search);
       where.OR = [
-        { title: { contains: query.search, mode: "insensitive" } },
-        { description: { contains: query.search, mode: "insensitive" } },
-        { location: { contains: query.search, mode: "insensitive" } },
+        { title: { contains: term, mode: "insensitive" } },
+        { description: { contains: term, mode: "insensitive" } },
+        { location: { contains: term, mode: "insensitive" } },
       ];
     }
 

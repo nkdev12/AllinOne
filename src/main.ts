@@ -39,10 +39,7 @@ async function bootstrap() {
   const corsOriginConfig = configService.get<string>("CORS_ORIGIN", "");
   const corsOriginsConfig = configService.get<string>("CORS_ORIGINS", "");
 
-  const explicitAllowedOrigins = [
-    corsOriginConfig,
-    corsOriginsConfig,
-  ]
+  const explicitAllowedOrigins = [corsOriginConfig, corsOriginsConfig]
     .flatMap((val) => val.split(","))
     .map((o) => o.trim())
     .filter(Boolean);

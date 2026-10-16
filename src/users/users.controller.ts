@@ -22,6 +22,7 @@ import { UsersService } from "./users.service";
 import { JwtAuthGuard } from "@/auth/guards/jwt-auth.guard";
 import { GetUser } from "@/auth/decorators/get-user.decorator";
 import { UpdateUserProfileDto } from "./dto/update-user-profile.dto";
+import { SuggestAccountsQueryDto } from "./dto/suggest-accounts-query.dto";
 
 @ApiTags("Users")
 @Controller("users")
@@ -34,8 +35,11 @@ export class UsersController {
   @ApiOperation({
     summary: "Find registered accounts to add to a shared finance group",
   })
-  async suggestions(@GetUser("id") userId: string, @Query("q") query?: string) {
-    return this.usersService.suggestAccounts(userId, query ?? "");
+  async suggestions(
+    @GetUser("id") userId: string,
+    @Query() query: SuggestAccountsQueryDto,
+  ) {
+    return this.usersService.suggestAccounts(userId, query.q ?? "");
   }
 
   @Get("me")

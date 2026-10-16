@@ -229,10 +229,10 @@ export class RecurringService {
       await this.assertCategoryUsable(userId, dto.categoryId);
     }
 
-    assertCalendarDate(dto.startDate, 'startDate');
-    if (dto.endDate) assertCalendarDate(dto.endDate, 'endDate');
+    assertCalendarDate(dto.startDate, "startDate");
+    if (dto.endDate) assertCalendarDate(dto.endDate, "endDate");
     if (dto.endDate && new Date(dto.endDate) < new Date(dto.startDate)) {
-      throw new BadRequestException('endDate must be on or after startDate');
+      throw new BadRequestException("endDate must be on or after startDate");
     }
 
     const startDate = new Date(dto.startDate);
@@ -328,11 +328,38 @@ export class RecurringService {
     });
   }
 
-  async processDueRules(userId?: string): Promise<{ processed: number }> {
+  /**
+   * Run the rules due for one account. The scheduled endpoint's entry point.
+   */
+  async processDueRulesForUser(userId: string): Promise<{ processed: number }> {
+    return this.processDueRulesScoped({ userId });
+  }
+
+  /**
+   * Run the rules due for *every* account. Only the cron worker may call this.
+   */
+  async processAllDueRules(): Promise<{ processed: number }> {
+    return this.processDueRulesScoped({});
+  }
+
+  /**
+   * The one implementation, reached only through the two named entry points
+   * above.
+   *
+   * It replaces `processDueRules(userId?: string)`, which built its filter with
+   * `...(userId ? { userId } : {})`. That made the unsafe scope the default: one
+   * forgotten argument dropped the owner filter and the tick wrote transactions,
+   * balances and oplog entries across every tenant. Here the scope is an
+   * argument with no optional form — a caller has to spell out either
+   * `{ userId }` or `{}`, so cross-tenant is a decision rather than an accident.
+   */
+  private async processDueRulesScoped(
+    ownerFilter: { userId: string } | Record<string, never>,
+  ): Promise<{ processed: number }> {
     const now = new Date();
     const dueRules = await this.prisma.financeRecurringRule.findMany({
       where: {
-        ...(userId ? { userId } : {}),
+        ...ownerFilter,
         nextDueDate: { lte: now },
         autoGenerate: true,
         deletedAt: null,
@@ -493,12 +520,15 @@ export class RecurringService {
       await this.assertCategoryUsable(userId, dto.categoryId);
     }
 
-    if (dto.startDate !== undefined) assertCalendarDate(dto.startDate, 'startDate');
-    if (dto.endDate !== undefined && dto.endDate) assertCalendarDate(dto.endDate, 'endDate');
+    if (dto.startDate !== undefined)
+      assertCalendarDate(dto.startDate, "startDate");
+    if (dto.endDate !== undefined && dto.endDate)
+      assertCalendarDate(dto.endDate, "endDate");
     const effectiveStart = dto.startDate ?? existing.startDate.toISOString();
-    const effectiveEnd = dto.endDate !== undefined ? dto.endDate : existing.endDate?.toISOString();
+    const effectiveEnd =
+      dto.endDate !== undefined ? dto.endDate : existing.endDate?.toISOString();
     if (effectiveEnd && new Date(effectiveEnd) < new Date(effectiveStart)) {
-      throw new BadRequestException('endDate must be on or after startDate');
+      throw new BadRequestException("endDate must be on or after startDate");
     }
 
     let highestCursor: bigint | undefined;

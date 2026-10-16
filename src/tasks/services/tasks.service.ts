@@ -5,6 +5,7 @@ import {
   Optional,
 } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
+import { escapeRegex } from "@/common/utils/regex";
 import { SyncNotificationService } from "@/sync/sync-notification.service";
 import { CreateTaskDto } from "../dto/create-task.dto";
 import { UpdateTaskDto } from "../dto/update-task.dto";
@@ -143,9 +144,10 @@ export class TasksService {
     };
 
     if (query.search) {
+      const term = escapeRegex(query.search);
       where.OR = [
-        { title: { contains: query.search, mode: "insensitive" } },
-        { description: { contains: query.search, mode: "insensitive" } },
+        { title: { contains: term, mode: "insensitive" } },
+        { description: { contains: term, mode: "insensitive" } },
       ];
     }
 
