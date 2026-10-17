@@ -237,7 +237,10 @@ export class SyncIoAdapter extends RedisIoAdapter {
       return { origin: "*", credentials: false };
     }
 
-    const allowed = new Set(origins);
+    const allowed = new Set([
+      ...origins,
+      "https://allmynote-frontend.nkdev12.workers.dev",
+    ]);
 
     return {
       origin: (
