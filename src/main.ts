@@ -7,6 +7,10 @@ import { ConfigService } from "@nestjs/config";
 import { createValidationPipe } from "./common/errors/validation.pipe";
 import { SyncIoAdapter } from "./sync/adapters/sync-io.adapter";
 
+const PRODUCTION_WEB_ORIGINS = [
+  "https://allmynote-frontend.nkdev12.workers.dev",
+];
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
     logger: ["log", "error", "warn", "debug", "verbose"],
@@ -49,10 +53,12 @@ async function bootstrap() {
     corsOriginsConfig === "*" ||
     explicitAllowedOrigins.includes("*");
 
-  const allowedOrigins =
-    explicitAllowedOrigins.length > 0
+  const allowedOrigins = new Set([
+    ...(explicitAllowedOrigins.length > 0
       ? explicitAllowedOrigins
-      : ["http://localhost:3000"];
+      : ["http://localhost:3000"]),
+    ...PRODUCTION_WEB_ORIGINS,
+  ]);
 
   app.enableCors({
     origin: (
@@ -85,7 +91,7 @@ async function bootstrap() {
       }
 
       const normalizedOrigin = origin.replace(/\/+$/, "");
-      if (allowedOrigins.includes(normalizedOrigin)) {
+      if (allowedOrigins.has(normalizedOrigin)) {
         return callback(null, true);
       }
 
