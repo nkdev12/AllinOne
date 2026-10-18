@@ -49,15 +49,18 @@ APP_ENV=development
 APP_PORT=3000
 DATABASE_URL=mongodb://localhost:27017/allinone_dev
 REDIS_URL=redis://localhost:6379
-RESEND_API_KEY=
-EMAIL_FROM=onboarding@resend.dev
-EMAIL_REPLY_TO=yourname@proton.me
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=yourname@gmail.com
+SMTP_PASSWORD=
+SMTP_FROM=yourname@gmail.com
+SMTP_TLS=true
 ```
 
 Two caveats about the files as committed:
 
 - `.env.example` ships `DATABASE_URL="mongodb://localhost:27017/allinone_dev"` and a note that the server must be a replica set member. Check it anyway: the line was a `postgresql://…:5432/…` URL as recently as commit `538cc50`, and the datasource is `provider = "mongodb"`, so a Postgres URL cannot work no matter what is in the file.
-- Email delivery uses Resend's HTTPS API. Set `RESEND_API_KEY`, `EMAIL_FROM`, and `EMAIL_REPLY_TO` when testing email features.
+- Email delivery uses SMTP. For Gmail, set the `SMTP_*` values above and use a Google App Password for `SMTP_PASSWORD`.
 
 **⚠️ Important**: These defaults are only for development. For production, change:
 
@@ -263,9 +266,9 @@ Before committing, always run:
 npm run lint && npm run typecheck && npm run test
 ```
 
-## Using Resend for Email
+## Using Gmail SMTP for Email
 
-Set `RESEND_API_KEY`, `EMAIL_FROM`, and `EMAIL_REPLY_TO` in your environment. Email requests are sent over HTTPS to Resend, so the same configuration works locally and on Railway.
+Set `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, and `SMTP_TLS=true` in your environment. `SMTP_PASSWORD` must be a Google App Password, not your normal Google account password.
 
 ## Using MinIO for File Storage
 
@@ -423,7 +426,7 @@ npm install
 
 **Q: Can I use the backend without Docker?**
 
-A: Yes, but you'll need to manually install and run MongoDB (as a replica set, because the transaction endpoints reject a standalone `mongod`), Redis, and MinIO. You also need Resend credentials for email delivery. Docker Compose is recommended for simplicity.
+A: Yes, but you'll need to manually install and run MongoDB (as a replica set, because the transaction endpoints reject a standalone `mongod`), Redis, and MinIO. You also need SMTP credentials for email delivery. Docker Compose is recommended for simplicity.
 
 **Q: How do I reset my local database?**
 

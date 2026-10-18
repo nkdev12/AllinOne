@@ -62,10 +62,10 @@ export class JwtStrategy extends PassportStrategy(Strategy, "jwt") {
     // The token proves who you were when it was signed; the row proves you are
     // still allowed to be. Without this, "log out everywhere" leaves every
     // signed-in device reading the vault until its access token expires.
-    // Tokens with no `sessionId` are the ones minted before sessions were
-    // stamped, and the paths that use them, so they keep passing.
+    // A token that cannot name a session cannot be revoked. Reject legacy
+    // tokens rather than preserving a logout bypass until their expiry.
     if (
-      payload.sessionId &&
+      !payload.sessionId ||
       !(await this.usersService.isSessionLive(payload.sub, payload.sessionId))
     ) {
       throw unauthorized(
@@ -79,6 +79,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, "jwt") {
       email: user.email,
       displayName: user.displayName,
       status: user.status,
+      emailVerifiedAt: user.emailVerifiedAt,
       sessionId: payload.sessionId,
     };
   }

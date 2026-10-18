@@ -12,6 +12,7 @@ import { MailModule } from "@/common/mail/mail.module";
 import { OtpModule } from "@/common/otp/otp.module";
 import { JwtStrategy } from "./strategies/jwt.strategy";
 import { JwtAuthGuard } from "./guards/jwt-auth.guard";
+import { RefreshTokenGraceStore } from "./refresh-token-grace.store";
 
 @Module({
   imports: [
@@ -38,7 +39,10 @@ import { JwtAuthGuard } from "./guards/jwt-auth.guard";
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, JwtAuthGuard],
+  // Registered so the grace window is one shared instance per process and Nest
+  // owns its socket teardown; `AuthService` falls back to building its own only
+  // when nothing is injected, which is what the specs do.
+  providers: [AuthService, JwtStrategy, JwtAuthGuard, RefreshTokenGraceStore],
   exports: [AuthService, JwtAuthGuard, PassportModule, JwtModule],
 })
 export class AuthModule {}

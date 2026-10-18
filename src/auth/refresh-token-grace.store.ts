@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
+import { Injectable, Logger, OnModuleDestroy, Optional } from "@nestjs/common";
 import Redis from "ioredis";
 import * as crypto from "crypto";
 import { ConfigurationService } from "@/config/configuration.service";
@@ -73,7 +73,10 @@ export class RefreshTokenGraceStore implements OnModuleDestroy {
     { marker: RefreshRotationMarker; expiresAt: number }
   >();
 
-  constructor(configService: ConfigurationService, redisClient?: Redis) {
+  constructor(
+    configService: ConfigurationService,
+    @Optional() redisClient?: Redis,
+  ) {
     this.ownsConnection = !redisClient;
     if (!configService.usesRedisThrottlerStorage) {
       return;

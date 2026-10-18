@@ -81,14 +81,13 @@ describe("Health & System Telemetry (E2E)", () => {
   });
 
   describe("GET /health", () => {
-    it("should return 200 with canonical Terminus health payload", async () => {
+    it("should return 200 without exposing dependency details", async () => {
       const response = await request(app.getHttpServer())
         .get("/health")
         .expect(200);
 
       expect(response.body.status).toBe("ok");
-      expect(response.body.info.database.status).toBe("up");
-      expect(response.body.info.redis.status).toBe("up");
+      expect(response.body).toEqual({ status: "ok" });
       expect(response.headers["x-trace-id"]).toBeDefined();
     });
 
@@ -105,7 +104,7 @@ describe("Health & System Telemetry (E2E)", () => {
         .expect(503);
 
       expect(response.body.status).toBe("error");
-      expect(response.body.error.database.status).toBe("down");
+      expect(response.body).toEqual({ status: "error" });
     });
   });
 
@@ -120,13 +119,16 @@ describe("Health & System Telemetry (E2E)", () => {
   });
 
   describe("GET /info", () => {
-    it("should return 200 with static build and runtime metadata", async () => {
+    it("should return 200 without runtime metadata", async () => {
       const response = await request(app.getHttpServer())
         .get("/info")
         .expect(200);
 
-      expect(response.body.name).toBe("Allinone Backend");
-      expect(response.body.version).toBe("1.0.0");
+      expect(response.body).toEqual({
+        name: "Allinone Backend",
+        version: "1.0.0",
+        status: "ok",
+      });
     });
   });
 

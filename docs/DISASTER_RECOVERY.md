@@ -96,7 +96,12 @@ This document outlines the Disaster Recovery (DR) and Business Continuity proced
 5. **Validate Public Endpoint Connectivity**:
    ```bash
    curl -I https://$DOMAIN/health/live
+   # `/metrics` is behind MetricsScrapeGuard, so the bare HEAD is expected to answer
+   # 401 — a 200 here would mean the guard had gone missing. Read actual series with
+   # the same credential the Prometheus scrape presents (see docs/DEPLOYMENT.md Step 10).
    curl -I https://$DOMAIN/metrics
+   curl -sS -H "Authorization: Bearer $(cat "$METRICS_SCRAPE_SECRET_FILE")" \
+     https://$DOMAIN/metrics | grep -c http_request_duration_seconds
    ```
 
 ---

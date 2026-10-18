@@ -7,7 +7,10 @@ import { AppController } from "./app.controller";
 import { AppService } from "./app.service";
 import { PrismaModule } from "@/common/prisma/prisma.module";
 import { ConfigurationModule } from "@/config/configuration.module";
-import { ConfigurationService } from "@/config/configuration.service";
+import {
+  ACCEPTED_NODE_ENV,
+  ConfigurationService,
+} from "@/config/configuration.service";
 import { LoggingModule } from "@/common/logging/logging.module";
 import { HealthModule } from "@/health/health.module";
 import { UsersModule } from "@/users/users.module";
@@ -28,9 +31,45 @@ import { AuditLogModule } from "@/common/audit/audit-log.module";
 import { MetricsModule } from "@/common/metrics/metrics.module";
 import { MetricsInterceptor } from "@/common/metrics/metrics.interceptor";
 import { CustomThrottlerGuard } from "@/common/guards/custom-throttler.guard";
+import { RedisThrottlerStorage } from "@/common/throttler/redis-throttler.storage";
 import { IdempotencyInterceptor } from "@/common/interceptors/idempotency.interceptor";
 import { TracingModule } from "@/common/tracing/tracing.module";
 import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
+
+/**
+ * Exists for one decision: whether the rate-limit counters live in Redis or in the
+ * process's memory.
+ *
+ * `RedisThrottlerStorage` is a class Nest only constructs when the environment
+ * wants it, because the alternative is worse than the bug this fixes — an
+ * `ioredis` client opens its socket on the first command, and the Jest suites
+ * (unit and e2e) build this module with no Redis listening, so registering the
+ * class unconditionally would have every throttled request in a suite spend its
+ * retries failing and then land in the storage's degraded in-process path. The
+ * rule itself is `ConfigurationService
+ * .usesRedisThrottlerStorage`, so the suites that depend on the in-memory default
+ * keep it, and a real container does not.
+ *
+ * Owning it in a module rather than building it inside the throttler's options
+ * factory is what lets Nest see it: a value created in a factory is invisible to
+ * the shutdown hooks, and an un-quit Redis client is an open handle in a process
+ * that is trying to exit cleanly.
+ */
+@Module({
+  imports: [ConfigurationModule],
+  providers: [
+    {
+      provide: RedisThrottlerStorage,
+      inject: [ConfigurationService],
+      useFactory: (config: ConfigurationService) =>
+        config.usesRedisThrottlerStorage
+          ? new RedisThrottlerStorage(config)
+          : undefined,
+    },
+  ],
+  exports: [RedisThrottlerStorage],
+})
+export class ThrottlerStorageModule {}
 
 @Module({
   imports: [
@@ -47,19 +86,29 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
           .default("development"),
         APP_PORT: Joi.number().default(3000),
         APP_URL: Joi.string().required(),
+        // The same accepted set as `src/worker.module.ts`, taken from one constant
+        // so the two processes cannot answer a `NODE_ENV` differently: `allowUnknown`
+        // means an undeclared key is a pass-through, and a pass-through here selects
+        // or skips `validateProductionSecrets()`. See `ACCEPTED_NODE_ENV` for why
+        // `test` has to be on the list.
         NODE_ENV: Joi.string()
-          .valid("development", "production")
+          .valid(...ACCEPTED_NODE_ENV)
           .default("development"),
         LOG_LEVEL: Joi.string().default("debug"),
 
         // Database
         DATABASE_URL: Joi.string().required(),
 
-        // Email (Resend HTTPS API — works on Railway plans that block SMTP)
-        RESEND_API_KEY: Joi.string().allow("").optional(),
-        EMAIL_FROM: Joi.string().allow("").optional(),
-        EMAIL_REPLY_TO: Joi.string().allow("").optional(),
-        EMAIL_VERIFY_ENABLED: Joi.boolean().default(false),
+        // Email (SMTP; Gmail uses smtp.gmail.com:587 with an app password)
+        SMTP_HOST: Joi.string().allow("").optional(),
+        SMTP_PORT: Joi.number().port().optional(),
+        SMTP_USER: Joi.string().allow("").optional(),
+        SMTP_PASSWORD: Joi.string().allow("").optional(),
+        SMTP_FROM: Joi.string().allow("").optional(),
+        SMTP_TLS: Joi.boolean().default(true),
+        // Public accounts must prove control of their mailbox before they can
+        // obtain a session. Local test suites may opt out explicitly.
+        EMAIL_VERIFY_ENABLED: Joi.boolean().default(true),
         EMAIL_VERIFY_TOKEN_EXPIRY: Joi.string().default("24h"),
 
         // Redis
@@ -104,15 +153,13 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
         WS_CORS_ORIGINS: Joi.string().allow("").optional(),
         WS_CORS_ALLOW_NULL_ORIGIN: Joi.string().allow("").optional(),
         WS_REDIS_ADAPTER: Joi.string().allow("").optional(),
+        // Localhost is useful while developing the web client, but accepting
+        // arbitrary localhost ports must be an explicit operator choice.
+        ALLOW_LOCALHOST_CORS: Joi.boolean().default(false),
 
-        // AI summarization (Google Gemini). Optional and opt-in like the admin
-        // keys: a missing or blank GEMINI_API_KEY leaves AiService on its
-        // deterministic heuristics and no request is ever sent. The model and
-        // timeout defaults mirror src/ai/gemini.client.ts, which still re-checks
-        // each value itself, so a blank or non-positive setting cannot break it.
-        GEMINI_API_KEY: Joi.string().allow("").optional(),
-        GEMINI_MODEL: Joi.string().default("gemini-1.5-flash"),
-        GEMINI_TIMEOUT_MS: Joi.number().default(5000),
+        // API documentation carries the full route inventory. Keep it off
+        // unless an operator deliberately enables it in a trusted environment.
+        SWAGGER_ENABLED: Joi.boolean().default(false),
 
         // Object Storage
         OBJECT_STORAGE_ENDPOINT: Joi.string().required(),
@@ -124,6 +171,11 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
 
         // Encryption
         ENCRYPTION_KEY: Joi.string().min(32).required(),
+        // The pepper key ring. `ENCRYPTION_KEY_PREVIOUS` is set only during a
+        // rotation window, so blank has to validate as "no previous key".
+        ENCRYPTION_KEY_ID: Joi.string().allow("").optional(),
+        ENCRYPTION_KEY_PREVIOUS: Joi.string().min(32).allow("").optional(),
+        ENCRYPTION_KEY_PREVIOUS_ID: Joi.string().allow("").optional(),
 
         // Rate Limiting
         RATE_LIMIT_WINDOW_MS: Joi.number().default(60000),
@@ -135,7 +187,6 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
 
         // Monitoring
         METRICS_ENABLED: Joi.boolean().default(true),
-        PROMETHEUS_PORT: Joi.number().default(9090),
 
         // OpenTelemetry
         OTEL_ENABLED: Joi.boolean().default(false),
@@ -166,15 +217,25 @@ import { TracingInterceptor } from "@/common/tracing/tracing.interceptor";
     // Rate Limiting Module
     // ====================================================================
     ThrottlerModule.forRootAsync({
-      imports: [ConfigurationModule],
-      inject: [ConfigurationService],
-      useFactory: (config: ConfigurationService) => ({
+      imports: [ConfigurationModule, ThrottlerStorageModule],
+      inject: [ConfigurationService, RedisThrottlerStorage],
+      useFactory: (
+        config: ConfigurationService,
+        storage?: RedisThrottlerStorage,
+      ) => ({
         throttlers: [
           {
             ttl: config.rateLimitWindowMs,
             limit: config.rateLimitMaxRequests,
           },
         ],
+        // Omitting `storage` is what selects the library's in-memory default, and
+        // the throttler resolves it from this options object rather than from DI —
+        // `ThrottlerStorageProvider` reads `options.storage` — so an absent key is
+        // the only way to keep the default. `ThrottlerStorageModule` below hands
+        // back `undefined` for exactly one environment: a Jest run, which builds
+        // this graph with no Redis listening.
+        ...(storage ? { storage } : {}),
       }),
     }),
 

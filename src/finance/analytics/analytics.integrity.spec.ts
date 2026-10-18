@@ -361,10 +361,7 @@ describe("Analytics integrity", () => {
         ),
       ).resolves.toMatchObject({ format: "csv", currency: "usd" });
       await expect(
-        pipe.transform(
-          { currency: "inr" },
-          context(HealthCheckQueryDto),
-        ),
+        pipe.transform({ currency: "inr" }, context(HealthCheckQueryDto)),
       ).resolves.toMatchObject({ currency: "inr" });
       await expect(
         pipe.transform(
@@ -447,14 +444,21 @@ describe("Analytics integrity", () => {
         },
       ]);
 
-      const calendar = await analytics.getFinancialCalendar(USER, 2026, 10, "INR");
+      const calendar = await analytics.getFinancialCalendar(
+        USER,
+        2026,
+        10,
+        "INR",
+      );
       expect(calendar.year).toBe(2026);
       expect(calendar.month).toBe(10);
       expect(calendar.days.length).toBe(31);
       expect(calendar.totalExpectedInflowMinor).toBe(8000000);
       expect(calendar.totalExpectedOutflowMinor).toBe(2500000);
       expect(calendar.startingBalanceMinor).toBe(10000000);
-      expect(calendar.projectedEndingBalanceMinor).toBe(10000000 + 8000000 - 2500000);
+      expect(calendar.projectedEndingBalanceMinor).toBe(
+        10000000 + 8000000 - 2500000,
+      );
     });
   });
 

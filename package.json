@@ -57,8 +57,9 @@
     "google-auth-library": "^11.0.2",
     "helmet": "^7.0",
     "ioredis": "^5.0",
-    "joi": "^17.11",
+    "joi": "^17.13.8",
     "jsonwebtoken": "^9.0",
+    "nodemailer": "^7.0.13",
     "otplib": "^13.5.0",
     "passport": "^0.7",
     "passport-jwt": "^4.0",
@@ -75,6 +76,7 @@
     "@types/express": "^4.17",
     "@types/jest": "^29.5",
     "@types/node": "^20.10",
+    "@types/nodemailer": "^8.0.2",
     "@types/passport-jwt": "^3.0",
     "@types/qrcode": "^1.5.6",
     "@typescript-eslint/eslint-plugin": "^6.13",
@@ -100,6 +102,9 @@
     "@typescript-eslint/utils": {
       "minimatch": "^9.0.9"
     },
+    "@nestjs/swagger": {
+      "js-yaml": "5.4.1"
+    },
     "uuid": "^11.1.1"
   },
   "jest": {
@@ -119,7 +124,9 @@
         "ts-jest",
         {
           "diagnostics": {
-            "ignoreCodes": [151002]
+            "ignoreCodes": [
+              151002
+            ]
           }
         }
       ]

@@ -47,6 +47,13 @@ DB_NAME="${DB_NAME:-allinone_prod}"
 DB_HOST="${DB_HOST:-localhost}"
 DB_PORT="${DB_PORT:-27017}"
 
+# A production backup contains account, session and vault metadata. Refuse to
+# create a recoverable plaintext archive when production mode is declared.
+if [ "${APP_ENV:-}" = "production" ] && [ -z "${BACKUP_PASSPHRASE:-}" ]; then
+  echo "Error: BACKUP_PASSPHRASE is required for production backups" >&2
+  exit 1
+fi
+
 # MinIO / Object Storage Configuration
 BACKUP_MINIO="${BACKUP_MINIO:-true}"
 MINIO_DATA_DIR="${MINIO_DATA_DIR:-}"

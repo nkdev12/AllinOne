@@ -753,6 +753,14 @@ model VaultSetting {
   // hmac-sha256 under the server-only ENCRYPTION_KEY. Stored as anything else
   // it would be a bearer secret: holding it is holding the unlock.
   masterKeyHash     String
+  // Which pepper key seals `masterKeyHash`, so rotating `ENCRYPTION_KEY` is a
+  // re-seal rather than a wipe: the bare verifier is never stored, so a row can
+  // only ever be converted on an unlock that presents it under the key it was
+  // sealed with. Null means the row was sealed before identifiers existed —
+  // under the key that was configured then — which is why the rows that already
+  // exist stay readable with no backfill. An id naming a key the process does
+  // not hold is refused as a server fault, never as a wrong password.
+  masterKeyHashPepper String?
   keySalt           String
   // What the client derived with, recorded for diagnostics and read by nothing:
   // the authoritative copy of these parameters is the `_kdf` marker sealed
@@ -764,10 +772,15 @@ model VaultSetting {
   kdfMemory         Int?     @default(65536)
   isVaultConfigured Boolean  @default(true)
 
-  // Master-password recovery: recoveryKey wraps the master key so an
-  // OTP-verified reset can rewrap the stable data key instead of
-  // destroying it. The trade-off is that the server now holds material that
-  // can recover any vault, so this is no longer zero-knowledge.
+  // Master-password recovery: the master key is stored wrapped under a key
+  // derived from the user's 12-word phrase with `recoveryKdfSalt`, so spending
+  // the emailed OTP hands the client an envelope it can only open with the
+  // phrase. The server holds no key material it can use on its own.
+  recoveryKdfSalt   String?
+  // Obsolete: an unwrapped key-encryption-key, uploaded verbatim by app builds
+  // before 2026-10-17. No new row is written with one — setup clears it — and
+  // the recovery endpoint only echoes it for rows that still carry it, so those
+  // vaults keep working until their owner recovers or re-setups.
   recoveryKey       String?
   wrappedMasterKey  String?
   wrappedMasterIv   String?

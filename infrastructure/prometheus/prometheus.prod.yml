@@ -1,13 +1,32 @@
+# `global:` admits scrape/evaluation/timeout/labels only — retention is not a
+# configuration-file key at all, and Prometheus rejects unknown fields with
+# "unknown field \"retention\"" before it reads anything else. The 90 days is set
+# by `--storage.tsdb.retention.time=90d` in docker-compose.prod.yml:342, which is
+# where it belongs.
 global:
   scrape_interval: 30s
   evaluation_interval: 30s
-  retention: 90d
 
 scrape_configs:
   - job_name: 'allinone-api'
     static_configs:
       - targets: ['api:3000']
     metrics_path: '/metrics'
+    # `/metrics` is a guarded route (`MetricsController` stacks the auth guard on
+    # it), and a guard answers an anonymous scrape with 401 — which is not a
+    # dashboard saying "no data yet", it is `up 0` next to a Prometheus that looks
+    # perfectly healthy, so the whole monitoring layer can be dead for months and
+    # nothing anyone reads shows it. The credential goes in as a bearer token
+    # because that is the form the guard accepts.
+    #
+    # `credentials_file` and not `credentials`: this file is committed, so an
+    # inline value here would put ADMIN_SECRET in git history, and a file Prometheus
+    # re-reads means a rotation needs no config edit and no reload. Mounted at this
+    # exact path by the `prometheus` service in docker-compose.prod.yml; the key
+    # needs Prometheus >= 2.24, satisfied by the pinned image there.
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/metrics_scrape_secret
     scrape_interval: 15s
     scrape_timeout: 10s
 

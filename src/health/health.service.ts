@@ -47,8 +47,7 @@ export class HealthService {
     return {
       name: "allinone-backend",
       version: "0.1.0",
-      environment: process.env.APP_ENV || "development",
-      commit: "HEAD",
+      status: "ok",
     };
   }
 }

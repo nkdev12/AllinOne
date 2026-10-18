@@ -6,7 +6,7 @@ This document provides a comprehensive specification of all HTTP REST endpoints,
 
 ## 🔐 Authentication & Global Headers
 
-There is no global authentication guard — the only app-wide `APP_GUARD` is `CustomThrottlerGuard` (`src/app/app.module.ts:159-162`) — so a route is protected exactly where `@UseGuards(JwtAuthGuard)` is applied, and the routes labelled `@Public()` below are simply the ones with no guard. No `@Public()` decorator exists in `src/`. Protected routes take the access token in the standard `Authorization` header; `JwtStrategy` extracts it from that header only, never from a cookie (`src/auth/strategies/jwt.strategy.ts:24-38`):
+There is no global authentication guard — the only app-wide `APP_GUARD` is `CustomThrottlerGuard` (`src/app/app.module.ts:262-265`) — so a route is protected exactly where `@UseGuards(JwtAuthGuard)` is applied, and the routes labelled `@Public()` below are simply the ones with no guard. No `@Public()` decorator exists in `src/`. Protected routes take the access token in the standard `Authorization` header; `JwtStrategy` extracts it from that header only, never from a cookie — the extractor list holds the bearer header and nothing else (`src/auth/strategies/jwt.strategy.ts:26-40`). The `refresh_token` cookie is read only by `POST /auth/refresh` (`src/auth/auth.controller.ts:236-239`), and a refresh that rides on that cookie must also carry the `x-client-version` barrier header the same handler checks (`src/auth/dto/refresh-token.dto.ts:12`, enforced at `src/auth/auth.controller.ts:248-253`):
 
 ```http
 Authorization: Bearer <JWT_ACCESS_TOKEN>
@@ -18,25 +18,32 @@ Authorization: Bearer <JWT_ACCESS_TOKEN>
 | --------------------------- | --------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `Authorization`             | String                      | Yes (Protected routes)  | `Bearer <JWT_ACCESS_TOKEN>`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `Content-Type`              | String                      | Yes (POST/PUT/PATCH)    | `application/json`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `x-client-version`          | String, any non-empty value | Conditional             | The CSRF barrier for `POST /auth/refresh`. **Required** when the refresh comes from the ambient `refresh_token` cookie with no body token: `hasRefreshBarrier()` (`src/auth/auth.controller.ts:264-271`) wants a non-empty string and `:248-253` answers its absence with `403 TOKEN_INVALID`. Not required for a body-token refresh — the native path, which wins the precedence at `:240` — or on any other route. It is already in the CORS `allowedHeaders` (`src/main.ts:112`), the constant behind it is `REFRESH_REQUEST_HEADER` (`src/auth/dto/refresh-token.dto.ts:12`), and the lookup is on the lower-cased name Express hands the handler (`auth.controller.ts:264-271`), so a client that spells it `X-Client-Version` is fine. |
 | `Idempotency-Key`           | String, any non-empty value | Optional                | Replays a cached response for the same `(userId, key)` pair. **Not** "exact-once execution": a hit returns the stored response and the handler never runs, so a retry whose first attempt already landed is silently dropped. Stored in the `IdempotencyKey` collection in MongoDB with a 24-hour `expiresAt` — there is no Redis tier in this path, and no PostgreSQL. The value need not be a UUID, and nothing in the interceptor checks. See `POST /sync/push` for why a caller usually wants to send none.                                                                      |
 | `X-Request-ID`              | String                      | Optional (Client)       | A correlation id the client sends. **Only error responses touch it**: `AllExceptionsFilter` reads the header, generates a `uuidv4()` when absent, puts it in the envelope body and echoes it as a response header (`all-exceptions.filter.ts:54,170`). A 2xx response carries no `X-Request-ID` at all, so it is not a server-guaranteed id on the success path and cannot be used to correlate a request that worked.                                                                                                                                                               |
 | `X-Trace-ID`, `traceparent` | String                      | Server (all routes)     | The two headers a successful response _does_ carry: `TracingInterceptor` sets both on every route, which is what to log if you want one id across a whole call.                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `x-admin-secret`            | String                      | Optional (Admin routes) | Shared secret for automated admin tooling. **Not a standalone credential:** `JwtAuthGuard` runs before `AdminGuard`, so a request carrying only this header gets `401` (verified against a running instance on 2026-09-27). It must accompany a valid Bearer token for _any_ active user, and it is compared against the `ADMIN_SECRET` env var — which is in no `.env.example`, in neither Joi schema and not on `ConfigurationService`, so it is unset in practice and the branch at `src/admin/guards/admin.guard.ts:18-22` never fires. See the warning in the `/admin` section. |
+| `x-admin-secret`            | String                      | Optional (Admin routes) | Shared secret for automated admin tooling. **Not a standalone credential:** `JwtAuthGuard` runs before `AdminGuard`, so a request carrying only this header gets `401` (verified against a running instance on 2026-09-27); with no authenticated user `AdminGuard` itself answers `403` (`src/admin/guards/admin.guard.ts:31-33`). It must accompany a valid Bearer token for _any_ active user. It is compared against `ADMIN_SECRET`, which is declared in the Joi schema (`src/app/app.module.ts:126`) and exposed as `ConfigurationService.adminSecret` (`src/config/configuration.service.ts:724-730`): unset, blank, or shorter than `ADMIN_SECRET_MIN_LENGTH` (32, `:9`) it is `undefined` and the header branch at `src/admin/guards/admin.guard.ts:38-41` is closed. `.env.example:99-103` documents it commented out, so the default deployment admits nobody this way. See the warning in the `/admin` section. |
 
 ---
 
 ## 🛑 Global Error Response Format
 
-All error responses return standard HTTP status codes and a consistent JSON payload produced by `AllExceptionsFilter` (`src/common/error-handling/filters/all-exceptions.filter.ts:12-23`; `details` and `traceId` are optional and absent when nothing populates them):
+All error responses return standard HTTP status codes and a consistent JSON payload produced by `AllExceptionsFilter` (`src/common/error-handling/filters/all-exceptions.filter.ts:14-24`; `details` and `traceId` are optional and absent when nothing populates them):
 
 ```json
 {
   "statusCode": 400,
   "code": "VALIDATION_ERROR",
-  "message": [
-    "email must be an email",
-    "password must be at least 8 characters"
-  ],
+  "message": "Please correct the highlighted fields.",
+  "details": {
+    "fields": [
+      { "field": "email", "messages": ["Enter a valid email address."] },
+      {
+        "field": "password",
+        "messages": ["Password must be at least 8 characters long."]
+      }
+    ]
+  },
   "requestId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "timestamp": "2026-09-07T14:00:00.000Z",
   "path": "/auth/register"
@@ -44,11 +51,35 @@ All error responses return standard HTTP status codes and a consistent JSON payl
 ```
 
 > [!NOTE]
-> **Error Message Shape (`string | string[]`)**:
-> The `message` field is polymorphic:
+> **`message` is `string | string[]`, and what a client should branch on is `code`**:
 >
-> - For DTO validation failures (HTTP 400 `VALIDATION_ERROR` emitted by NestJS `ValidationPipe`), `message` is an array of strings detailing each violated constraint.
-> - For standard operational exceptions (401, 403, 404, 409, 429, 500), `message` is a single descriptive string.
+> - DTO validation failures come out of the one pipe the app installs
+>   (`src/common/errors/validation.pipe.ts:77-93`) as a single string —
+>   `"Please correct the highlighted fields."` — with the per-field detail in
+>   `details.fields`, each entry `{ field, messages[] }` where `field` is the property
+>   path (`user.address.city` for a nested DTO). The messages are UI-safe rewrites of
+>   class-validator's text, not the raw constraint strings they used to be
+>   (`validation.pipe.ts:37-57`). Unknown extra input keys are rejected the same way
+>   (`forbidNonWhitelisted: true`, `validation.pipe.ts:80`), surfacing as
+>   `"This field is not allowed."`.
+> - Every other failure carries the message the raising code wrote, usually a single
+>   string; `details` holds whatever structured context that call site passed
+>   (`src/common/errors/http-errors.ts:10-27`).
+>
+> The `message` type in the interface is `string | string[]`
+> (`src/common/errors/http-errors.ts:17`, `all-exceptions.filter.ts:17`) because the
+> filter forwards an array when every entry in it is a string
+> (`all-exceptions.filter.ts:93-101`). Nothing in `src/` sends one as of 2026-10-18.
+> The last producer was `assertPushableChanges()`, which turned a refused sync batch
+> into an array of `"<field>: <constraint>"` strings *while also* filling
+> `details.fields`, so a client got the same list twice in two shapes. It now builds
+> the pipe's envelope by hand — one summary sentence naming the problem count, and
+> `details.fields` whose messages are passed through the pipe's own `toSentence()`
+> (`src/common/errors/validation.pipe.ts:22-34`,
+> `src/sync/change-payload.validator.ts:1669-1701`) — because a push body has already
+> cleared the pipe by the time it runs, and rendering a `400` should not depend on
+> which of the two producers wrote it. The union stays: it is the filter's contract,
+> not a survey of call sites.
 
 ### Standard Error Codes
 
@@ -68,14 +99,65 @@ All error responses return standard HTTP status codes and a consistent JSON payl
   | `409 Conflict`              | `CONFLICT`         | Resource collision (e.g. duplicate email, unique constraint)                                                                                                                                                                                                                                                           |
   | `429 Too Many Requests`     | `RATE_LIMITED`     | Throttler quota exceeded for the client or user                                                                                                                                                                                                                                                                        |
   | `500 Internal Server Error` | `INTERNAL_ERROR`   | Unhandled server or database exception                                                                                                                                                                                                                                                                                 |
-  | `503 Service Unavailable`   | `INTERNAL_ERROR`   | The filter has no 503 branch — anything `>= 500` is reported as `INTERNAL_ERROR` (`all-exceptions.filter.ts:30-46`). The `503` you see from `/health` and `/health/ready` is a different answer: those handlers write the Terminus-shaped body directly (`health.controller.ts:18-26`), so it carries no `code` at all |
+  | `503 Service Unavailable`   | `TRANSACTION_TIMEOUT`, `VAULT_PEPPER_KEY_UNAVAILABLE` or `INTERNAL_ERROR` | Two paths set a 503 and a code together: Prisma `P2028` becomes `TRANSACTION_TIMEOUT` with `details.retryable: true` (`all-exceptions.filter.ts:142-148`), and a vault sealed under a pepper key this process does not hold becomes `VAULT_PEPPER_KEY_UNAVAILABLE` (`src/vault/services/vault-settings.service.ts:774-783`). Everything else `>= 500` is `INTERNAL_ERROR` (`:59-61`). The `503` you see from `/health` and `/health/ready` is a different answer again: those handlers write their body directly (`src/health/health.controller.ts:18-32,48-54`), so it carries no `code` at all |
 
-Beyond these coarse keys, a route can return a specific code in the same `code`
-field. `SESSION_REVOKED` (401) is one: every authenticated request looks the
-`sessionId` claim in the bearer token up against its `Session` row, and a row
-that is missing, carries a `revokedAt`, or belongs to a different account fails
-here. Treat it as signed out — the refresh token behind it is dead as well.
-Tokens that carry no `sessionId` predate the claim and are not checked.
+Status and code are independent facts: when the raised exception carries a `code`
+of its own, the filter forwards that instead of the status-derived one
+(`src/common/error-handling/filters/all-exceptions.filter.ts:89-92`). A `401` can
+arrive as `RATE_LIMITED` and a `503` can arrive with a name of its own, so a
+client branches on `code`. Every member of `src/common/errors/error-code.ts`
+(the enum is the authority; it declares them in five groups), with the status it
+actually reaches a client and a representative raise site:
+
+| Code | Status | Where it comes from |
+| ------------------------------ | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VALIDATION_ERROR`             | 400           | the one `ValidationPipe` the app installs (`src/common/errors/validation.pipe.ts:85-92`), plus direct `badRequest()` calls such as `AuthService.confirmEmailVerification()` and `SyncService` |
+| `INVALID_DATE`                 | —             | **declared, never raised** in `src/`. A bad date is refused as `VALIDATION_ERROR` by the DTO's own `@IsDateString()` constraint (`error-code.ts:12`) |
+| `INVALID_CREDENTIALS`          | 401           | `AuthService.login()` — no auth record for the identifier, and a failed `argon2.verify`. Also OAuth's unknown-provider case |
+| `EMAIL_NOT_VERIFIED`           | 401           | `AuthService.login()` when `EMAIL_VERIFY_ENABLED` is on and the row has no `emailVerifiedAt` |
+| `EMAIL_ALREADY_REGISTERED`     | 409           | `AuthService.register()` (pre-check and `P2002` catch) and `AuthService.loginWithOAuth()` when the email is taken by another provider |
+| `ACCOUNT_DISABLED`             | 401           | `AuthService.login()`, `AuthService.loginWithOAuth()`, and every authenticated request via `JwtStrategy.validate()` (`src/auth/strategies/jwt.strategy.ts:54-60`) |
+| `TOKEN_INVALID`                | 401, and 403 once | 401 from `JwtStrategy.validate()` (`src/auth/strategies/jwt.strategy.ts:46-52`, a non-access token) and from `AuthService.refreshTokens()` / the OTP paths. The single 403 is `src/auth/auth.controller.ts:249-253`: a refresh that rode on the ambient cookie without the barrier header |
+| `TOKEN_EXPIRED`                | —             | **never raised in an HTTP body** (`error-code.ts:20`). The sync WebSocket emits the same string as a `subCode` on an error frame (`src/sync/sync.gateway.ts:180`), which is not this envelope |
+| `SESSION_REVOKED`              | 401           | `JwtStrategy.validate()` (`src/auth/strategies/jwt.strategy.ts:62-75`) |
+| `OTP_INVALID`                  | 400 and 401   | 400 for `/auth/verify-email/confirm` and `/auth/reset-password` (`AuthService`); 401 for `/vault/recovery/verify` (`src/vault/services/vault-settings.service.ts:534-539`) |
+| `RATE_LIMITED`                 | 429 and 401   | 429 is only ever the throttler (`all-exceptions.filter.ts:57-58`). The 401s are the attempt counters the services keep themselves: five bad passwords open a 15-minute account lock (`AuthService.login()`, and the same shape in `verifyMfaLogin()`), and the vault unlock cooldown (`src/vault/services/vault-settings.service.ts:322-327`, which adds `details.retryInSeconds`). Read the `code`, not the status: a 401 here means "stop trying for a while", not "wrong password" |
+| `MFA_CHALLENGE_INVALID`        | 401           | `AuthService.verifyMfaToken()` — expired, mis-signed, or wrong-purpose challenge token |
+| `MFA_CODE_INVALID`             | 401           | `AuthService.completeMfaLogin()` — bad TOTP, or the row has no secret |
+| `PASSKEY_NOT_REGISTERED`      | —             | **declared, never raised** (`error-code.ts:30`). `/auth/passkeys/*` answers `PASSKEY_CHALLENGE_INVALID` or `NOT_FOUND` instead |
+| `PASSKEY_CHALLENGE_INVALID`    | 400           | `PasskeysService.verifyRegistration()` — `src/auth/passkeys/passkeys.service.ts:94-97,109-112,116-119,123-126` |
+| `VAULT_NOT_CONFIGURED`         | 404           | `vaultNotConfigured()` (`src/vault/services/vault-settings.service.ts:737-743`), used by every vault method when no row exists |
+| `VAULT_ALREADY_CONFIGURED`     | 409           | `VaultSettingsService.setupVault()` (`src/vault/services/vault-settings.service.ts:206-210`) |
+| `VAULT_MASTER_KEY_MISMATCH`    | 401           | `VaultSettingsService.unlockVault()` (`src/vault/services/vault-settings.service.ts:372-376`) — the verifier digest did not match. **This** is the wrong-password answer |
+| `VAULT_RECOVERY_NOT_PENDING`   | 401 and 409   | 401 when no recovery window is open (`src/vault/services/vault-settings.service.ts:599-603,619-623`); 409 when `completeRecovery()` matched zero rows because another request moved the window (`:662-667`) |
+| `VAULT_RECOVERY_UNAVAILABLE`   | 400           | `VaultSettingsService.requestRecovery()` / `verifyRecoveryOtp()` and `noRecoveryMaterialStored()` (`src/vault/services/vault-settings.service.ts:456-459,491-495,509-513,551-555,745-750`) |
+| `VAULT_PEPPER_KEY_UNAVAILABLE` | **503**       | `pepperKeyUnavailable()` (`src/vault/services/vault-settings.service.ts:774-783`), raised from `findSealingKey()` when the row's pepper stamp names a key this process does not hold. It is a 503 and not a 401 on purpose: nothing the person typed is wrong and the vault is intact, so a client that retried the master password against it would walk them into the cooldown above and lock a healthy vault out of itself. `details.pepperKeyId` names the stamp, which is a label and not a secret |
+| `DEVICE_NOT_REGISTERED`       | 404           | `DevicesService` (`src/devices/devices.service.ts:39-43`) and `SyncService` (`src/sync/sync.service.ts:475-479`) |
+| `DEVICE_REVOKED`               | 403           | `src/sync/sync.service.ts:465-469` |
+| `SYNC_PUSH_REJECTED`           | 400           | `assertPushableChanges()` (`src/sync/change-payload.validator.ts:1689-1701`) — a refused batch: `message` is one summary sentence naming the problem count, every problem is in `details.fields` |
+| `NOT_FOUND`                    | 404           | any `notFound()` call, e.g. `src/auth/passkeys/passkeys.service.ts:57`, and Prisma `P2025` (`all-exceptions.filter.ts:137-141`) |
+| `ALREADY_EXISTS`               | 409           | `src/auth/passkeys/passkeys.service.ts:138-141` and Prisma `P2002` (`all-exceptions.filter.ts:125-129`) |
+| `INTERNAL_ERROR`               | 500           | the default for anything unhandled (`all-exceptions.filter.ts:79-80`) |
+
+Three members are declared and reached by no code path: `INVALID_DATE`,
+`TOKEN_EXPIRED` (over HTTP) and `PASSKEY_NOT_REGISTERED`
+(`src/common/errors/error-code.ts:12,20,30`). Keeping a branch for each costs
+nothing and the names are stable, but nothing in this build will send one.
+
+Three more come from Prisma rather than from the enum, because the filter writes
+them as literals: `TRANSACTION_TIMEOUT` (503, `details.retryable: true`,
+`all-exceptions.filter.ts:142-148`), `TRANSACTION_CONFLICT` (409, same details,
+`:149-154`) and `CONFLICT` for a failed foreign key (`:131-136`). And any status
+below 500 that matches none of the coarse cases above is reported as the literal
+`ERROR` (`:59-61`) — no route in this build produces one today.
+
+`SESSION_REVOKED` deserves the longer explanation: every authenticated request
+looks the `sessionId` claim in the bearer token up against its `Session` row, and
+a row that is missing, carries a `revokedAt`, or belongs to a different account
+fails here. Treat it as signed out — the refresh token behind it is dead as well.
+A token that carries **no** `sessionId` claim fails the same way rather than being
+skipped (`src/auth/strategies/jwt.strategy.ts:67-70`): the strategy would otherwise
+be a logout bypass for every token minted before the claim existed.
 
 `/sync` answers two more, and they are the reason a device stops syncing rather
 than the reason it fails to sign in:
@@ -98,12 +180,9 @@ Both are raised before any change is read, so a refused sync writes nothing.
 > **How the `Rate Limit` lines below actually apply.** Three things qualify every one of
 > them, and they are stated once here rather than repeated on 40 endpoints:
 >
-> 1. **Throttling is off by default outside production.** `CustomThrottlerGuard.shouldSkip()`
->    stands the limits down when `APP_ENV=development`, `NODE_ENV=test`,
->    `DISABLE_RATE_LIMITING=true` or `RATE_LIMIT_ENABLED=false` — and `development` is the
->    default for `APP_ENV`. So on a local server every limit in this document reads as
->    unlimited unless you set `RATE_LIMIT_ENABLED=true`, which is also how you get to test
->    them before production. The `x-skip-throttle` / `x-bypass-rate-limit` headers do nothing
+> 1. **Throttling is on by default.** `CustomThrottlerGuard.shouldSkip()` stands the limits
+>    down only when `NODE_ENV=test`, `DISABLE_RATE_LIMITING=true` or
+>    `RATE_LIMIT_ENABLED=false`. The `x-skip-throttle` / `x-bypass-rate-limit` headers do nothing
 >    unless an operator sets `RATE_LIMIT_HEADER_BYPASS=true`, and never under `APP_ENV=production`.
 > 2. **The bucket is an IP, not a user.** `getTracker()` prefers `user:<req.user.id>` and
 >    falls back to `ip:<first x-forwarded-for value>` — but this guard is registered as the
@@ -111,12 +190,36 @@ Both are raised before any change is read, so a refused sync writes nothing.
 >    `JwtAuthGuard`, so `req.user` is always unset when the key is built. Every limit is
 >    therefore per-IP for authenticated traffic too, which is why one office NAT divides one
 >    account's login budget. See `MODULES_GUIDE.md`.
-> 3. **Counters live in Redis, and Redis is not in the schema.** The store is
->    `RedisThrottlerStorage` over `configurationService.redisUrl`, whose `REDIS_URL` is read
->    with a `redis://localhost:6379` fallback and is declared in neither Joi schema
->    (`src/app/app.module.ts:42-105`, `src/worker.module.ts`) nor `.env.example`. It also
->    falls back to the in-memory store when Redis is unreachable, so limits restart with the
->    process instead of failing closed.
+> 3. **Counters live in Redis, and an outage narrows them to one process.** The store is
+>    `RedisThrottlerStorage` over `configurationService.redisUrl`. `REDIS_URL` is in
+>    `.env.example:44` and in the worker schema (`src/worker.module.ts:40-46` — optional, and
+>    with **no `.default()`**, because `@nestjs/config` writes every schema default back into
+>    `process.env` and a default there would answer the "was it actually declared?" test with
+>    the default and switch the gate off forever) but not the API's, and the `redisUrl` getter
+>    itself substitutes `redis://localhost:6379` when nobody set it
+>    (`src/config/configuration.service.ts:533-541`) — which is why the boot gate requires a
+>    *declared* value everywhere except development and a test run (`:305-320`), rather than
+>    trusting the fallback. When a Redis command throws, `increment()` counts the hit in
+>    `LocalThrottlerWindow` instead (`src/common/throttler/redis-throttler.storage.ts:116-132`,
+>    `src/common/throttler/local-throttler.window.ts:55-99`), so the limit and its block still
+>    hold — per process, forgotten at a restart, and given up only when that bounded table can
+>    reclaim nothing (`:48-54`, `:111-131`). The degradation is reported at error level,
+>    coalesced to one line per 30 seconds with the tallies separated into "counted in memory"
+>    and "permitted with no counter at all" (`redis-throttler.storage.ts:238-272`), never as a
+>    per-request warn.
+> 4. **What a refusal actually looks like.** `CustomThrottlerGuard` extends the library
+>    `ThrottlerGuard` (`src/common/guards/custom-throttler.guard.ts:5`) and overrides only
+>    `shouldSkip()` and `getTracker()`, so the refusal path is the library's: the body is the
+>    standard envelope with `statusCode: 429`, `code: "RATE_LIMITED"` — the status-derived
+>    literal, since a throttler rejection carries no `code` of its own
+>    (`src/common/error-handling/filters/all-exceptions.filter.ts:57-58`) — and one message
+>    string, `"ThrottlerException: Too Many Requests"`. There is no `details` object and no
+>    `retryAfter` field in the body: the wait is a header. `Retry-After` holds the whole-number
+>    seconds the block lasts, and it is the only response header set on the refusal (asserted
+>    against the guard in `src/common/guards/custom-throttler.guard.spec.ts:409`); the
+>    `X-RateLimit-Limit` / `-Remaining` / `-Reset` trio is written on requests that were
+>    **allowed**, so it is a remaining-budget readout, not a way to detect a limit. A client
+>    that sleeps on the body alone retries immediately and burns the window again.
 >
 > Routes with **no** `@Throttle()` decorator — `POST /auth/logout`, `POST /auth/mfa/generate`,
 > `POST /auth/mfa/enable`, `POST /auth/mfa/disable`, and everything under `/users`, `/devices`,
@@ -126,17 +229,20 @@ Both are raised before any change is read, so a refused sync writes nothing.
 >
 > **Token lifetimes are configuration, and one number backs every claim about them.**
 > `JWT_ACCESS_EXPIRATION` (default `15m`) and `JWT_REFRESH_EXPIRATION` (default `7d`) are read
-> through `ConfigurationService` (`src/config/configuration.service.ts:206`, `:214`) and parsed to
-> seconds once by `parseTokenLifetime()` (`:51`). That seconds value is what every consumer uses:
-> both `sign()` calls (`src/auth/auth.service.ts:1351`, `:1356`), the `expiresIn` a client counts
-> down (`:1362`), the `Session.accessExpiresAt` / `refreshExpiresAt` columns written at login
-> (`:1386`, `:1389`) and again at rotation (`:772`, `:775`), the refresh cookie's `maxAge`
-> (`src/auth/auth.controller.ts:68`) and the `JwtModule` default (`src/auth/auth.module.ts:34`).
+> through `ConfigurationService` (`src/config/configuration.service.ts:567-568`, `:575-576`) and
+> turned into seconds by `parseTokenLifetime()` (`:219`) — once at boot, so an unparseable value
+> stops the process instead of surfacing as a 500 on the first sign-in (`:302-303`), and again on
+> every read of `jwtAccessExpiresInSeconds` / `jwtRefreshExpiresInSeconds` (`:591-603`), which is
+> why changing either variable needs a restart and nothing more. That seconds value is what every consumer uses:
+> both `sign()` calls (`src/auth/auth.service.ts:1876`, `:1884`), the `expiresIn` a client counts
+> down (`:1895`), the `Session.accessExpiresAt` / `refreshExpiresAt` columns written at login
+> (`:1918`, `:1921`) and again at rotation (`src/auth/auth.service.ts:998`, `:1001`), the refresh cookie's `maxAge`
+> (`src/auth/auth.controller.ts:93`) and the `JwtModule` default (`src/auth/auth.module.ts:35`).
 > Until 2026-09-27 all of those were separate literals and the two variables reached none of them;
 > if you are reading an older copy of this document, that is why it said setting them changed
 > nothing. Defaults are unchanged, so the 15-minute / 7-day figures below are still the behaviour
 > of an unconfigured deployment. A value this parser cannot read — `1w` is the likely one, since
-> `jsonwebtoken` has no week — aborts the boot (`:109`) rather than surfacing as a 500 on someone's
+> `jsonwebtoken` has no week — aborts the boot (`:302-303`) rather than surfacing as a 500 on someone's
 > first sign-in. The MFA challenge token stays a literal `"5m"` and the passkey challenge TTL is
 > likewise not configurable; neither has an environment variable.
 
@@ -193,9 +299,9 @@ Both are raised before any change is read, so a refused sync writes nothing.
 
 #### `GET /metrics`
 
-- **Access**: `@Public()`
+- **Access**: `MetricsScrapeGuard` alone (`src/common/metrics/metrics.controller.ts:13-18`) — deliberately *not* the `JwtAuthGuard, AdminGuard` pair every other admin surface stacks, because guards run in declaration order and that pair answers `401` on the missing bearer session before `AdminGuard`'s `x-admin-secret` branch is reached, which is itself behind a `!request.user` refusal (`src/common/metrics/metrics-scrape.guard.ts:23-51`). The guard takes both presentations itself and fails closed in this order (`:60-87`): the configured `ADMIN_SECRET` presented complete as `Authorization: Bearer <secret>` (the shape Prometheus's `authorization: { type: Bearer, credentials_file }` emits) or as `x-admin-secret`, compared with `crypto.timingSafeEqual` over the whole value (`:129-146`); otherwise any non-empty `Authorization` is delegated to the real `JwtAuthGuard` then the real `AdminGuard` on the same context, so a signed-in admin still goes through `JwtStrategy.validate()`'s session-revocation checks; otherwise `401`.
 - **Purpose**: Prometheus scrape endpoint exposing real-time operational metrics as `text/plain; version=0.0.4`.
-- **Response**: `200 OK` (`text/plain; version=0.0.4`)
+- **Responses**: `200 OK` (`text/plain; version=0.0.4`). `401 Unauthorized` — `{"code": "UNAUTHORIZED", "message": "Authentication token missing or invalid"}`, the code the filter derives from the status because the exception carries none (`src/common/metrics/metrics-scrape.guard.ts:12-21`, asserted at `:522-547` of its spec) — when the caller presents neither an admin session nor the shared secret, when the bearer value is only a prefix of the secret, or when `ADMIN_SECRET` is unset/blank/under 32 characters (`ConfigurationService.adminSecret` returns `undefined`, which disables that branch outright) and no admin session is offered. It is a 401 and not a 403 on purpose: nothing about an anonymous caller was established enough to be *refused*. `403 FORBIDDEN` appears only on the delegated human path — authenticated, not an admin.
 
 #### `GET /info`
 
@@ -236,32 +342,22 @@ Both are raised before any change is read, so a refused sync writes nothing.
 #### `POST /auth/register`
 
 - **Access**: `@Public()`
-- **Rate Limit**: 3 per hour (`@Throttle({ default: { limit: 3, ttl: 3600000 } })`, `src/auth/auth.controller.ts:65`)
+- **Rate Limit**: 3 per hour (`@Throttle({ default: { limit: 3, ttl: 3600000 } })`, `src/auth/auth.controller.ts:98`)
 - **Body**: `RegisterDto` — `email` (required), `password` (required), `displayName?`, `locale?` (default `en-US`), `timezone?` (default `UTC`). The DTO is `RegisterDto`, not a `CreateUserDto`.
-- **What it does** (`AuthService.register`, `src/auth/auth.service.ts:62-150`): rejects a duplicate email with `409 EMAIL_ALREADY_REGISTERED` (and maps Prisma's `P2002` to the same answer, so the unique index — not the pre-check — is the real guard), then in one `$transaction` creates the `User` (`status: "ACTIVE"`, `displayName` or `null`), an `Authentication` row of type `EMAIL_PASSWORD` with the **Argon2** hash and `emailVerified: false`, and a `Device` row named `"Primary Web/Client Device"` on platform `WEB` with an empty `publicKey`. It then issues a full session, fires `requestEmailVerification()` without awaiting it (a mail failure only logs), and records `ACCOUNT_CREATED`.
-- **Response**: `201 Created` — `AuthResponseDto`. Registration **logs you in**: a live access/refresh pair comes back in the body.
-  ```json
-  {
-    "user": {
-      "id": "123e4567-e89b-12d3-a456-426614174000",
-      "email": "user@example.com",
-      "displayName": "Alex Mercer",
-      "locale": "en-US",
-      "timezone": "UTC",
-      "status": "ACTIVE",
-      "createdAt": "2026-09-27T10:00:00.000Z"
-    },
-    "tokens": {
-      "accessToken": "eyJhbG...",
-      "refreshToken": "eyJhbG...",
-      "expiresIn": 900
-    },
-    "sessionId": "123e4567-e89b-12d3-a456-426614174000",
-    "deviceId": "123e4567-e89b-12d3-a456-426614174000"
-  }
-  ```
-  There is no `isEmailVerified` and no `mfaEnabled` in this response — verification state lives on the `Authentication` row, which this payload never touches. No `refresh_token` cookie is set here (the handler takes no `@Res`), so the refresh token exists only in the body.
-- **`status: "ACTIVE"` with `emailVerified: false`** is the property that makes P0-10 in the improvement tracker reachable: nothing in the registration path requires the address to be verified before the account can authenticate, and the address is chosen by the caller.
+- **What it does** (`AuthService.register`): rejects a duplicate email with `409 EMAIL_ALREADY_REGISTERED`, then creates the user, Argon2 password authentication row marked unverified, and device row in one transaction. It requests an email-verification OTP and records `ACCOUNT_CREATED`.
+- **Response**: `201 Created` — `AuthResponseDto` containing the `user` only while `EMAIL_VERIFY_ENABLED=true` (the default). The caller must verify the mailbox and then sign in. `EMAIL_VERIFY_ENABLED=false` is an isolated local/test opt-out which retains the legacy immediate-session response.
+  There is no `isEmailVerified` or `mfaEnabled` in this response. The cookie follows the
+  **session**, not the route: `register()` calls `setRefreshTokenCookie(res, result.tokens?.refreshToken)`
+  (`src/auth/auth.controller.ts:108-120`), and while email verification is required
+  `AuthService.register()` issues no session at all (`src/auth/auth.service.ts:171-175`), so
+  `tokens` is absent and the helper returns at `:81` without setting anything — that is the
+  only case in which registration sets no cookie. With `EMAIL_VERIFY_ENABLED=false` the same
+  call does write the `refresh_token` cookie, because that response really did open a session.
+  In that case the body still carries `tokens.refreshToken`, but a browser cannot read it
+  back from script: the copy the web session refreshes with is the `httpOnly` cookie, so a
+  web client may ignore `tokens.refreshToken` entirely. `tokens.accessToken` is the opposite
+  — it is the bearer value the client must keep in memory and send itself.
+- An unverified account cannot authenticate while email verification is enabled. `ADMIN_EMAILS` additionally requires this verified state; prefer `ADMIN_USER_IDS` for administrator provisioning.
 
 #### `POST /auth/login`
 
@@ -270,10 +366,10 @@ Both are raised before any change is read, so a refused sync writes nothing.
 - **Body**: `LoginDto` — `email`, `password`, and optionally `deviceId`, `deviceName`, `platform` (a `Platform` enum value such as `MACOS`, `LINUX`, `ANDROID`, `WEB`), `appVersion`, `publicKey`.
 - **Response**: `200 OK`
   - **MFA not enabled**: full `AuthResponseDto` (`user`, `tokens`, `sessionId`, `deviceId`), and `setRefreshTokenCookie()` mirrors the refresh token into a cookie. The failed-attempt counter is reset here.
-  - **MFA enabled**: `200` with `{ mfaRequired: true, mfaToken }` and **no** `user`/`tokens` — `tokens` is absent, so `setRefreshTokenCookie()` returns early (`auth.controller.ts:53-54`) and no cookie is set. The `mfaToken` is a separate JWT signed with the **access** secret, `purpose: "MFA_CHALLENGE"`, `expiresIn: "5m"` (`auth.service.ts:337-344`); exchange it at `POST /auth/mfa/verify`.
+  - **MFA enabled**: `200` with `{ mfaRequired: true, mfaToken }` and **no** `user`/`tokens` — `tokens` is absent, so `setRefreshTokenCookie()` returns at its first line (`src/auth/auth.controller.ts:81`) and no cookie is set. The `mfaToken` is a separate JWT: `purpose: "MFA_CHALLENGE"`, `type: "mfa_challenge"`, `expiresIn: "5m"`, and signed with `ConfigurationService.jwtMfaSecret` — **not** the access secret (`src/auth/auth.service.ts:411-420`, and the same shape in `loginWithOAuth()` at `:820-828`; the secret is `JWT_MFA_SECRET`, or a domain-separated HMAC of `JWT_ACCESS_SECRET` when that is unset, `src/config/configuration.service.ts:545-552`). Exchange it at `POST /auth/mfa/verify`.
   - **Wrong credentials**: `401 INVALID_CREDENTIALS`, after incrementing `failedLoginAttempts` and writing a `LOGIN_FAILURE` audit row with the caller's IP and user-agent. A nonexistent email and a wrong password answer identically, but a `409` for a locked or suspended account is distinguishable, which leaks account state.
-- **Cookie attributes** (`src/auth/auth.controller.ts:53-62`) — `name=refresh_token`, `httpOnly: true`, `sameSite: "strict"`, `path: "/auth/refresh"`, `maxAge: 7 days`, and `secure: process.env.APP_ENV === "production"`. Two consequences worth stating plainly: under `APP_ENV=staging` the cookie is **not** `Secure`, and reading `process.env` directly here bypasses `ConfigurationService`, so it is the one place `APP_ENV` is consulted as a raw variable.
-  - When MFA is enabled: Returns `{ "mfaRequired": true, "tempToken": "<TICKET_JWT>" }`.
+- **Cookie attributes** — set by `setRefreshTokenCookie()` (`src/auth/auth.controller.ts:80-95`): `name=refresh_token`, `httpOnly: true`, `secure: true` (pinned, not environment-derived), `sameSite: "strict"`, `path: "/auth/refresh"`, and a `maxAge` matching the configured refresh lifetime. The `strict` value is a deployment constraint, not a preference — see the SameSite note under `POST /auth/refresh` for what breaks when the web app and this API are not on one registrable domain.
+  - When MFA is enabled the answer is `{ "mfaRequired": true, "mfaToken": "<CHALLENGE_JWT>" }` — the field is `mfaToken`, on both `AuthResponseDto` (`src/auth/dto/auth-response.dto.ts:61-64`) and the `VerifyMfaLoginDto` that spends it (`src/auth/dto/mfa.dto.ts:15-19`). There is no `tempToken` in this build; a client sending that name gets `400 VALIDATION_ERROR` on both counts (missing `mfaToken`, unknown extra key).
 - **Lockout Defense**:
   - 5 consecutive invalid password attempts automatically locks the account for 15 minutes.
   - Subsequent requests during lockout fail with `401 Unauthorized`: `"Account is temporarily locked due to multiple failed login attempts. Please try again in X minute(s)."`.
@@ -306,25 +402,34 @@ Both are raised before any change is read, so a refused sync writes nothing.
 #### `POST /auth/refresh`
 
 - **Access**: `@Public()`
-- **Rate Limit**: 10 per minute
-- **Input**: `refreshToken` in the body **or** the `refresh_token` httpOnly cookie (the cookie wins; the body exists for non-browser clients). `RefreshTokenDto.refreshToken` is optional, so `{}` reaches the handler and is answered from there.
-- **Response**: `200 OK` — a rotated access/refresh pair, and `refresh_token` re-set as a cookie.
-- **What actually decides acceptance** (`AuthService.refreshTokens`, `src/auth/auth.service.ts:734-783`): the presented string is verified against `JWT_REFRESH_SECRET` — so an **access** token is rejected here, since it is signed with a different secret; the two secrets must stay different, and `.env.example` ships distinct placeholders for exactly this reason. Then a `Session` row must exist whose stored `refreshToken` equals the presented token verbatim, with `revokedAt` unset, `refreshExpiresAt` in the future and `userId === payload.sub`. Anything else is the same `401 TOKEN_INVALID "Invalid or expired refresh token"`.
-- **Rotation**: a brand-new pair is minted and written over the row's `accessToken` / `refreshToken`, with `accessExpiresAt` and `refreshExpiresAt` recomputed from the same parsed `JWT_ACCESS_EXPIRATION` / `JWT_REFRESH_EXPIRATION` values the new tokens were signed with (`src/auth/auth.service.ts:772`, `:775`) — so the row and the credentials cannot drift, and the `15 min` / `7 days` figures hold only because those are the defaults.
-- **Two properties worth knowing before you rely on this route**: the session document keeps the **raw** JWTs, so any read of the `Session` collection yields live credentials (backups, `mongosh`, a leaked read replica) until the row is overwritten; and old-token reuse is _prevented_ by the lookup but not _detected_ — a stolen-and-replayed refresh token that arrives after the legitimate rotation simply gets `401`, with no alert, no session-family revocation and nothing in the audit log.
+- **Rate Limit**: 10 per minute (`@Throttle({ default: { limit: 10, ttl: 60000 } })`, `src/auth/auth.controller.ts:215`)
+- **Input**: `refreshToken` in the body **or** the `refresh_token` httpOnly cookie. `RefreshTokenDto.refreshToken` is optional, so `{}` reaches the handler and is answered from there. **The body wins**: `const refreshToken = dto.refreshToken || cookieToken` (`src/auth/auth.controller.ts:240`), so a client that sends both is served from the body and the ambient cookie is not consulted. The body form is the native path; the cookie is the browser path.
+- **CSRF barrier — the one thing a browser integrator must send**: a **cookie-only** refresh has to carry `x-client-version` with a non-empty value. `REFRESH_REQUEST_HEADER = "x-client-version"` (`src/auth/dto/refresh-token.dto.ts:12`), checked by `hasRefreshBarrier()` (`src/auth/auth.controller.ts:264-271`) and enforced at `:248-253`, which throws `forbidden(ErrorCode.TOKEN_INVALID, "Refresh with the ambient cookie requires the x-client-version header")` — a `403`. A body token needs nothing else. The reasoning is the comment at `:242-247`: a cookie proves nothing, because the browser attaches it to a cross-site form post on its own, and only `SameSite=strict` — a deployment property an operator can change by accident — stands between that post and a minted access token. A foreign page cannot add a custom header, so the header is the proof that survived.
+- **Responses**, and the two bodies a reference needs:
+  - `200 OK` — a rotated access/refresh pair, and `refresh_token` re-set as a cookie for the new refresh token (`:260`).
+  - `401` `{"code":"TOKEN_INVALID","message":"Refresh token is required"}` when neither a body token nor a usable cookie is present (`:255-257`).
+  - `403` `{"code":"TOKEN_INVALID","message":"Refresh with the ambient cookie requires the x-client-version header"}` (`:248-253`).
+  - `401` `{"code":"TOKEN_INVALID","message":"Invalid or expired refresh token"}` for every credential failure below (`src/auth/auth.service.ts:899-904`, `:960-990`).
+
+  `unauthorized()` and `forbidden()` are the same helper shape with a different Nest exception (`src/common/errors/http-errors.ts:45-59`), so the `code` is identical and only the status separates "no credential here" from "credential here but the barrier is missing". The filter forwards that in-body `code` instead of the status-derived one (`src/common/error-handling/filters/all-exceptions.filter.ts:89-92`): branch on the status first here.
+- **A malformed cookie is a 401, not a 500.** The `Cookie` header is attacker-controlled bytes on an unauthenticated route, and `extractCookie()` (`src/auth/auth.controller.ts:66-78`) wraps its `decodeURIComponent` in a `try`: a value that cannot be percent-decoded — `refresh_token=%` is enough — is treated as **absent**, so the request falls through to the plain `"Refresh token is required"` 401 rather than leaving the handler as a 500 or as a barrier failure with raw bytes handed to `refreshTokens`. `req.cookies` is consulted first only for a deployment that adds `cookie-parser`; nothing in this app registers it, so the header parse is the path a browser's cookie actually travels (`:229-239`).
+- **Deployment consequence the operator has to know before the first deploy**: `setRefreshTokenCookie()` (`src/auth/auth.controller.ts:80-95`) pins `httpOnly`, `secure: true` unconditionally, `sameSite: "strict"`, `path: "/auth/refresh"` and a `maxAge` of `JWT_REFRESH_EXPIRATION`. `SameSite=strict` means **the web app and this API must share one registrable domain** (`app.example.com` beside `api.example.com`). Under two different registrable domains (`app.example.com` against a `.railway.app` / `.onrender.com` API host) the browser never attaches the cookie, and the failure is not loud: sign-in works, the access token works for its first 15 minutes, and the first refresh is a `401 "Refresh token is required"` that reads as an expired password. CORS has to carry credentials for the same origin pair (`src/main.ts:102`, `credentials: !allowsWildcard` — a wildcard `CORS_ORIGIN`/`CORS_ORIGINS` deliberately never does).
+- **What actually decides acceptance** (`AuthService.refreshTokens`, `src/auth/auth.service.ts:895-1056`): the presented string is verified against `JWT_REFRESH_SECRET` — so an **access** token is rejected here, since it is signed with a different secret; the two secrets must stay different, and `.env.example` ships distinct placeholders for exactly this reason. Then a `Session` row must exist whose stored `refreshToken` equals `hmac-sha256(JWT_REFRESH_SECRET, presented)` (`hashRefreshToken()` `:91-96`, looked up at `:944-948`), with one deliberate compatibility read of the raw value so rows written before the digest landed still rotate and get rewritten (`:950-957`). Then `revokedAt` unset, `refreshExpiresAt` in the future and `userId === payload.sub` (`:970-978`), and the account must not be blocked or soft-deleted (`:985-990`) — a suspended account gets the same opaque 401 rather than the word "suspended", because this route is unauthenticated.
+- **Rotation**: a brand-new pair is minted and written over the row's `accessToken` / `refreshToken`, with `accessExpiresAt` and `refreshExpiresAt` recomputed from the same parsed `JWT_ACCESS_EXPIRATION` / `JWT_REFRESH_EXPIRATION` values the new tokens were signed with (`src/auth/auth.service.ts:998`, `:1001`, written at `:1005-1013`) — so the row and the credentials cannot drift, and the `15 min` / `7 days` figures hold only because those are the defaults.
+- **Storage safety and reuse**: newly created and rotated sessions store only the HMAC digest above; the legacy required `accessToken` column holds the non-secret session id (`src/auth/auth.service.ts:1006-1012`). Reuse is then answered in two stages, not one: a token presented again within the 30-second rotation grace window replays the pair that was already minted for it — concurrent refreshes and a lost response are normal traffic, and the grace record is shared rather than per-process (`REFRESH_ROTATION_GRACE_MS` `:60`, read at `:913-940`, written at `:1020-1028`) — while the same credential turning up **outside** that window matches no row, and `reportConfirmedRefreshTokenReuse()` (`:1068-1114`) logs a confirmed-reuse warning and revokes every unrevoked `Session` for that account (`:1110-1114`) before the caller gets the opaque 401. There is no family/lineage column: rotation rewrites the same row, so the revocation is scoped per account (`:1104-1109`).
 
 #### `POST /auth/logout`
 
 - **Access**: `JwtAuthGuard`
 - **Rate Limit**: none on the route — the global default (100 per 60 s) applies.
-- **Response**: `200 OK` `{"success": true}` — sets `revokedAt` on the session the calling token names and clears the `refresh_token` cookie. From the next request on, that token fails with `401 SESSION_REVOKED`, because `JwtStrategy.validate()` re-reads the session row. **This does not affect an open `/sync` WebSocket** — the gateway authenticates only at handshake and never re-checks the session.
+- **Response**: `200 OK` `{"success": true}` — sets `revokedAt` on the session named by the calling token's `sessionId` claim (`AuthService.logout()`, `src/auth/auth.service.ts:1116-1129`, an `updateMany` on `id: sessionId, revokedAt: null` at `:1121-1124`) and clears the `refresh_token` cookie with the **same** `path` it was written with: `res.clearCookie(REFRESH_COOKIE_NAME, { path: "/auth/refresh" })` (`src/auth/auth.controller.ts:283`, matching `:88`). A clear that did not repeat the `Path` would leave the live cookie in place, so an operator reading a stale session in the browser after a logout is looking at the attribute, not at a server that kept the credential. From the next request on, that token fails with `401 SESSION_REVOKED`, because `JwtStrategy.validate()` re-reads the session row. **This does not affect an open `/sync` WebSocket** — the gateway authenticates only at handshake and never re-checks the session.
 
 #### `POST /auth/verify-email/request`
 
 - **Access**: `@Public()`
 - **Rate Limit**: 3 per minute
 - **Body**: `{ "email": "user@example.com" }`
-- **Response**: `200 OK` `{"message": "Verification email sent if account exists"}` — the same answer whether or not the address is registered, which is the point: the endpoint is an existence oracle otherwise. The OTP is generated and mailed only when `ConfigurationService.emailVerifyEnabled` is on; **`EMAIL_VERIFY_ENABLED` defaults to `false`** in both the Joi schema (`src/app/app.module.ts:64`) and the getter (`src/config/configuration.service.ts:113-117`), so out of the box this route returns the sent-message and sends nothing.
+- **Response**: `200 OK` `{"message": "Verification email sent if account exists"}` — the same answer whether or not the address is registered, preventing enumeration. The OTP is generated and mailed while `EMAIL_VERIFY_ENABLED` is on; it defaults to `true`.
 
 #### `POST /auth/verify-email/confirm`
 
@@ -341,7 +446,7 @@ Both are raised before any change is read, so a refused sync writes nothing.
 - **Access**: `@Public()`
 - **Rate Limit**: 3 per minute
 - **Body**: `{ "email": "user@example.com" }`
-- **Response**: `200 OK` `{"message": "Password reset instructions dispatched"}` — again constant regardless of whether the account exists. Delivery goes through `MailService`, which is `@Optional()` in `AuthModule`; if Resend is not configured the OTP is created but the mail is skipped, and the caller still sees this message.
+- **Response**: `200 OK` `{"message": "Password reset instructions dispatched"}` — again constant regardless of whether the account exists. Delivery goes through `MailService`, which is `@Optional()` in `AuthModule`; if SMTP is not configured the OTP is created but the mail is skipped, and the caller still sees this message.
 
 #### `POST /auth/reset-password`
 
@@ -355,22 +460,22 @@ Both are raised before any change is read, so a refused sync writes nothing.
 
 - **Access**: `JwtAuthGuard`
 - **Purpose**: Generates TOTP secret and QR code for authenticator apps.
-- **Response**: `200 OK`
+- **Response**: `200 OK` — `MfaSecretResponseDto` (`src/auth/dto/mfa.dto.ts:56-71`), returned verbatim by `AuthService.generateMfaSecret()` (`src/auth/auth.service.ts:1469-1473`). Three fields, and neither of the two older names this section used to show exists:
   ```json
   {
     "secret": "JBSWY3DPEHPK3PXP",
-    "qrCodeUrl": "data:image/png;base64,..."
+    "otpauthUrl": "otpauth://totp/Allinone:user@example.com?secret=…&issuer=Allinone",
+    "qrCodeDataUrl": "data:image/png;base64,…"
   }
   ```
 
 #### `POST /auth/mfa/enable`
 
 - **Access**: `JwtAuthGuard`
-- **Body**: `{ "token": "123456" }`
-- **Response**: `200 OK`
+- **Body**: `{ "totpCode": "123456" }` — the field is `totpCode` and it is a required 6-digit string (`EnableMfaDto`, `src/auth/dto/mfa.dto.ts:4-13`). There is no `token` field; a client posting `{ "token": "123456" }` gets a `400` naming both problems.
+- **Response**: `200 OK` — `MfaEnableResponseDto` carries `recoveryCodes` and nothing else (`src/auth/dto/mfa.dto.ts:73-79`, returned at `src/auth/auth.service.ts:1531-1533`). There is no `success` flag to read.
   ```json
   {
-    "success": true,
     "recoveryCodes": ["A1B2-C3D4", "E5F6-G7H8"]
   }
   ```
@@ -378,17 +483,17 @@ Both are raised before any change is read, so a refused sync writes nothing.
 #### `POST /auth/mfa/verify`
 
 - **Access**: `@Public()`
-- **Rate Limit**: 5 per minute
+- **Rate Limit**: 5 per minute (`limit: 5, ttl: 60000`, `src/auth/auth.controller.ts:351`)
 - **Body**:
   ```json
   {
-    "tempToken": "<TICKET_JWT>",
+    "mfaToken": "<MFA_CHALLENGE_JWT>",
     "totpCode": "123456",
     "recoveryCode": "A1B2-C3D4"
   }
   ```
-  _(Supply either `totpCode` or single-use `recoveryCode`)_
-- **Response**: `200 OK` — Full `AuthResponseDto` with session tokens.
+  _(`mfaToken` is required and is the value login returned as `mfaToken`; supply either `totpCode` or the single-use `recoveryCode`. `VerifyMfaLoginDto`, `src/auth/dto/mfa.dto.ts:15-33`.)_
+- **Response**: `200 OK` — Full `AuthResponseDto` with session tokens, and `setRefreshTokenCookie()` mirrors the refresh token into the `refresh_token` cookie like login does (`src/auth/auth.controller.ts:356-369`). A browser client that completes MFA and then refreshes needs that cookie; it is set whether or not the client reads `tokens.refreshToken` out of the body.
 
 #### `POST /auth/mfa/disable`
 
@@ -402,7 +507,7 @@ Both are raised before any change is read, so a refused sync writes nothing.
     "recoveryCode": "A1B2-C3D4"
   }
   ```
-- **Response**: `200 OK` `{"success": true, "message": "MFA disabled"}`
+- **Response**: `200 OK` `{"success": true}` — the handler's declared return type is `{ success: boolean }` (`src/auth/auth.service.ts:1606`, `:1678`); there is no `message` field.
 
 ---
 
@@ -430,12 +535,12 @@ Both are raised before any change is read, so a refused sync writes nothing.
     "deletedAt": null
   }
   ```
-  The shape is `prisma/schema.prisma:17-53`. The account's password verifier is not in this answer — it lives on the separate `Authentication` model (`prisma/schema.prisma:95-110`), which this query never loads.
+  The shape is `prisma/schema.prisma:18-69`. The account's password verifier is not in this answer — it lives on the separate `Authentication` model (`prisma/schema.prisma:95-110`), which this query never loads.
 
 #### `PATCH /users/me`
 
 - **Access**: `JwtAuthGuard`
-- **Body**: `UpdateUserProfileDto` — every field optional; the avatar column is called `avatar`, not `avatarUrl` (`src/users/dto/update-user-profile.dto.ts:3-31`)
+- **Body**: `UpdateUserProfileDto` — every field optional; the avatar column is called `avatar`, not `avatarUrl` (`src/users/dto/update-user-profile.dto.ts:4-36`)
   ```json
   {
     "displayName": "Alex Mercer",
@@ -449,13 +554,13 @@ Both are raised before any change is read, so a refused sync writes nothing.
 #### `POST /users/me/export`
 
 - **Access**: `JwtAuthGuard`
-- **Purpose**: Records a GDPR/CCPA export request. **It enqueues nothing** — `UsersService.requestDataExport` reads the user, writes a log line and returns; no job reaches the `export` queue (`src/users/users.service.ts:110-125`).
+- **Purpose**: Records a GDPR/CCPA export request. **It enqueues nothing** — `UsersService.requestDataExport` reads the user, writes a log line and returns; no job reaches the `export` queue (`src/users/users.service.ts:388-406`).
 - **Response**: `202 Accepted` `{"status": "accepted", "message": "Data export request recorded. Background export delivery is disabled."}`
 
 #### `DELETE /users/me`
 
 - **Access**: `JwtAuthGuard`
-- **Purpose**: Soft deletes account (`status = DELETED`, `deletedAt = now()`) and revokes all active sessions and devices in one transaction (`src/users/users.service.ts:81-109`).
+- **Purpose**: Soft deletes account (`status = DELETED`, `deletedAt = now()`) and revokes all active sessions and devices in one transaction (`src/users/users.service.ts:207-248`).
 - **Response**: `200 OK` `{"success": true}`
 
 #### `GET /users/me/sessions`
@@ -1258,24 +1363,27 @@ totalPages } }` ordered by `startAt` ascending.
 > **What the server holds**:
 > Entry content is encrypted on the client with AES-256-GCM and reaches the server only as opaque Base64 `encryptedData` / `iv` / `authTag` through the sync oplog (`POST /sync/push`); there is no vault-entry REST API. The master password itself never crosses the network.
 >
-> This is **not** zero-knowledge: `VaultSetting.recoveryKey` is stored in plaintext next to `wrappedMasterKey` so that a user who loses their master password can recover the vault without losing it. Anyone with database read access can therefore unwrap that user's master key and open every entry. Recovery is an intentional product trade-off, not an oversight.
+> This is **not** a blanket "zero-knowledge" claim, and the honest version is narrower. What a modern client uploads is the recovery envelope `recoveryKdfSalt` + `wrappedMasterKey` / `wrappedMasterIv` / `wrappedMasterTag`, where the master key inside it is wrapped under a key the client derives from the user's 12-word recovery phrase with that salt — the wrapping key itself is never uploaded, and a build that sends one is refused by the DTO (`src/vault/dto/setup-vault.dto.ts:13-93`, the four envelope fields at `:70-92`). **What the server cannot read**: the master key, and so the entry plaintext — for a phrase-envelope vault its database holds a ciphertext, a salt and a digest, and the phrase is nowhere in it (`prisma/schema.prisma:775-779`). **What it can do**: decide whether a presented verifier matches the row (that is the whole of `POST /vault/settings/unlock`), and hand the envelope back to a client that spent an emailed recovery code (`src/vault/services/vault-settings.service.ts:570-577`).
+>
+> Two facts qualify that, and both belong in a runbook. (1) The server is not blind to guesses: `VaultSetting.masterKeyHash` is an HMAC-verifier digest of the client's derived verifier, keyed with the server-only `ENCRYPTION_KEY` (`prisma/schema.prisma:752-755`) — whoever holds that key can test candidate master passwords against every row offline instead of through the API — which is why a rotation of `ENCRYPTION_KEY` is a re-seal tracked by `masterKeyHashPepper` rather than a wipe (`prisma/schema.prisma:756-763`), and why an unlock of a row sealed under a key this process does not hold answers `503 VAULT_PEPPER_KEY_UNAVAILABLE` rather than the wrong-password code. (2) The obsolete `recoveryKey` column is an **unwrapped** key-encryption-key uploaded verbatim by app builds before 2026-10-17 (`prisma/schema.prisma:780-784`); for rows that still carry it, database read access really is vault access, because `recovery/verify` echoes the stored key so its owner is not stranded by the fix (`src/vault/services/vault-settings.service.ts:573`). No new row gets one: `setup` writes `recoveryKey: null` on both branches (`:241`, `:253`) and a recovery that supplies the phrase-derived wrap replaces it in the same write (`:649-659`). Those legacy rows are what incident response should sweep first, and the answer for one is to re-run recovery or setup with the four envelope fields.
 
 #### `POST /vault/settings/setup`
 
-- **Access**: `JwtAuthGuard`
-- **Body**:
+- **Access**: `JwtAuthGuard` (the controller applies it to the whole `/vault/settings` tree, `src/vault/controllers/vault-settings.controller.ts:29`) — no `@Throttle()` on this route, so the global default applies.
+- **Body**: `SetupVaultDto` (`src/vault/dto/setup-vault.dto.ts`). Only `masterKeyHash` and `keySalt` are required. The four recovery-envelope fields are each optional, but they are one envelope: sending them means sending all four, and a setup that re-writes a row already holding a wrap must send them (`:216-222`, `:682-701`). There is no field for an unwrapped wrapping key any more:
   ```json
   {
     "masterKeyHash": "q7L1Z3mYxk1hZ8jH0lYXn0K8pQe1o2uW3r5t7y9b0cA=",
     "keySalt": "c2FsdF9iYXNlNjRfc3RyaW5n",
     "kdfIterations": 3,
     "kdfMemory": 65536,
-    "recoveryKey": "base64-256bit-wrap-key",
+    "recoveryKdfSalt": "base64-24-byte-phrase-salt",
     "wrappedMasterKey": "base64-ciphertext",
     "wrappedMasterIv": "base64-96bit-nonce",
     "wrappedMasterTag": "base64-gcm-tag"
   }
   ```
+  `recoveryKdfSalt` is `@IsBase64() @Length(24, 24)` and the three wrap fields are optional non-empty strings (`:70-92`); `kdfIterations` is `@Min(1)` and `kdfMemory` `@Min(1024)` (`:49-63`). **A body carrying `recoveryKey` is refused**: the field is not on the DTO, and with `forbidNonWhitelisted` on it answers `400 VALIDATION_ERROR` `"This field is not allowed."` — that is deliberate, because a stored key-encryption-key makes every vault on the server openable by whoever reads the database (`:65-69`).
 - **Response**: `201 Created`
   ```json
   {
@@ -1286,39 +1394,58 @@ totalPages } }` ordered by `startAt` ascending.
     "updatedAt": "2026-09-26T10:00:00.000Z"
   }
   ```
-- **Notes**: `masterKeyHash` is `base64(SHA-256(argon2id(password, salt)))` — the verifier, not the key. What the row _stores_ is `hmac-sha256:<base64>` of that value, keyed with the server-only `ENCRYPTION_KEY`, so a read of the collection does not hand over the unlock credential; rows written before that conversion keep the raw value and are rewritten on their next successful unlock. `kdfIterations` / `kdfMemory` are what the client derived with — the shipped build uses Argon2id `t=3, m=65536 KiB, p=4` and reports the first two; a request that omits them stores those same values. **Nothing reads them back**: the copy a build can trust is the `_kdf` marker sealed inside every entry blob, so sending different numbers here changes a record, not a behaviour (see `SECURITY.md`). A time cost below `t=1` is rejected as a validation error — the floor used to be `1000`, which would have refused the only honest value. Setup against an already-configured vault returns `409 VAULT_ALREADY_CONFIGURED`; rotate the master password through the recovery flow instead.
+  Exactly these five fields (`src/vault/services/vault-settings.service.ts:260-266`) — the envelope and the stored verifier are not echoed back.
+- **Notes**: `masterKeyHash` is `base64(SHA-256(argon2id(password, salt)))` — the verifier, not the key. What the row _stores_ is `hmac-sha256:<base64>` of that value, keyed with the server-only `ENCRYPTION_KEY`, so a read of the collection does not hand over the unlock credential; rows written before that conversion keep the raw value and are rewritten on their next successful unlock. `kdfIterations` / `kdfMemory` are what the client derived with — the shipped build uses Argon2id `t=3, m=65536 KiB, p=4` and reports the first two; a request that omits them stores those same values (`:234`, `:249` against `DEFAULT_KDF_ITERATIONS` / `DEFAULT_KDF_MEMORY_KIB` at `:68-69`). **Nothing reads them back**: the copy a build can trust is the `_kdf` marker sealed inside every entry blob, so sending different numbers here changes a record, not a behaviour (see `SECURITY.md`). A time cost below `t=1` is rejected as a validation error — the floor used to be `1000`, which would have refused the only honest value. Setup against an already-configured vault returns `409 VAULT_ALREADY_CONFIGURED` (`:206-210`); rotate the master password through the recovery flow instead. The one case that is _not_ a clean re-setup: a row that already holds `wrappedMasterKey` must be re-supplied with the whole new envelope, because the upsert's update branch would otherwise null the only stored copy of the wrap (`:216-222`, asserted by `assertRecoveryMaterialComplete()` at `:682-701`, which answers `400 VALIDATION_ERROR` with the missing names in `details.fields`). Both write branches set `recoveryKey: null` (`:241`, `:253`), so a vault that still had a plaintext wrapping key loses it at the moment the client provably holds the master key.
 
 #### `GET /vault/settings`
 
 - **Access**: `JwtAuthGuard`
-- **Response**: `200 OK` — same shape as the `setup` response. An account that never set a vault up gets `{ "isVaultConfigured": false, "keySalt": null, "kdfIterations": null, "kdfMemory": null }`. The stored verifier is never returned.
+- **Response**: `200 OK` — the `setup` response **plus** the three password-wrapper columns, so it is not the same object: `{ isVaultConfigured, keySalt, kdfIterations, kdfMemory, passwordWrappedKey, passwordWrappedIv, passwordWrappedTag, updatedAt }` (`src/vault/services/vault-settings.service.ts:283-291`). The `passwordWrapped*` fields are `null` until a master-password recovery has run, and this is the same shape `recovery/complete` returns. An account that never set a vault up gets `{ "isVaultConfigured": false, "keySalt": null, "kdfIterations": null, "kdfMemory": null }` — four fields, no wrapper keys (`:274-280`). The stored verifier is never returned.
 
 #### `POST /vault/settings/unlock`
 
 - **Access**: `JwtAuthGuard`
-- **Body**: `{ "masterKeyHash": "..." }`
+- **Rate Limit**: 10 per minute (`@Throttle({ default: { limit: 10, ttl: 60000 } })`, `src/vault/controllers/vault-settings.controller.ts:67`). Per **IP**, not per user: the throttler is the app-wide `APP_GUARD` and runs before `JwtAuthGuard`, so `req.user` is unset when the bucket key is built (see the rate-limit note at the top of this document, and `src/common/guards/custom-throttler.guard.ts:52-68`).
+- **Body**: `{ "masterKeyHash": "..." }`, and optionally `"keyEnvelopeVersion": 1` (`UnlockVaultDto`, `src/vault/dto/unlock-vault.dto.ts:4-17`). The optional field is not decoration: once a recovery has written a `passwordWrappedKey`, an unlock that omits `keyEnvelopeVersion: 1` is refused with `400 VALIDATION_ERROR` "Update this app to unlock the recovered vault safely." (`src/vault/services/vault-settings.service.ts:304-309`) — an old build must not be handed a vault whose key wrapper it cannot re-encrypt.
 - **Purpose**: Compares the verifier the client derived against the stored one. It proves the master password without transmitting it.
-- **Response**: `200 OK` `{ "success": true, "unlockedAt": "..." }` · `401 VAULT_MASTER_KEY_MISMATCH` · `401 RATE_LIMITED` `{ retryInSeconds }` · `404 VAULT_NOT_CONFIGURED`
-- **Notes**: Five consecutive failures start a one-minute cooldown on the vault, doubling to an hour, and while it runs the endpoint refuses even the correct verifier. The counter lives on `VaultSetting`, not `User`: a mistyped master password must not lock the account out of its notes, tasks and calendar. The endpoint is separately throttled to 10 requests/minute per user.
+- **Response**: `200 OK` `{ "success": true, "unlockedAt": "..." }` (`src/vault/services/vault-settings.service.ts:419-422`) · `401 VAULT_MASTER_KEY_MISMATCH` · `401 RATE_LIMITED` with `details.retryInSeconds` · `404 VAULT_NOT_CONFIGURED` · `400 VALIDATION_ERROR` (the envelope case above) · `503 VAULT_PEPPER_KEY_UNAVAILABLE`.
+- **Notes**: Five consecutive failures start a one-minute cooldown on the vault, doubling to an hour (`UNLOCK_MAX_FAILED_ATTEMPTS` / `UNLOCK_COOLDOWN_BASE_MS` / `UNLOCK_COOLDOWN_MAX_MS` at `src/vault/services/vault-settings.service.ts:41-43`, curve at `:437-444`), and while it runs the endpoint refuses even the correct verifier. The counter lives on `VaultSetting`, not `User`: a mistyped master password must not lock the account out of its notes, tasks and calendar. The `503` is the one answer a client must not retry against this endpoint: it means the row is sealed under an `ENCRYPTION_KEY` generation this process does not hold (`findSealingKey()` throws at `:169-174`, body built at `:774-783`, `details.pepperKeyId` names the stamp), so nothing the person typed is wrong and the digest did not even get compared. Answering `401` there would count five *correct* passwords into the cooldown above and lock a healthy vault out of itself for an hour. Surface it as "service owner: set `ENCRYPTION_KEY_PREVIOUS` / `ENCRYPTION_KEY_PREVIOUS_ID`", not as a wrong password.
 
 #### `POST /vault/settings/recovery/request`
 
-- **Access**: `JwtAuthGuard` · rate-limited to 3 per minute
-- **Purpose**: Emails a single-use 6-digit code that unlocks the recovery blob. Outside production the code is also logged.
-- **Response**: `200 OK` `{ "message": "If the vault can be recovered, a code has been sent to the account email address." }` · `400 VAULT_RECOVERY_UNAVAILABLE` when no wrapped key is stored.
+- **Access**: `JwtAuthGuard` · rate-limited to 3 per minute (`src/vault/controllers/vault-settings.controller.ts:96`)
+- **Purpose**: Emails a single-use 6-digit code that unlocks the recovery blob, valid for 15 minutes (`RECOVERY_OTP_TTL_MINUTES` at `src/vault/services/vault-settings.service.ts:31`, passed to the issuer at `:468-472`).
+- **Response**: `200 OK` `{ "message": "If the vault can be recovered, a code has been sent to the account email address." }` (`:518-520`) — it names no address state, and in a non-production deployment a failed send is only logged and this message is still returned (`:486-497`). · `404 VAULT_NOT_CONFIGURED` when the account has no row (`:451-454`) · `400 VAULT_RECOVERY_UNAVAILABLE` when no `wrappedMasterKey` is stored (`:456-460`), and — only under `APP_ENV=production` — when the mail could not be sent (`:490-496`, `:508-514`).
+- **Note for operators**: the code is logged **only** when `APP_ENV=development`, not merely when the deployment is not production (`if (this.configService.isDevelopment)` at `:478-479`). An unset or mistyped `APP_ENV` therefore logs nothing; a build that used to print it in staging does not any more, because the code plus the 12-word phrase hands over the wrapped master key.
 
 #### `POST /vault/settings/recovery/verify`
 
-- **Access**: `JwtAuthGuard` · rate-limited to 5 per minute
-- **Body**: `{ "otp": "123456" }`
-- **Response**: `200 OK` — `{ keySalt, recoveryKey, wrappedMasterKey, wrappedMasterIv, wrappedMasterTag }`, the material the client needs to unwrap the old master key and re-encrypt its entries. The stored verifier is not part of this answer: the unwrap is authenticated by its own GCM tag, and echoing a bearer secret back would only give the client a second way to be wrong. Spending the code opens a 15-minute grant window (`recoveryGrantedAt`).
+- **Access**: `JwtAuthGuard` · rate-limited to 5 per minute (`src/vault/controllers/vault-settings.controller.ts:107`)
+- **Body**: `{ "otp": "123456" }` — 6 characters exactly (`VerifyVaultRecoveryDto`, `src/vault/dto/setup-vault.dto.ts:95-100`).
+- **Response**: `200 OK` — `{ keySalt, recoveryKdfSalt, recoveryKey, wrappedMasterKey, wrappedMasterIv, wrappedMasterTag }` (`src/vault/services/vault-settings.service.ts:570-577`), the material the client needs to re-derive the wrapping key from the phrase and unwrap the old master key, then re-encrypt its entries. `recoveryKdfSalt` is the modern envelope and `recoveryKey` is `null` whenever it is present: the service returns `setting.recoveryKdfSalt ? null : setting.recoveryKey` (`:573`), so the plaintext key leaves the building only for rows that still have one and no phrase salt. A row with neither is answered `400 VAULT_RECOVERY_UNAVAILABLE` "This vault's recovery material is incomplete." (`:551-555`), and a row with no wrap at all `noRecoveryMaterialStored()` (`:545`). A bad or spent code is `401 OTP_INVALID` (`:534-538`). Spending a code opens a 15-minute grant window (`recoveryGrantedAt`, written at `:563-567`). The stored verifier is deliberately **not** part of this answer: the unwrap is authenticated by its own GCM tag, and echoing a bearer secret back would only give the client a second way to be wrong (`:577-581`).
 
 #### `POST /vault/settings/recovery/complete`
 
-- **Access**: `JwtAuthGuard`
-- **Body**: same shape as `setup`, with the new salt, verifier and recovery blob.
+- **Access**: `JwtAuthGuard` · rate-limited to 3 per minute (`src/vault/controllers/vault-settings.controller.ts:123`)
+- **Body**: **not** the `setup` shape. `CompleteVaultRecoveryDto` (`src/vault/dto/setup-vault.dto.ts:103-156`) requires the new verifier **and** a complete password-derived wrapper around the stable data key:
+  ```json
+  {
+    "masterKeyHash": "q7L1Z3mYxk1hZ8jH0lYXn0K8pQe1o2uW3r5t7y9b0cA=",
+    "keySalt": "base64-24-bytes",
+    "passwordWrappedKey": "base64-44-chars",
+    "passwordWrappedIv": "base64-16-chars",
+    "passwordWrappedTag": "base64-24-chars",
+    "kdfIterations": 3,
+    "kdfMemory": 65536,
+    "recoveryKdfSalt": "base64-24-bytes",
+    "wrappedMasterKey": "base64-ciphertext",
+    "wrappedMasterIv": "base64-16-chars",
+    "wrappedMasterTag": "base64-24-chars"
+  }
+  ```
+  `keySalt` and the three `passwordWrapped*` fields are required here (`@IsBase64()` with fixed `@Length`), and `kdfIterations` / `kdfMemory` are `@Equals(3)` / `@Equals(65536)` — not optional, and not free to differ from the shipped client's numbers (`:99-119`). The four phrase-envelope fields at the end stay optional and exist so a legacy row can be upgraded in the same write; send all four or none, because the service only applies them as a set and nulls `recoveryKey` alongside (`src/vault/services/vault-settings.service.ts:649-659`).
 - **Purpose**: Stores the parameters for the rotated master password. The client re-encrypts its entries locally and uploads them through `POST /sync/push` before the recovery grant expires.
-- **Response**: `200 OK` — same shape as `setup` · `401 VAULT_RECOVERY_NOT_PENDING` once the grant has expired.
+- **Response**: `200 OK` — `getVaultSettings()` for the account, i.e. the `GET /vault/settings` shape including `passwordWrapped*` (`src/vault/services/vault-settings.service.ts:673`). · `400 VALIDATION_ERROR` when the wrapper triple is incomplete (`:586-594`) · `401 VAULT_RECOVERY_NOT_PENDING` when no grant was ever opened (`:596-603`) or the 15-minute window has passed (`:616-623`) · `409 VAULT_RECOVERY_NOT_PENDING` "Vault recovery changed. Verify a new recovery code." when the guarded write matched no row because another request moved the window (`:662-667`). Re-sending the *identical* wrapper after a lost response is treated as the same completed recovery and returns the settings without needing a fresh code (`:606-614`).
 
 #### Vault entries: the sync oplog
 
@@ -1547,7 +1674,7 @@ Role-based access control (`VIEWER`, `EDITOR`, `ADMIN`) for Notes, Projects and 
 
 - **Access**: `JwtAuthGuard`
 - **Purpose**: List shares whose `sharedWithUserId` equals the caller's id, or whose `sharedWithEmail` equals the caller's JWT email (`@GetUser("email")` is populated by `JwtStrategy.validate()` — `src/auth/strategies/jwt.strategy.ts:68-74`).
-- **Query Parameters** (`src/collaboration/dto/collaboration.dto.ts:70-97`):
+- **Query Parameters** (`src/collaboration/dto/collaboration.dto.ts:62-85`):
   - `resourceType` _(optional)_: `NOTE`, `PROJECT`, `CALENDAR`
   - `page` _(optional, default `1`, min `1)_: 1-based page number
   - `limit` _(optional, default `20`, `1`–`100)_
@@ -1564,7 +1691,7 @@ Role-based access control (`VIEWER`, `EDITOR`, `ADMIN`) for Notes, Projects and 
 
 #### Who actually honours a share
 
-Only two code paths consult `CollaborationService` outside this module — `NotesService.getNoteById()` (requires `VIEWER`) and `NotesService.updateNote()` (requires `EDITOR`), both `@Optional()` injected (`src/notes/services/notes.service.ts:14`). Concretely:
+Only two code paths consult `CollaborationService` outside this module — `NotesService.getNoteById()` (requires `VIEWER`) and `NotesService.updateNote()` (requires `EDITOR`), both `@Optional()` injected (`src/notes/services/notes.service.ts:30`). Concretely:
 
 - `GET /notes` (the list) filters on `userId`, so a shared note never appears in the collaborator's inbox-style listing; they must already know the `noteId`.
 - `DELETE /notes/:id`, `GET /notes/:id/history`, version restore and tag/folder mutation stay owner-scoped.
@@ -1799,7 +1926,7 @@ verification described above, with existing credentials re-enrolled.
   2. `headers.authorization`, with `"Bearer "` stripped
   3. `query.token` (also read: `query.deviceId`, used only when the token carries no `deviceId`)
 - **No token, or a token that fails `jwtService.verifyAsync` against `JWT_ACCESS_SECRET`** → the gateway logs a `warn` and `client.disconnect(true)`. There is no error frame and no `401`; from the client side a bad token looks like an immediate close.
-- **CORS is decided at boot, not in the decorator.** `@WebSocketGateway` carries only `namespace` today; the `cors: { origin: "*" }` it used to hold is gone. `SyncIoAdapter` (`src/sync/adapters/sync-io.adapter.ts`) is installed by `src/main.ts:97` and answers the handshake from configuration, because decorator metadata is evaluated when the file is imported — long before any config object exists — so a policy written there could only ever have been a literal. The origin list, in order: `WS_CORS_ORIGINS`, then `CORS_ORIGINS`, then the HTTP app's `CORS_ORIGIN`, then `http://localhost:3000`. A configured list is never quietly widened: the only wildcard is the `*` an operator writes into it, and that is answered with `credentials: false` (a browser rejects `*` beside `Access-Control-Allow-Credentials: true`). Everything else is matched exactly, with credentials on. `WS_CORS_ALLOW_NULL_ORIGIN` (default `false`) is the documented escape hatch for WebView clients that send no `Origin` at all.
+- **CORS is decided at boot, not in the decorator.** `@WebSocketGateway` carries only `namespace` today; the `cors: { origin: "*" }` it used to hold is gone. `SyncIoAdapter` (`src/sync/adapters/sync-io.adapter.ts`) is installed by `src/main.ts:181` and answers the handshake from configuration, because decorator metadata is evaluated when the file is imported — long before any config object exists — so a policy written there could only ever have been a literal. The origin list, in order: `WS_CORS_ORIGINS`, then `CORS_ORIGINS`, then the HTTP app's `CORS_ORIGIN`, then `http://localhost:3000`. A configured list is never quietly widened: the only wildcard is the `*` an operator writes into it, and that is answered with `credentials: false` (a browser rejects `*` beside `Access-Control-Allow-Credentials: true`). Everything else is matched exactly, with credentials on. `WS_CORS_ALLOW_NULL_ORIGIN` (default `false`) is the documented escape hatch for WebView clients that send no `Origin` at all.
 - **Transport list** is Socket.IO's default (`polling` then upgrade to `websocket`); the gateway sets no `transports`, so any doc claim that the server is websocket-only is wrong.
 
 ### Room Model
@@ -1810,15 +1937,15 @@ After the token verifies **and the account is revalidated below**, the socket jo
 user:<userId>
 ```
 
-The `userId` that names the room is still the token's `sub`, not a value read back from the database, and `deviceId` comes from `payload.deviceId` or `query.deviceId`. What changed is that the subject is no longer taken on trust: `handleConnection` calls `revalidate()` (`src/sync/sync.gateway.ts:81`) before the join.
+The `userId` that names the room is still the token's `sub`, not a value read back from the database, and `deviceId` comes from `payload.deviceId` or `query.deviceId`. What changed is that the subject is no longer taken on trust: `handleConnection` calls `revalidate()` (`src/sync/sync.gateway.ts:143`) before the join.
 
 > [!IMPORTANT]
-> **Cross-instance invalidation is wired, and fails quiet when it is not working.** This section used to say the Redis Socket.IO adapter was never installed. That was true and is no longer: `src/main.ts:97` installs `SyncIoAdapter`, which extends `RedisIoAdapter` (`src/sync/adapters/redis-io.adapter.ts`) and calls `connectToRedis()` before `listen()`. Two conditions gate it — `REDIS_URL` must name a server, and `WS_REDIS_ADAPTER` must not be set to `false` — and when both hold, `user:<userId>` rooms are shared across replicas.
+> **Cross-instance invalidation is wired, and fails quiet when it is not working.** This section used to say the Redis Socket.IO adapter was never installed. That was true and is no longer: `src/main.ts:181` installs `SyncIoAdapter`, which extends `RedisIoAdapter` (`src/sync/adapters/redis-io.adapter.ts`) and calls `connectToRedis()` before `listen()`. Two conditions gate it — `REDIS_URL` must name a server, and `WS_REDIS_ADAPTER` must not be set to `false` — and when both hold, `user:<userId>` rooms are shared across replicas.
 >
 > The residual risk is the shape of the failure, not the wiring: a Redis that is configured but unreachable is caught, logged as a warning, and the process carries on with the default in-memory adapter. Rooms go per-process again, a client on instance B stops hearing invalidations from instance A, and nothing a load balancer or `/health` reports distinguishes that from a healthy cluster. `docker-compose.prod.yml` runs a single `api` container, so this is latent rather than live. Confirm the adapter line in the boot log (`[sync-ws] … Clustering: Redis when reachable` vs `in-process (no Redis configured)`) before assuming a second replica is safe to start. Tracked as P0-4.
 
 > [!NOTE]
-> **The handshake revalidates the account and the session, the way REST does.** `JwtStrategy.validate()` — the REST path — loads the user (`401` on `status !== "ACTIVE"` or `deletedAt`) and calls `isSessionLive()` (`src/auth/strategies/jwt.strategy.ts:44-66`). `handleConnection()` now asks the same two questions through the same `UsersService` before it joins the room, and refuses the socket when either fails: no user, `status !== "ACTIVE"`, `deletedAt` set, or a session id the account no longer has live. It reads the session claim from `sessionId`, `sid` or `session`, because `src/auth` owns that contract and the name has moved. A token with no session claim at all still connects, exactly as on REST.
+> **The handshake revalidates the account and the session, the way REST does.** `JwtStrategy.validate()` — the REST path — loads the user (`401` on `status !== "ACTIVE"` or `deletedAt`) and calls `isSessionLive()` (`src/auth/strategies/jwt.strategy.ts:54-75`). `handleConnection()` now asks the same two questions through the same `UsersService` before it joins the room, and refuses the socket when either fails: no user, `status !== "ACTIVE"`, `deletedAt` set, or a session id the account no longer has live. It reads the session claim from `sessionId`, `sid` or `session`, because `src/auth` owns that contract and the name has moved. A token with no session claim at all still connects, exactly as on REST.
 >
 > Two things this does **not** do, both worth knowing. It is a handshake check, so a socket already open when you revoke a session or disable an account is not dropped — it drains at its next reconnect or when the 15-minute access token expires. And it fails closed: `SyncGateway` injects `UsersService` as `@Optional()` for unit graphs and the worker, and when no users service is present `revalidate()` answers "Account revalidation is unavailable" and disconnects rather than falling back to trusting the signature.
 
@@ -1848,7 +1975,7 @@ Each call passes the `highestCursor` that its own `appendChange()` returned, so 
 - `originDeviceId` is present only for `/sync/push`, which is the one write path that names a device — no REST controller, DTO or header carries a device id anywhere in this API, so the REST-originated notices omit it and the gateway's log line reads `Origin Device: Server`. The value comes from the request body: the server trusts the client's own claim about who sent the change.
 - `timestamp` is the emit time, not the mutation time.
 - **Client Action on Receipt**: compare `highestCursor` with the local cursor and issue an incremental `POST /sync/pull` when it is ahead.
-- **Origin device is NOT filtered server-side.** The emit goes to the whole room — `this.server.to(userRoom).emit(...)` — so the device that just pushed receives its own invalidation too. `originDeviceId` is in the payload so a client _can_ discard it, and the gateway's own comment (`src/sync/sync.gateway.ts:171-181`) explains why the server does not: dropping sockets would be a guess about what each device has already read, while the pull is self-correcting because it starts from the device's own checkpoint and the per-row version guard decides what applies. A client that ignores `originDeviceId` therefore does one extra pull per own-write — correct, just chatty.
+- **Origin device is NOT filtered server-side.** The emit goes to the whole room — `this.server.to(userRoom).emit(...)` — so the device that just pushed receives its own invalidation too. `originDeviceId` is in the payload so a client _can_ discard it, and the gateway's own comment (`src/sync/sync.gateway.ts:252-262`) explains why the server does not: dropping sockets would be a guess about what each device has already read, while the pull is self-correcting because it starts from the device's own checkpoint and the per-row version guard decides what applies. A client that ignores `originDeviceId` therefore does one extra pull per own-write — correct, just chatty.
 
 ---
 

@@ -46,7 +46,14 @@ export class AdminGuard implements CanActivate {
     // could never fire. Role-based access needs both of those first.
     const email =
       typeof user.email === "string" ? user.email.trim().toLowerCase() : "";
-    if (email && this.configService.adminEmails.includes(email)) {
+    // An address string is not proof of mailbox control. Email allow-listing
+    // is retained only for existing deployments, and only after verification;
+    // ADMIN_USER_IDS remains the preferred production mechanism.
+    if (
+      email &&
+      user.emailVerifiedAt &&
+      this.configService.adminEmails.includes(email)
+    ) {
       return true;
     }
 

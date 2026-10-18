@@ -19,6 +19,20 @@ function stripProperty(leaf: string, message: string): string {
     : message;
 }
 
+/**
+ * The last step of a message the wire shows: empty copy is never useful, and a
+ * sentence reads as a sentence. Exported because `details.fields` is also
+ * written by hand outside this pipe — see
+ * `assertPushableChanges()` in `src/sync/change-payload.validator.ts`, which
+ * runs after it — and a client should not have to know which producer wrote an
+ * entry it is about to print.
+ */
+export function toSentence(message: string): string {
+  const trimmed = message.trim();
+  if (!trimmed) return "This field needs attention.";
+  return trimmed.endsWith(".") ? trimmed : `${trimmed}.`;
+}
+
 /** Turn class-validator's implementation-oriented copy into UI-safe text. */
 function humaniseConstraint(leaf: string, message: string): string {
   const stripped = stripProperty(leaf, message).trim();
@@ -39,8 +53,7 @@ function humaniseConstraint(leaf: string, message: string): string {
   ) {
     return "This field is required.";
   }
-  if (!stripped) return "This field needs attention.";
-  return stripped.endsWith(".") ? stripped : `${stripped}.`;
+  return toSentence(stripped);
 }
 
 function collect(error: ValidationError, prefix = ""): FieldValidationError[] {

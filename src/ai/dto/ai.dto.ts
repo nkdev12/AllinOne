@@ -7,43 +7,7 @@ import {
   ValidateNested,
 } from "class-validator";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { Type } from "class-transformer";
-import { SummaryFormat, SummaryLength, TaskPriority } from "../ai.interface";
-
-export class SummarizeTextDto {
-  @ApiPropertyOptional({
-    example: "Meeting notes about our Q4 product roadmap...",
-    description:
-      "Raw text to summarize, read in full by the heuristics. When a Gemini key is configured the prompt sent upstream is capped (MAX_GEMINI_PROMPT_CHARS) and an over-long body is truncated, not rejected.",
-  })
-  @IsOptional()
-  @IsString()
-  text?: string;
-
-  @ApiPropertyOptional({
-    example: "note-uuid-123",
-    description: "ID of an existing note to summarize",
-  })
-  @IsOptional()
-  @IsString()
-  noteId?: string;
-
-  @ApiPropertyOptional({
-    enum: ["brief", "detailed", "bullet_points"],
-    default: "brief",
-  })
-  @IsOptional()
-  @IsEnum(["brief", "detailed", "bullet_points"])
-  length?: SummaryLength = "brief";
-
-  @ApiPropertyOptional({
-    enum: ["paragraph", "bullet_points"],
-    default: "paragraph",
-  })
-  @IsOptional()
-  @IsEnum(["paragraph", "bullet_points"])
-  format?: SummaryFormat = "paragraph";
-}
+import { TaskPriority } from "../ai.interface";
 
 export class ExtractTasksDto {
   @ApiPropertyOptional({

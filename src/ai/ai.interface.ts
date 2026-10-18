@@ -1,24 +1,4 @@
-export type SummaryLength = "brief" | "detailed" | "bullet_points";
-export type SummaryFormat = "paragraph" | "bullet_points";
 export type TaskPriority = "LOW" | "MEDIUM" | "HIGH";
-
-/** Who answered an `/ai` request. See the per-result notes below. */
-type AiProvider = "gemini" | "heuristic";
-
-export interface SummaryResult {
-  summary: string;
-  originalLength: number;
-  summaryLength: number;
-  compressionRatio: number;
-  format: SummaryFormat;
-  /**
-   * The provider that actually answered. `"gemini"` requires a non-blank
-   * `GEMINI_API_KEY` and a call that returned usable text inside
-   * `GEMINI_TIMEOUT_MS`; a missing key, a non-2xx, a transport error, a
-   * timeout or an empty candidate all answer `"heuristic"`.
-   */
-  provider: AiProvider;
-}
 
 export interface ExtractedTask {
   title: string;

@@ -81,10 +81,11 @@ async function bootstrap() {
         return callback(null, true);
       }
 
-      // Local Flutter web builds can choose a port dynamically, but this
-      // convenience must never silently widen a deployed API.
+      // Local Flutter web builds can choose a port dynamically only when an
+      // operator explicitly opts in; a development environment label is not
+      // sufficient to widen a deployed API.
       if (
-        environment === "development" &&
+        configService.get<boolean>("ALLOW_LOCALHOST_CORS", false) &&
         /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
       ) {
         return callback(null, true);
@@ -136,35 +137,37 @@ async function bootstrap() {
   // ========================================================================
   // OpenAPI/Swagger Documentation
   // ========================================================================
-  const swaggerConfig = new DocumentBuilder()
-    .setTitle("Allinone Backend API")
-    .setDescription(
-      "Production-grade backend for Allinone - cross-platform personal information management",
-    )
-    .setVersion("1.0.0")
-    .addBearerAuth(
-      { type: "http", scheme: "bearer", bearerFormat: "JWT" },
-      "access-token",
-    )
-    .addTag("Health", "System health and status endpoints")
-    .addTag("Auth", "Authentication endpoints")
-    .addTag("Users", "User management endpoints")
-    .addTag("Devices", "Device management endpoints")
-    .addTag("Sync", "Synchronization endpoints")
-    .addTag("Notes", "Notes, folders, and tags management")
-    .addTag("Tasks", "Tasks, projects, sections, and reminders")
-    .addTag("Calendar", "Calendars and events management")
-    .addTag("Vault", "Zero-knowledge encrypted password and secret vault")
-    .addTag("Admin", "Operational administration and incident response")
-    .build();
+  if (configService.get<boolean>("SWAGGER_ENABLED", false)) {
+    const swaggerConfig = new DocumentBuilder()
+      .setTitle("Allinone Backend API")
+      .setDescription(
+        "Production-grade backend for Allinone - cross-platform personal information management",
+      )
+      .setVersion("1.0.0")
+      .addBearerAuth(
+        { type: "http", scheme: "bearer", bearerFormat: "JWT" },
+        "access-token",
+      )
+      .addTag("Health", "System health and status endpoints")
+      .addTag("Auth", "Authentication endpoints")
+      .addTag("Users", "User management endpoints")
+      .addTag("Devices", "Device management endpoints")
+      .addTag("Sync", "Synchronization endpoints")
+      .addTag("Notes", "Notes, folders, and tags management")
+      .addTag("Tasks", "Tasks, projects, sections, and reminders")
+      .addTag("Calendar", "Calendars and events management")
+      .addTag("Vault", "Zero-knowledge encrypted password and secret vault")
+      .addTag("Admin", "Operational administration and incident response")
+      .build();
 
-  const document = SwaggerModule.createDocument(app, swaggerConfig);
-  SwaggerModule.setup("api", app, document, {
-    swaggerOptions: {
-      persistAuthorization: true,
-      docExpansion: "list",
-    },
-  });
+    const document = SwaggerModule.createDocument(app, swaggerConfig);
+    SwaggerModule.setup("api", app, document, {
+      swaggerOptions: {
+        persistAuthorization: false,
+        docExpansion: "list",
+      },
+    });
+  }
 
   // ========================================================================
   // WebSocket adapter (CORS + clustering) for the /sync namespace

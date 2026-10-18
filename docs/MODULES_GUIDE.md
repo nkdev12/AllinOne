@@ -45,7 +45,7 @@ Handles user registration, credential login, MFA (TOTP), OAuth token exchanges, 
 | `loginWithGoogle(dto: OAuthLoginDto, ipAddress?: string, userAgent?: string): Promise<AuthResponseDto>`    | Verifies Google ID token via `google-auth-library`, finds or creates OAuth user account, issues tokens, and logs session.             | `AuthController.loginWithGoogle` (`POST /auth/oauth/google`)                  |
 | `loginWithApple(dto: OAuthLoginDto, ipAddress?: string, userAgent?: string): Promise<AuthResponseDto>`     | Decodes Apple OAuth JWT payload, creates or links account, issues JWT tokens, and creates session.                                    | `AuthController.loginWithApple` (`POST /auth/oauth/apple`)                    |
 | `loginWithMicrosoft(dto: OAuthLoginDto, ipAddress?: string, userAgent?: string): Promise<AuthResponseDto>` | Decodes Microsoft OAuth JWT token, resolves user profile, generates access/refresh tokens, and records audit event.                   | `AuthController.loginWithMicrosoft` (`POST /auth/oauth/microsoft`)            |
-| `refreshTokens(dto: RefreshTokenDto): Promise<AuthResponseDto>`                                            | Validates refresh JWT token and active DB session, revokes previous refresh token, rotates session token, and returns new token pair. | `AuthController.refresh` (`POST /auth/refresh`)                               |
+| `refreshTokens(dto: RefreshTokenDto): Promise<AuthResponseDto>`                                            | Validates refresh JWT token and active DB session, revokes previous refresh token, rotates session token, and returns new token pair. A credential presented again inside the 30-second rotation grace window (`AuthService.REFRESH_ROTATION_GRACE_MS` `src/auth/auth.service.ts:60`) is answered with the pair already minted rather than a 401 (`:913-941`), and that record lives in Redis so a retry routed to another worker is honoured too (`src/auth/refresh-token-grace.store.ts`). The same credential arriving once the window has closed matches no row; the longer-lived rotation marker written at `:1036-1040` is what tells that case from garbage, and `reportConfirmedRefreshTokenReuse()` then closes every unrevoked `Session` for the account (`:960-967`, `:1068-1111`). | `AuthController.refresh` (`POST /auth/refresh`)                               |
 | `logout(sessionId: string): Promise<{ success: boolean }>`                                                 | Soft-deletes/revokes active session in DB (`revokedAt = now()`) and invalidates refresh token.                                        | `AuthController.logout` (`POST /auth/logout`)                                 |
 | `generateMfaSecret(userId: string): Promise<MfaSecretResponseDto>`                                         | Generates TOTP secret (`otplib`), generates QR code URL (`qrcode`), and creates 10 single-use recovery codes.                         | `AuthController.generateMfaSecret` (`POST /auth/mfa/generate`)                |
 | `enableMfa(userId: string, dto: EnableMfaDto): Promise<MfaEnableResponseDto>`                              | Verifies provided TOTP code against secret, enables MFA on user account (`isMfaEnabled = true`), and stores hashed recovery codes.    | `AuthController.enableMfa` (`POST /auth/mfa/enable`)                          |
@@ -58,12 +58,12 @@ Handles user registration, credential login, MFA (TOTP), OAuth token exchanges, 
 
 #### `AuthController` (`src/auth/auth.controller.ts`)
 
-- `register(@Body() dto: RegisterDto)` -> Calls `authService.register`
+- `register(@Body() dto: RegisterDto, @Res({ passthrough: true }) res)` -> Calls `authService.register` and sets the `httpOnly` `refresh_token` cookie from the minted session (`src/auth/auth.controller.ts:118`); `setRefreshTokenCookie()` returns without writing when there is no token (`:81`), which is exactly the case when `emailVerifyEnabled` holds credentials back (`src/auth/auth.service.ts:171-177`)
 - `login(@Body() dto: LoginDto, @Req() req, @Res() res)` -> Calls `authService.login`, sets `httpOnly` `refresh_token` cookie
 - `loginWithGoogle(@Body() dto: OAuthLoginDto, @Req() req, @Res() res)` -> Calls `authService.loginWithGoogle`, sets `refresh_token` cookie
 - `loginWithApple(@Body() dto: OAuthLoginDto, @Req() req, @Res() res)` -> Calls `authService.loginWithApple`, sets `refresh_token` cookie
 - `loginWithMicrosoft(@Body() dto: OAuthLoginDto, @Req() req, @Res() res)` -> Calls `authService.loginWithMicrosoft`, sets `refresh_token` cookie
-- `refresh(@Body() dto: RefreshTokenDto, @Req() req, @Res() res)` -> Extracts token from body or cookie, calls `authService.refreshTokens`, updates cookie
+- `refresh(@Body() dto: RefreshTokenDto, @Req() req, @Res({ passthrough: true }) res)` -> Extracts the token from the body or the `refresh_token` cookie (`src/auth/auth.controller.ts:236-240`), calls `authService.refreshTokens`, updates the cookie. A body token proves possession and needs nothing else (the native path); a **cookie-only** refresh must also carry a non-empty `x-client-version` header — `hasRefreshBarrier()` (`:268-271`) is what `:248-253` checks before it throws `403 TOKEN_INVALID`, and the header name is the `REFRESH_REQUEST_HEADER` constant (`src/auth/dto/refresh-token.dto.ts:12`). The full HTTP contract lives in `docs/API_REFERENCE.md` §2.
 - `logout(@GetUser('sessionId') sessionId: string, @Res() res)` -> Calls `authService.logout`, clears `refresh_token` cookie
 - `generateMfaSecret(@GetUser('id') userId: string)` -> Calls `authService.generateMfaSecret`
 - `enableMfa(@GetUser('id') userId: string, @Body() dto: EnableMfaDto)` -> Calls `authService.enableMfa`
@@ -251,10 +251,10 @@ Manages calendars, timed/all-day events, date-range window queries, and attendee
 
 ### 8. `VaultModule` (`src/vault`)
 
-Master-key _management_ only. The module owns the salt, the Argon2id verifier, and the recovery material; it never sees plaintext entry content and never stores an entry.
+Master-key _management_ only. The module owns the salt, the stored verifier digest, and the recovery envelope; it never sees plaintext entry content and never stores an entry.
 
 > [!IMPORTANT]
-> Not zero-knowledge. `VaultSetting.recoveryKey` is stored in plaintext beside `wrappedMasterKey` so a forgotten master password can be recovered instead of destroying the vault. Database read access therefore equals vault read access.
+> Not a blanket "zero-knowledge" claim — the honest version is narrower, and `docs/API_REFERENCE.md` §9 carries the full read/no-read split. The server holds an HMAC-verifier digest of what the client derives (`hmac-sha256:` + base64, keyed with the server-only `ENCRYPTION_KEY` — `PEPPERED_VERIFIER_PREFIX` `src/vault/services/vault-settings.service.ts:38`, `currentPepper()` `:94-99`, sealing at `:130-137`) together with the recovery envelope, so it **can** authenticate a presented master password and replay that wrap to whoever passes it. It **cannot** recover the master key for an entry: the key only ever arrives wrapped under a key the client derives from the user's recovery phrase, and that wrapping key is never uploaded (`src/vault/dto/setup-vault.dto.ts:65-92`, `prisma/schema.prisma:775-779`). `ENCRYPTION_KEY` is that pepper, so rotating it is a per-row re-seal tracked in `masterKeyHashPepper`, and for the window it takes both `ENCRYPTION_KEY_PREVIOUS` and `ENCRYPTION_KEY_PREVIOUS_ID` (`src/vault/services/vault-settings.service.ts:111-119`, `src/config/configuration.service.ts:720-741`). The legacy `VaultSetting.recoveryKey` column is obsolete: it held the *unwrapped* key-encryption-key uploaded by app builds before 2026-10-17, `setup` now writes `recoveryKey: null` on both branches (`src/vault/services/vault-settings.service.ts:241`, `:253`) and a body carrying the field is refused at the DTO (`src/vault/dto/setup-vault.dto.ts:13-93`), so only rows predating this still hold material — and `recovery/verify` echoes it for exactly those (`:573`, `prisma/schema.prisma:780-784`).
 
 #### `VaultSettingsService` (`src/vault/services/vault-settings.service.ts`)
 
@@ -303,7 +303,7 @@ Centralized security SIEM event logging.
 
 ### 11. `MetricsModule` (`src/common/metrics`)
 
-Prometheus metrics collection and monitoring.
+Prometheus metrics collection and monitoring. `GET /metrics` is guarded by `@UseGuards(MetricsScrapeGuard)` (`src/common/metrics/metrics.controller.ts:13-18`), one guard rather than the `JwtAuthGuard, AdminGuard` pair the rest of the admin surface stacks — that pair 401s a scrape before `AdminGuard`'s shared-secret branch is reached (`src/common/metrics/metrics-scrape.guard.ts:23-51`). So a scrape presents either an admin's access token or the configured `ADMIN_SECRET` as `Authorization: Bearer …` / `x-admin-secret`, compared in constant time (`:60-87`, `:129-146`), and anything else answers `401` — with `ADMIN_SECRET` unset, the secret branch is disabled and only an admin bearer works.
 
 #### `MetricsService` (`src/common/metrics/metrics.service.ts`)
 
@@ -317,7 +317,7 @@ Prometheus metrics collection and monitoring.
 
 #### `MetricsInterceptor` (`src/common/metrics/metrics.interceptor.ts`)
 
-- `intercept(context: ExecutionContext, next: CallHandler)` -> Measures HTTP request start/finish duration and invokes `metricsService.recordHttpRequestDuration`.
+- `intercept(context: ExecutionContext, next: CallHandler)` -> Measures HTTP request start/finish duration and invokes `metricsService.recordHttpRequest({ method, route, statusCode, durationSeconds })` (`src/common/metrics/metrics.interceptor.ts:40`). There is no `recordHttpRequestDuration` on the service.
 
 ---
 
@@ -369,10 +369,10 @@ These are the only lifecycle hooks the service implements — `PrismaService` de
 
 #### `CustomThrottlerGuard` (`src/common/guards/custom-throttler.guard.ts`)
 
-- `static disabledByDefault(env): boolean` -> True when the environment means throttling should stand down: `APP_ENV=development`, `NODE_ENV=test`, `DISABLE_RATE_LIMITING=true` or `RATE_LIMIT_ENABLED=false`. Exposed as a plain function of the env so the rule is testable without an HTTP request.
+- `static disabledByDefault(env): boolean` -> True when the environment means throttling should stand down: `NODE_ENV=test`, `DISABLE_RATE_LIMITING=true` or `RATE_LIMIT_ENABLED=false` (`src/common/guards/custom-throttler.guard.ts:12-18`). `APP_ENV=development` is **not** one of them any more: limits are on by default in development too, and only an operator setting one of the three flags above turns them off. Exposed as a plain function of the env so the rule is testable without an HTTP request.
 - `shouldSkip(context: ExecutionContext)` -> Returns `false` (throttle) whenever the limits are active; an explicit `RATE_LIMIT_ENABLED=true` outranks the environment default. When throttling is off, the `x-skip-throttle` / `x-bypass-rate-limit` headers are honoured only if an operator set `RATE_LIMIT_HEADER_BYPASS=true`, and never under `APP_ENV=production` — a request cannot opt itself out.
-- `getTracker(req)` -> Throttling bucket key: `user:<id>` when `req.user` is already populated, otherwise `ip:<first x-forwarded-for value>` (`src/common/guards/custom-throttler.guard.ts:54-71`). In practice the second branch always wins: this guard is registered as the app-wide `APP_GUARD` (`src/app/app.module.ts:159-162`) and global guards run before a route's `JwtAuthGuard`, so `req.user` is still unset when the key is built. Every limit is per-IP today, including for authenticated traffic — which is why a shared NAT or proxy divides one account's budget.
+- `getTracker(req)` -> Throttling bucket key: `user:<id>` when `req.user` is already populated, otherwise `ip:<address>` (`src/common/guards/custom-throttler.guard.ts:52-69`). The address is Express's resolved `req.ip` — never a forwarding header read straight off the request, because a bucket a client can pick is a bucket a client can refill (`:59-62`) — and IPv6 is masked to its subnet by `normalizeIp(ip, this.ipv6SubnetPrefix)`, /64 by default (`:64-68`). In practice the second branch always wins: this guard is registered as the app-wide `APP_GUARD` (`src/app/app.module.ts:262-265`) and global guards run before a route's `JwtAuthGuard`, so `req.user` is still unset when the key is built. Every limit is per-IP today, including for authenticated traffic — which is why a shared NAT or proxy divides one account's budget.
 
 #### `JwtAuthGuard` (`src/auth/guards/jwt-auth.guard.ts`)
 
-- `canActivate(context: ExecutionContext)` -> `AuthGuard("jwt")` for the `jwt` passport strategy, with `handleRequest` turning a missing or invalid token into `401 Authentication token missing or invalid`. The strategy reads the access token from the `Authorization: Bearer <token>` header only (`src/auth/strategies/jwt.strategy.ts:24-38`, two bearer extractors); the `refresh_token` cookie is handled in `AuthController`, never by this guard.
+- `canActivate(context: ExecutionContext)` -> `AuthGuard("jwt")` for the `jwt` passport strategy, with `handleRequest` turning a missing or invalid token into `401 Authentication token missing or invalid`. The strategy reads the access token from the `Authorization: Bearer <token>` header only (`src/auth/strategies/jwt.strategy.ts:26-40`, two bearer extractors); the `refresh_token` cookie is handled in `AuthController`, never by this guard.

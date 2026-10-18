@@ -33,8 +33,12 @@ export class VaultSettingsController {
 
   @Post("setup")
   @ApiOperation({
+    // "Zero-knowledge" was dropped from this summary because it is conditional:
+    // the server holds a peppered verifier digest and the recovery envelope, so
+    // it can authenticate a password. It cannot read an entry, because the
+    // master key only ever arrives wrapped under a key from the recovery phrase.
     summary:
-      "Configure zero-knowledge master key parameters (salt, KDF iterations, verification hash)",
+      "Configure master key parameters (salt, KDF costs, verifier) and store the phrase-wrapped recovery envelope",
   })
   @ApiResponse({
     status: 201,

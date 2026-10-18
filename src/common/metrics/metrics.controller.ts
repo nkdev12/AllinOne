@@ -6,12 +6,16 @@ import {
   ApiBearerAuth,
 } from "@nestjs/swagger";
 import { MetricsService } from "./metrics.service";
-import { JwtAuthGuard } from "@/auth/guards/jwt-auth.guard";
-import { AdminGuard } from "@/admin/guards/admin.guard";
+import { MetricsScrapeGuard } from "./metrics-scrape.guard";
 
 @ApiTags("Metrics")
 @Controller("metrics")
-@UseGuards(JwtAuthGuard, AdminGuard)
+// Not the `JwtAuthGuard, AdminGuard` pair every other admin surface stacks:
+// guards run in declaration order, so that pair 401s a scrape before
+// `AdminGuard`'s shared-secret branch is reached. `MetricsScrapeGuard` takes
+// both presentations itself and delegates to those two guards for a human
+// caller — see its decision order.
+@UseGuards(MetricsScrapeGuard)
 @ApiBearerAuth()
 export class MetricsController {
   constructor(private readonly metricsService: MetricsService) {}
@@ -21,7 +25,8 @@ export class MetricsController {
   @ApiOperation({ summary: "Expose Prometheus metrics in text format" })
   @ApiResponse({
     status: 200,
-    description: "Prometheus metrics exposition output",
+    description:
+      "Prometheus metrics exposition output. The bearer credential is either an admin's access token or, for a scrape, the shared `ADMIN_SECRET` value itself.",
   })
   async getMetrics(): Promise<string> {
     return this.metricsService.getPrometheusMetrics();

@@ -806,15 +806,45 @@ describe("change-payload validator", () => {
     expect(thrown).toBeInstanceOf(BadRequestException);
     expect(thrown.getResponse()).toEqual({
       code: ErrorCode.SYNC_PUSH_REJECTED,
-      message: ["changes[0].payload.iv: must be a present, non-empty string"],
+      message:
+        "1 problem in this batch would not replay on another device. See details.fields.",
       details: {
         fields: [
           {
             field: "changes[0].payload.iv",
-            messages: ["must be a present, non-empty string"],
+            messages: ["must be a present, non-empty string."],
           },
         ],
       },
     });
+  });
+
+  it("shapes a declined batch like the global validation pipe", () => {
+    // A push body has already cleared the pipe by the time this fires, so it
+    // builds the same envelope by hand: `message` stays one string and the
+    // per-field prose lives only in `details.fields`. A client that renders a
+    // 400 must not have to know which of the two producers wrote it.
+    let thrown: any;
+    try {
+      assertPushableChanges([
+        vaultChange({ iv: "", isEncrypted: 1 }),
+        { entityType: "ghost", operation: ChangeOperation.CREATE, payload: {} },
+      ]);
+    } catch (error) {
+      thrown = error;
+    }
+
+    const body = thrown.getResponse();
+    expect(typeof body.message).toBe("string");
+    expect(body.details.fields.map(({ field }: any) => field)).toEqual([
+      "changes[0].payload.iv",
+      "changes[0].payload.isEncrypted",
+      "changes[1].entityType",
+    ]);
+    for (const entry of body.details.fields) {
+      for (const message of entry.messages) {
+        expect(message.endsWith(".")).toBe(true);
+      }
+    }
   });
 });

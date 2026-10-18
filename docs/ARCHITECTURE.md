@@ -198,7 +198,7 @@ Reverse Proxy (Caddy/Nginx)
 ```
 
 > [!NOTE]
-> **What `docker-compose.prod.yml` actually defines, verified 2026-09-27:** a single `api` container (`allinone-api-prod`, no `replicas` key) and **two `worker` replicas** (`deploy.replicas: 2`), one `mongodb` (`mongo:7.0`, `--replSet rs0 --bind_ip_all`), one `redis` (`redis:7-alpine`, `--appendonly yes --requirepass ${REDIS_PASSWORD}`), one `minio`, plus `caddy`, `prometheus` and `grafana`. So the API-1/API-2 pair, "Redis (cluster)" and "MinIO (cluster/replication)" above are the intended shape, not the delivered one: the diagram puts the horizontal scaling on the API, while the file puts it on the worker. What the API does get is `REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379`, and because `src/main.ts` installs `SyncIoAdapter` at boot that means a second `api` replica would now attempt Redis-backed room broadcast rather than silently running per-process — the Socket.IO half of horizontal scaling is no longer the blocker it was. `depends_on` already gates the API on redis being healthy, so the usual "Redis is configured but down at boot" case is covered here too. The remaining reasons not to raise `api` above one replica are the rate limiter (in-process storage — see Horizontal Scaling) and the fact that no one has run two. See "Horizontal Scaling" under Scaling Considerations.
+> **What `docker-compose.prod.yml` actually defines, verified 2026-09-27:** a single `api` container (`allinone-api-prod`, no `replicas` key) and **two `worker` replicas** (`deploy.replicas: 2`), one `mongodb` (`mongo:7.0`, `--replSet rs0 --bind_ip_all`), one `redis` (`redis:7-alpine`, `--appendonly yes --requirepass ${REDIS_PASSWORD}`), one `minio`, plus `caddy`, `prometheus` and `grafana`. So the API-1/API-2 pair, "Redis (cluster)" and "MinIO (cluster/replication)" above are the intended shape, not the delivered one: the diagram puts the horizontal scaling on the API, while the file puts it on the worker. What the API does get is `REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379`, and because `src/main.ts` installs `SyncIoAdapter` at boot that means a second `api` replica would now attempt Redis-backed room broadcast rather than silently running per-process — the Socket.IO half of horizontal scaling is no longer the blocker it was. `depends_on` already gates the API on redis being healthy, so the usual "Redis is configured but down at boot" case is covered here too. The rate limiter is not a blocker either once Redis is selected: `ThrottlerModule.forRootAsync` passes `RedisThrottlerStorage` whenever `ConfigurationService.usesRedisThrottlerStorage` is true (`src/app/app.module.ts:218-238`, `src/config/configuration.service.ts:780-788`), so counters are shared rather than per-process. What still argues against raising `api` above one replica is the Socket.IO adapter's silent in-memory fallback (see Horizontal Scaling) and the fact that no one has run two. See "Horizontal Scaling" under Scaling Considerations.
 
 ## Database Schema Layers
 
@@ -455,13 +455,22 @@ which is why it is honest about being slow rather than indexed.
 
 - ✅ Redis-backed job queue — _provisioned, not wired: see the queue warning under
   "Why queues — and which one"_
-- ✅ Rate limiting with a shared counter store — **the one live use**:
-  `RedisThrottlerStorage` (`src/common/throttler/redis-throttler.storage.ts`), which
-  fails **open** and permits the request when Redis errors
+- ✅ Rate limiting with a shared counter store — **live**:
+  `RedisThrottlerStorage` (`src/common/throttler/redis-throttler.storage.ts`) is passed to
+  `ThrottlerModule.forRootAsync` whenever `ConfigurationService.usesRedisThrottlerStorage`
+  is true (`src/app/app.module.ts:218-238`, `src/config/configuration.service.ts:780-788`),
+  and the library's in-memory default stays only for a test run or a local process that
+  named no `REDIS_URL` (`src/app/app.module.ts:55-69`). It fails **open** and permits the
+  request when Redis errors (`src/common/throttler/redis-throttler.storage.ts:113-121`)
+- ✅ Rotated-refresh-token grace records, shared so a second worker can honour a retry —
+  `RefreshTokenGraceStore` keys them at `auth:refresh-grace:`
+  (`src/auth/refresh-token-grace.store.ts:23`, written `:158-176`) and opens its Redis
+  client only when `ConfigurationService.usesRedisThrottlerStorage` is true (`:78-88`);
+  `AuthService` reads them at `src/auth/auth.service.ts:913-941`
 - ✅ Session / cache tier — _not used: there is no application cache, and sessions live
   in MongoDB_
 - ✅ Socket.IO pub/sub backplane for a multi-instance API — _installed at boot by
-  `SyncIoAdapter` (`src/main.ts:97`) when `REDIS_URL` is set; falls back to per-process
+  `SyncIoAdapter` (`src/main.ts:181`) when `REDIS_URL` is set; falls back to per-process
   rooms, unreported, when Redis is unreachable_
 - ✅ Good cluster/HA options — what is actually deployed is a single `redis:7-alpine`
   with `--appendonly yes --requirepass ${REDIS_PASSWORD}`, not a cluster
@@ -514,15 +523,15 @@ mock/offline)")` and the process stays up, idle. Both `worker` replicas spend
 >   guards, `SyncModule`, and a Socket.IO server bound to a nonexistent HTTP server.
 >
 > Mail still goes out — just not through a queue. `AuthModule` imports `MailModule`
-> (`src/auth/auth.module.ts:22`) and calls `MailService` directly and
-> `@Optional()`-ly (`src/auth/auth.service.ts:58`, and the same in
-> `src/vault/services/vault-settings.service.ts:56`), so verification and
+> (`src/auth/auth.module.ts:23`) and calls `MailService` directly and
+> `@Optional()`-ly (`src/auth/auth.service.ts:70`, and the same in
+> `src/vault/services/vault-settings.service.ts:80`), so verification and
 > password-reset mail is sent inline on the request path, and a `MailService`
 > resolution failure is silently swallowed rather than failing the request.
 > `mail.processor.ts` and `notification.processor.ts` have no producer anywhere:
 > no `@InjectQueue`, no `getQueueToken`, no `.add(` outside `src/worker.ts`. The
 > export queue is the same story, and more explicitly: `requestDataExport`
-> (`src/users/users.service.ts:110-125`) loads the user, logs, and returns
+> (`src/users/users.service.ts:388-406`) loads the user, logs, and returns
 > `"Data export request recorded. Background export delivery is disabled."` — it
 > enqueues nothing, while its own `@ApiResponse` still advertises `202` "Export
 > request accepted and queued".
@@ -547,7 +556,7 @@ capabilities as if a client existed:
   `@aws-sdk/*`, no `aws-sdk`, no `minio`, and `grep -rn "S3Client|PutObject|getObject"
 src` returns nothing. `src/common/aws/` is an **empty directory**.
 - The settings are nevertheless mandatory: `ConfigurationService` exposes six
-  `objectStorage*` getters (`src/config/configuration.service.ts:147-168`) that
+  `objectStorage*` getters (`src/config/configuration.service.ts:609-631`) that
   **nothing calls**, and both composition roots `Joi.required()` four of them
   (`src/app/app.module.ts:76-81`, `src/worker.module.ts:32-35`). So the process will
   not boot without credentials for a service it never contacts — which is why a
@@ -579,7 +588,7 @@ a route.
            ↓
 4. Hybrid Token Delivery:
    - Body Payload: Returns Access Token in JSON response body (and Refresh Token for native clients)
-   - HTTP Cookie: Sets secure `httpOnly; Secure; SameSite=Strict` cookie `refresh_token` scoped to `/auth/refresh`
+   - HTTP Cookie: Sets secure `httpOnly; Secure; SameSite=Strict` cookie `refresh_token` scoped to `/auth/refresh` (`setRefreshTokenCookie` `src/auth/auth.controller.ts:80-95`; `httpOnly`, `secure`, `sameSite` and `path` are all unconditional, so `SameSite=Strict` means the web client and this API must be served from one registrable domain). The cookie follows the issued session rather than the route: login, the three OAuth logins, `POST /auth/register` (`:118`) and `POST /auth/mfa/verify` (`:368`) all set it, and register only when a session was actually minted (`src/auth/auth.service.ts:171-177,189-195`)
            ↓
 5. Client Token Management:
    - Web Clients: Store Access Token in memory; browser automatically manages `httpOnly` refresh cookie
@@ -590,8 +599,8 @@ a route.
    - Server validates token signature, claims, and active session status
            ↓
 7. Token Rotation (`POST /auth/refresh`):
-   - Client sends cookie or body `refreshToken`
-   - Server revokes prior refresh token, updates DB session, and issues fresh token pair
+   - A body `refreshToken` proves possession and needs nothing else (the native path). A cookie-only refresh must also carry the non-empty `x-client-version` barrier header, or the server refuses it `403 TOKEN_INVALID` (`REFRESH_REQUEST_HEADER` `src/auth/dto/refresh-token.dto.ts:12`, enforced at `src/auth/auth.controller.ts:248-253`, `hasRefreshBarrier()` at `:268-271`). The full HTTP contract is in [API_REFERENCE.md](API_REFERENCE.md)
+   - Server revokes prior refresh token, updates DB session, and issues fresh token pair; the same credential presented again inside the 30-second rotation grace window is answered with the pair already minted (`REFRESH_ROTATION_GRACE_MS` `src/auth/auth.service.ts:60`, read at `:913-941`, written at `:1021-1030`), and that window lives in Redis so every worker shares it (`src/auth/refresh-token-grace.store.ts`)
 ```
 
 ### Authorization Flow
@@ -633,9 +642,12 @@ Backup (encrypted snapshots)
 ```
 Incoming request
            ↓
-Extract identifier (IP + user + endpoint)
+Build bucket key: user:<id> if req.user is set, else ip:<req.ip>
+(IPv6 masked to a /64; as an APP_GUARD this runs before a route's
+JwtAuthGuard, so on HTTP requests the key is always the IP)
            ↓
-Check Redis counter
+Check the counter at throttler:<key> in Redis
+(in-memory default only in a test run or without REDIS_URL)
            ↓
 If exceeded: return 429 Too Many Requests
            ↓
@@ -655,8 +667,10 @@ Only two of the four layers this list used to claim exist in today's build:
    rather than a designed layer.
 2. ~~**Redis Application Cache** — Frequently accessed data~~ **does not exist.**
    There is no cache-aside, no TTL wrapper, no `get`/`set` helper anywhere in `src/`.
-   Redis is used for exactly one thing in the running system: the counters behind
-   `RedisThrottlerStorage`. Every read in every service goes to MongoDB.
+   Redis holds coordination state, not data: the throttle counters behind
+   `RedisThrottlerStorage`, the rotated-refresh grace records in `RefreshTokenGraceStore`
+   (`src/auth/refresh-token-grace.store.ts`), and the Socket.IO pub/sub traffic when
+   `REDIS_URL` is set. Every read in every service goes to MongoDB.
 3. **Database Engine Cache** — MongoDB's WiredTiger cache. Real, and the only
    server-side cache actually in play; sized by the container, not by this repo.
 4. **CDN Cache** — Static assets (if using CDN). There is no static asset route; Caddy
@@ -695,7 +709,17 @@ When data changes (REST write on notes/tasks/events, AI task conversion, or /syn
 
 ### Metrics
 
-`MetricsService` hand-builds the `/metrics` payload; these are the only series it exports (verified 2026-09-27 against `src/common/metrics/metrics.service.ts`):
+`MetricsService` hand-builds the `/metrics` payload. The endpoint itself is no longer
+public: `MetricsController` carries one guard, `@UseGuards(MetricsScrapeGuard)`
+(`src/common/metrics/metrics.controller.ts:13-18`), which accepts either an admin's access
+token or the shared `ADMIN_SECRET` presented as `Authorization: Bearer …` or `x-admin-secret`
+(`src/common/metrics/metrics-scrape.guard.ts:60-87`). It replaced the `JwtAuthGuard, AdminGuard`
+pair every other admin surface stacks, which could never authorise a scrape: guards run in
+declaration order, so the JWT guard answered `401` before `AdminGuard`'s secret branch — itself
+behind a `!request.user` refusal — was reached (`:23-51`). The `allinone-api` job in
+`infrastructure/prometheus/prometheus.prod.yml:11-14` now supplies that credential from
+`/run/secrets/metrics_scrape_secret` (`:27-29`), so the scrape is no longer the anonymous `401`
+it used to be. These are the only series it exports (verified 2026-09-27 against `src/common/metrics/metrics.service.ts`):
 
 - `http_request_duration_seconds` — histogram, so request count and p50/p95/p99 latency are both derivable from it
 - `process_uptime_seconds`, `process_resident_memory_bytes` — process-level gauges
@@ -737,7 +761,7 @@ Multiple API instances
         ↓
 Shared MongoDB
         ↓
-Shared Redis (rate-limit counters only — see the warning below)
+Shared Redis (rate-limit counters + refresh-grace records — see the notes below)
         ↓
 Sticky sessions / shared state
 ```
@@ -746,18 +770,27 @@ The pieces this needs are not all in place, verified 2026-09-27:
 
 - **JWTs are stateless, so auth itself scales.** A second API instance can verify
   tokens issued by the first without shared state.
-- **Rate limits do NOT scale, and this bullet claimed the opposite until 2026-09-27.**
-  `RedisThrottlerStorage` (`src/common/throttler/redis-throttler.storage.ts`) is written,
-  unit-tested and never used: `ThrottlerModule.forRootAsync` (`src/app/app.module.ts:160-169`)
-  passes `ttl` and `limit` and no `storage` option, and no `storage:` assignment exists
-  anywhere in `src/`. `@nestjs/throttler` therefore keeps its counters in its own in-memory
-  `ThrottlerStorageService`, so every replica holds an independent budget and N instances
-  answer N times the declared limit. `SECURITY.md`'s rate-limiting section states this
-  correctly; the contradiction between the two files was the bug.
+- **Rate limits scale once the deployment selects the shared store.**
+  `RedisThrottlerStorage` (`src/common/throttler/redis-throttler.storage.ts`) is wired:
+  `ThrottlerModule.forRootAsync` (`src/app/app.module.ts:218-238`) spreads a `storage`
+  option whenever the injected instance exists, and `ThrottlerStorageModule`
+  (`src/app/app.module.ts:55-69`) constructs one exactly when
+  `ConfigurationService.usesRedisThrottlerStorage` is true
+  (`src/config/configuration.service.ts:780-788`) — false for a test run and for a local
+  process that named no `REDIS_URL`, which keep the library's in-memory
+  `ThrottlerStorageService` and its per-process budget. Counters live at
+  `throttler:<key>` (`src/common/throttler/redis-throttler.storage.ts:72`) and the store
+  fails **open** when Redis errors (`:113-121`).
+- **What still does not scale is the bucket, not the store.** The app-wide `APP_GUARD`
+  (`src/app/app.module.ts:262-265`) runs before a route's `JwtAuthGuard`, so `req.user` is
+  unset when the key is built and every HTTP limit is keyed by IP
+  (`getTracker` `src/common/guards/custom-throttler.guard.ts:52-69`, IPv6 masked to a /64);
+  one shared NAT or proxy divides one account's budget across the whole building. The
+  `user:<id>` branch is written but unreachable over HTTP.
 - **Real-time invalidation now scales when Redis is configured, and silently does not
   otherwise.** `SyncGateway` emits `sync:invalidation` to the `user:<userId>` room
   (`src/sync/sync.gateway.ts`), and rooms are per-process unless the server's adapter is
-  replaced. It is replaced: `src/main.ts:97` installs `SyncIoAdapter`
+  replaced. It is replaced: `src/main.ts:181` installs `SyncIoAdapter`
   (`src/sync/adapters/sync-io.adapter.ts`), which extends `RedisIoAdapter`
   (`src/sync/adapters/redis-io.adapter.ts`) and connects it before `listen()` — but only when
   `REDIS_URL` is set and `WS_REDIS_ADAPTER` is not `false`. When Redis is configured and
@@ -767,9 +800,10 @@ The pieces this needs are not all in place, verified 2026-09-27:
   only as good as the `[sync-ws] … Clustering:` line in its boot log. Tracked as P0-4.
 - **Nothing starts a second instance anyway.** `docker-compose.prod.yml` runs one
   `api` container; its two `worker` replicas do not serve HTTP (see the queue warning
-  above). "Multiple API instances" is the shape the diagrams draw — and after the 2026-09-27
-  fixes it is closer to supported than it was, with rate limiting the remaining reason it is
-  still not safe to start one.
+  above). "Multiple API instances" is the shape the diagrams draw — and after the
+  2026-09-27 fixes it is closer to supported than it was: with the Redis throttler store
+  selected, shared counters and a shared refresh-grace window are in place, so the
+  remaining reasons are the IP-keyed buckets and the silent Socket.IO fallback above.
 
 ### Vertical Scaling
 
@@ -777,9 +811,11 @@ The pieces this needs are not all in place, verified 2026-09-27:
 - MongoDB connection concurrency — Prisma's MongoDB connector does not expose a
   Postgres-style `pool=` knob, and `DATABASE_URL` in both compose files carries no pool
   parameter
-- Increase Redis memory — it holds Socket.IO pub/sub traffic once `/sync` clustering is
-  active, and nothing at all today: `RedisThrottlerStorage` is not registered (see
-  Horizontal Scaling), so no throttle counters live there
+- Increase Redis memory — it holds the throttle counters and the rotated-refresh grace
+  records (both short-TTL keys) and, once `/sync` clustering is active, Socket.IO pub/sub
+  traffic; the grace records are bounded by the refresh-token lifetime
+  (`src/auth/refresh-token-grace.store.ts`) and the counters by the window they belong to
+  (`src/common/throttler/redis-throttler.storage.ts:124-146`)
 
 ### Database Optimization
 

@@ -2,6 +2,7 @@ import { validMembers, validShares } from "../finance/groups/group-validation";
 import { ChangeOperation } from "@prisma/client";
 import { ErrorCode } from "@/common/errors/error-code";
 import { badRequest } from "@/common/errors/http-errors";
+import { toSentence } from "@/common/errors/validation.pipe";
 import type { FieldValidationError } from "@/common/errors/validation.pipe";
 
 /**
@@ -1660,17 +1661,30 @@ function violationsForChange(
  * Every problem in the batch, in push order, without stopping at the first one:
  * a client that gets a whole batch refused learns about all of its bad rows in
  * one trip instead of one per retry.
+ *
+ * Messages go through `toSentence()` so an entry from here is the same shape as
+ * one from `createValidationPipe()`, which a push body never reaches for these:
+ * the DTO has already passed by the time this runs.
  */
 export function collectChangeViolations(
   changes: readonly ChangeEnvelope[],
 ): FieldValidationError[] {
-  return changes.flatMap((change, index) => violationsForChange(change, index));
+  return changes
+    .flatMap((change, index) => violationsForChange(change, index))
+    .map(({ field, messages }) => ({
+      field,
+      messages: messages.map(toSentence),
+    }));
 }
 
 /**
  * Rejects a push whose changes could not be replayed on another device. Throwing
  * before any write happens is the point: a stored row is copied to every device
  * for the life of the log and cannot be unsent.
+ *
+ * The envelope is the global one — a summary in `message`, every problem in
+ * `details.fields` — because a client branches on `code`, which stays
+ * `SYNC_PUSH_REJECTED` so the app can show its own copy for a declined batch.
  */
 export function assertPushableChanges(
   changes: readonly ChangeEnvelope[],
@@ -1680,9 +1694,9 @@ export function assertPushableChanges(
 
   throw badRequest(
     ErrorCode.SYNC_PUSH_REJECTED,
-    fields.flatMap(({ field, messages }) =>
-      messages.map((message) => `${field}: ${message}`),
-    ),
+    `${fields.length} problem${
+      fields.length === 1 ? "" : "s"
+    } in this batch would not replay on another device. See details.fields.`,
     { fields },
   );
 }

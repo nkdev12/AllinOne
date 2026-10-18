@@ -3,7 +3,9 @@ import {
   HttpException,
   UnauthorizedException,
   BadRequestException,
+  InternalServerErrorException,
   Logger,
+  OnModuleDestroy,
   Optional,
 } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
@@ -39,17 +41,17 @@ import {
 } from "./dto/mfa.dto";
 import { AuthType, Platform, AuditAction, OtpPurpose } from "@prisma/client";
 import { Session } from "@prisma/client";
+import { RefreshTokenGraceStore } from "./refresh-token-grace.store";
 
-interface RotatedRefreshGraceRecord {
-  tokens: AuthTokenDataDto;
-  deviceId: string;
-  sessionId: string;
-  userId: string;
-  expiresAt: number;
-}
+/**
+ * Static dummy Argon2id hash used to mitigate timing side-channel attacks on login
+ * when an identifier does not exist. Equalizes the CPU time with valid user verification.
+ */
+const DUMMY_PASSWORD_HASH =
+  "$argon2id$v=19$m=65536,p=4,t=3$kIaBk8+Q+oR/A3ovCYSv5w$K2ZLxsl53yy8Bd0dFD0j5a992udAjB47HsvqsRw+LkA";
 
 @Injectable()
-export class AuthService {
+export class AuthService implements OnModuleDestroy {
   private readonly logger = new Logger(AuthService.name);
   private readonly googleClient = new OAuth2Client();
   private appleJwksCache: { keys: any[]; fetchedAt: number } | null = null;
@@ -63,10 +65,7 @@ export class AuthService {
    * without invalidating the session.
    */
   static readonly REFRESH_ROTATION_GRACE_MS = 30 * 1000;
-  private readonly rotatedTokensGraceMap = new Map<
-    string,
-    RotatedRefreshGraceRecord
-  >();
+  private readonly rotatedRefreshGrace: RefreshTokenGraceStore;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -76,7 +75,32 @@ export class AuthService {
     private readonly otpService: OtpService,
     @Optional() private readonly auditLogService?: AuditLogService,
     @Optional() private readonly mailService?: MailService,
-  ) {}
+    // The grace window is shared state, so it does not live in a field on this
+    // service — but `AuthModule`'s provider list is not this file to widen, so an
+    // unregistered class dependency resolves to `undefined` and the store is built
+    // here unless a caller (the specs, or a future provider) brings its own.
+    @Optional() graceStore?: RefreshTokenGraceStore,
+  ) {
+    this.rotatedRefreshGrace =
+      graceStore ?? new RefreshTokenGraceStore(this.configService);
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await this.rotatedRefreshGrace.close();
+  }
+
+  /**
+   * A database must never hold a reusable refresh credential. The value in the
+   * existing `Session.refreshToken` column is a keyed one-way digest for new
+   * sessions. Keeping the field name avoids a disruptive Mongo migration;
+   * legacy plaintext values are accepted once and replaced on refresh.
+   */
+  private hashRefreshToken(token: string): string {
+    return crypto
+      .createHmac("sha256", this.configService.jwtRefreshSecret)
+      .update(token)
+      .digest("hex");
+  }
 
   async register(dto: RegisterDto): Promise<AuthResponseDto> {
     const existingUser = await this.usersService.findByEmail(dto.email);
@@ -134,12 +158,6 @@ export class AuthService {
       throw error;
     }
 
-    const { tokens, session } = await this.issueSession({
-      userId: result.user.id,
-      email: result.user.email,
-      deviceId: result.device.id,
-    });
-
     this.requestEmailVerification(result.user.email).catch((err) => {
       this.logger.error(
         `Failed to generate initial verification OTP for ${result.user.email}`,
@@ -154,6 +172,17 @@ export class AuthService {
       resourceId: result.user.id,
     });
 
+    // Do not hand out credentials before a mailbox has been proven. Keeping
+    // this explicit opt-out makes local development possible without making a
+    // production deployment silently authenticate unverified accounts.
+    const issuedSession = this.configService.emailVerifyEnabled
+      ? undefined
+      : await this.issueSession({
+          userId: result.user.id,
+          email: result.user.email,
+          deviceId: result.device.id,
+        });
+
     return {
       user: {
         id: result.user.id,
@@ -164,9 +193,13 @@ export class AuthService {
         status: result.user.status,
         createdAt: result.user.createdAt,
       },
-      tokens,
-      sessionId: session.id,
-      deviceId: result.device.id,
+      ...(issuedSession
+        ? {
+            tokens: issuedSession.tokens,
+            sessionId: issuedSession.session.id,
+            deviceId: result.device.id,
+          }
+        : {}),
     };
   }
 
@@ -186,6 +219,11 @@ export class AuthService {
     });
 
     if (!authRecord || !authRecord.passwordHash) {
+      // Execute dummy argon2 verification to equalize CPU timing and prevent account enumeration
+      await Promise.resolve()
+        .then(() => argon2.verify(DUMMY_PASSWORD_HASH, dto.password))
+        .catch(() => false);
+
       await this.auditLogService?.recordAuditLog({
         userId: authRecord
           ? authRecord.userId
@@ -235,23 +273,38 @@ export class AuthService {
     );
 
     if (!isPasswordValid) {
-      const attempts = (user.failedLoginAttempts || 0) + 1;
       const MAX_FAILED_ATTEMPTS = 5;
       const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
-      const isNowLocked = attempts >= MAX_FAILED_ATTEMPTS;
-      const lockedUntil = isNowLocked
-        ? new Date(Date.now() + LOCKOUT_DURATION_MS)
-        : null;
 
-      await this.prisma.user.update({
+      // `$inc` is applied by MongoDB inside the update itself. Reading the row,
+      // adding one and writing the absolute value back let two failures arriving
+      // together each store `baseline + 1`, so a retry storm or a spray from
+      // several IPs silently dropped the increments this threshold is built on —
+      // the one counter an attacker is trying to keep low. `select` returns the
+      // row as it looks *after* the increment, so the decision below is made
+      // against what is really stored and not against a number this request
+      // computed for itself. `?? 0` covers rows written before the field existed
+      // and are only created by this increment.
+      const counted = await this.prisma.user.update({
         where: { id: user.id },
-        data: {
-          failedLoginAttempts: attempts,
-          lockedUntil,
-        },
+        data: { failedLoginAttempts: { increment: 1 } },
+        select: { failedLoginAttempts: true, lockedUntil: true },
       });
+      const attempts = counted?.failedLoginAttempts ?? 0;
+      const isNowLocked = attempts >= MAX_FAILED_ATTEMPTS;
+      let lockedUntil: Date | null = null;
 
       if (isNowLocked) {
+        lockedUntil = new Date(Date.now() + LOCKOUT_DURATION_MS);
+        // Compare-and-swap on the `lockedUntil` this request just read: the first
+        // writer to cross the threshold installs the cooldown, and one racing it
+        // matches zero rows instead of stretching or replacing a window that has
+        // already opened.
+        await this.prisma.user.updateMany({
+          where: { id: user.id, lockedUntil: counted?.lockedUntil ?? null },
+          data: { lockedUntil },
+        });
+
         await this.auditLogService?.recordAuditLog({
           userId: user.id,
           action: AuditAction.ACCOUNT_LOCKED,
@@ -300,10 +353,24 @@ export class AuthService {
       );
     }
 
+    if (this.configService.emailVerifyEnabled && !user.emailVerifiedAt) {
+      throw unauthorized(
+        ErrorCode.EMAIL_NOT_VERIFIED,
+        "Verify your email address before signing in.",
+      );
+    }
+
     // Reset failed login attempts and lockout upon successful authentication
     if (user.failedLoginAttempts > 0 || user.lockedUntil !== null) {
-      await this.prisma.user.update({
-        where: { id: user.id },
+      // `argon2.verify` sits between the row read at the top of `login` and this
+      // write, so the window in which a concurrent failure can cross the
+      // threshold and install a lock is a few hundred milliseconds wide rather
+      // than theoretical. Matching on the `lockedUntil` this request read is what
+      // stops a slow, already-successful login from wiping the cooldown another
+      // request just opened: if the value no longer matches, that lock stands and
+      // this reset simply applies to zero rows.
+      await this.prisma.user.updateMany({
+        where: { id: user.id, lockedUntil: user.lockedUntil ?? null },
         data: {
           failedLoginAttempts: 0,
           lockedUntil: null,
@@ -816,6 +883,27 @@ export class AuthService {
     };
   }
 
+  /**
+   * The account-status gate `login` applies, on every path that can still mint.
+   *
+   * `User.status` and `deletedAt` change long after a session opens, and a
+   * refresh credential lives for `JWT_REFRESH_EXPIRATION` — days — so a gate that
+   * runs only at login leaves a suspended, deleted or still-pending account
+   * minting fresh access tokens for the whole lifetime of a session it no longer
+   * qualifies for. Every revocation and deactivation flow assumes the gate is on
+   * the mint, not on the memory of one.
+   */
+  private isBlockedAccount(
+    user: {
+      status?: string;
+      deletedAt?: Date | null;
+    } | null,
+  ): boolean {
+    // A user that could not be read denies rather than passes: this is the one
+    // place where a missing relation must not default to "still signed in".
+    return !user || user.status !== "ACTIVE" || Boolean(user.deletedAt);
+  }
+
   async refreshTokens(
     dto: RefreshTokenDto,
   ): Promise<{ tokens: AuthTokenDataDto; deviceId: string }> {
@@ -830,21 +918,34 @@ export class AuthService {
         secret: this.configService.jwtRefreshSecret,
       });
 
-      this.pruneExpiredGraceTokens();
-
       // If a recently rotated token arrives within the grace window (e.g. concurrent
       // requests or network retries), return the already generated active tokens.
-      const graceRecord = this.rotatedTokensGraceMap.get(dto.refreshToken);
-      if (graceRecord && graceRecord.expiresAt > Date.now()) {
+      // The window is read from shared storage rather than this process, so a
+      // replay routed to a different replica is recognised as the same reuse.
+      const graceRecord = await this.rotatedRefreshGrace.get(dto.refreshToken);
+      if (graceRecord) {
         const session = await this.prisma.session.findUnique({
           where: { id: graceRecord.sessionId },
-          select: { id: true, revokedAt: true, refreshExpiresAt: true },
+          select: {
+            id: true,
+            revokedAt: true,
+            refreshExpiresAt: true,
+            // The window hands back a minted pair without touching the rotation,
+            // so it needs the account gate as much as the mint path below does.
+            user: { select: { status: true, deletedAt: true } },
+          },
         });
         if (
           session &&
           !session.revokedAt &&
           session.refreshExpiresAt > new Date()
         ) {
+          if (this.isBlockedAccount(session.user)) {
+            throw unauthorized(
+              ErrorCode.TOKEN_INVALID,
+              "Invalid or expired refresh token",
+            );
+          }
           this.logger.log(
             `[AuthService] Reused rotated refresh token within grace period for session ${graceRecord.sessionId}. Returning active tokens.`,
           );
@@ -852,17 +953,48 @@ export class AuthService {
         }
       }
 
-      const session = await this.prisma.session.findUnique({
-        where: { refreshToken: dto.refreshToken },
+      const refreshTokenHash = this.hashRefreshToken(dto.refreshToken);
+      let session = await this.prisma.session.findUnique({
+        where: { refreshToken: refreshTokenHash },
         include: { user: true },
       });
 
+      // Existing sessions created before token-at-rest hardening contain the
+      // raw token. Allow a single compatibility read so the next successful
+      // refresh rotates it into the digest-only representation.
+      if (!session) {
+        session = await this.prisma.session.findUnique({
+          where: { refreshToken: dto.refreshToken },
+          include: { user: true },
+        });
+      }
+
+      if (!session) {
+        // No row holds this credential: it is either garbage or a token this
+        // service rotated and replaced. The marker distinguishes the two.
+        await this.reportConfirmedRefreshTokenReuse(dto.refreshToken);
+        throw unauthorized(
+          ErrorCode.TOKEN_INVALID,
+          "Invalid or expired refresh token",
+        );
+      }
+
       if (
-        !session ||
         session.revokedAt ||
         session.refreshExpiresAt < new Date() ||
         session.userId !== payload.sub
       ) {
+        throw unauthorized(
+          ErrorCode.TOKEN_INVALID,
+          "Invalid or expired refresh token",
+        );
+      }
+
+      // Refusing here rather than at login is the whole point: `/auth/refresh` is
+      // unauthenticated, so the answer must be the same opaque 401 an unknown
+      // token gets. Naming "suspended" would hand whoever holds a stolen cookie
+      // the news that the account behind it is disabled.
+      if (this.isBlockedAccount(session.user)) {
         throw unauthorized(
           ErrorCode.TOKEN_INVALID,
           "Invalid or expired refresh token",
@@ -885,22 +1017,39 @@ export class AuthService {
       await this.prisma.session.update({
         where: { id: session.id },
         data: {
-          accessToken: tokens.accessToken,
-          refreshToken: tokens.refreshToken,
+          // Access tokens are self-validating JWTs and do not need to be
+          // retained. The session id is non-secret and preserves this legacy
+          // required, unique field until a schema migration can remove it.
+          accessToken: session.id,
+          refreshToken: this.hashRefreshToken(tokens.refreshToken),
           accessExpiresAt,
           refreshExpiresAt,
           lastActivityAt: new Date(),
         },
       });
 
-      // Keep previous refresh token in grace map for a short window to tolerate concurrent requests
-      this.rotatedTokensGraceMap.set(dto.refreshToken, {
-        tokens,
-        deviceId: session.deviceId,
-        sessionId: session.id,
-        userId: session.userId,
-        expiresAt: Date.now() + AuthService.REFRESH_ROTATION_GRACE_MS,
-      });
+      // Keep previous refresh token's rotated pair available for a short window
+      // so a concurrent request on any worker is answered instead of rejected.
+      await this.rotatedRefreshGrace.set(
+        dto.refreshToken,
+        {
+          tokens,
+          deviceId: session.deviceId,
+          sessionId: session.id,
+          userId: session.userId,
+        },
+        AuthService.REFRESH_ROTATION_GRACE_MS,
+      );
+
+      // A second, longer-lived record: the presented credential is now one that
+      // this service rotated. The 30-second window above forgives a lagging
+      // client; this is what makes a copy that turns up after the window
+      // readable as theft instead of as a random invalid token.
+      await this.rotatedRefreshGrace.markRotated(
+        dto.refreshToken,
+        { sessionId: session.id, userId: session.userId },
+        this.configService.jwtRefreshExpiresInSeconds * 1000,
+      );
 
       // The session row knows which device it was opened on, so a client that
       // lost its saved device id gets it back here instead of having to sign in
@@ -918,13 +1067,62 @@ export class AuthService {
     }
   }
 
-  private pruneExpiredGraceTokens(): void {
-    const now = Date.now();
-    for (const [token, record] of this.rotatedTokensGraceMap.entries()) {
-      if (record.expiresAt <= now) {
-        this.rotatedTokensGraceMap.delete(token);
-      }
+  /**
+   * Decide whether a credential no row holds is a replay of a rotated token, and
+   * shut that family down.
+   *
+   * Three things this refuses to do: answer the request, tell the caller which of
+   * them it detected, or let a store outage turn either outcome into a 500. No
+   * marker is readable when Redis is down — `getRotationMarker` answers "no
+   * record" and then throws nothing — so the presented token is refused as
+   * unknown and no revocation happens on the strength of a read that did not.
+   */
+  private async reportConfirmedRefreshTokenReuse(
+    refreshToken: string,
+  ): Promise<void> {
+    const marker =
+      await this.rotatedRefreshGrace.getRotationMarker(refreshToken);
+    if (!marker) return;
+
+    const reused = await this.prisma.session.findUnique({
+      where: { id: marker.sessionId },
+      select: {
+        id: true,
+        userId: true,
+        revokedAt: true,
+        ipAddress: true,
+        userAgent: true,
+      },
+    });
+
+    // Already shut down by logout, device revocation or a password reset, or the
+    // row is gone with the account. The replay is refused below exactly as any
+    // other invalid token, and incident response is not told twice about a reuse
+    // whose first warning is already in the log.
+    if (!reused || reused.revokedAt) {
+      return;
     }
+
+    // Warn before the write: the alert is the point of this function, and a
+    // revocation that throws must not take it down with the request.
+    this.logger.warn(
+      `[AuthService] CONFIRMED refresh-token reuse: user ${reused.userId} session ${reused.id} (ip=${
+        reused.ipAddress ?? "unknown"
+      }, ua=${
+        reused.userAgent ?? "unknown"
+      }) presented a token this service had already rotated, outside the grace window. A second holder of the credential exists; every session for the user is being revoked.`,
+    );
+
+    // No family column, so the reused row is the only handle on the lineage —
+    // and it *is* the lineage, since rotation rewrites this row rather than
+    // creating one. Going on to the user's other sessions is the response
+    // `resetPassword` already documents for "make the credentials this account
+    // holds unusable": access tokens are self-validating JWTs, so revoking the
+    // rows is the only thing that stops a second holder from refreshing into them.
+    await this.prisma.session.updateMany({
+      where: { userId: reused.userId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
   }
 
   async logout(sessionId: string): Promise<{ success: boolean }> {
@@ -938,11 +1136,7 @@ export class AuthService {
     });
 
     // Invalidate any grace records associated with this session
-    for (const [token, record] of this.rotatedTokensGraceMap.entries()) {
-      if (record.sessionId === sessionId) {
-        this.rotatedTokensGraceMap.delete(token);
-      }
-    }
+    await this.rotatedRefreshGrace.deleteForSession(sessionId);
 
     return { success: true };
   }
@@ -968,10 +1162,23 @@ export class AuthService {
         ],
       });
 
-      // Dev-only console fallback so OTP is visible even if email delivery is down.
-      if (!this.configService.isProduction) {
+      // A printed OTP is a live, single-use login credential for the next 60
+      // minutes, so it reaches the console only when the operator has declared
+      // `APP_ENV=development` by name. The old gate was `!isProduction`, which is
+      // a different test: a staging box, a mislabelled deployment, a container
+      // that never read `APP_ENV`, or a `.env` whose later `APP_ENV=production`
+      // line lost the tie-up all fell through it and kept printing codes.
+      // Development is now something to opt into, never something inferred from
+      // the absence of a production label. Everywhere else the log records that a
+      // code exists and whom it went to, which is the question support asks, and
+      // never which code, which is the question an attacker asks.
+      if (this.configService.isDevelopment) {
         this.logger.debug(
           `OTP CODE FOR ${user.email}: ${otp} (expires in 60 minutes)`,
+        );
+      } else {
+        this.logger.debug(
+          `Verification OTP issued for ${user.email} (expires in 60 minutes)`,
         );
       }
 
@@ -980,7 +1187,7 @@ export class AuthService {
         const sent = await this.mailService?.sendOtpEmail(user.email, otp);
         if (!sent) {
           this.logger.warn(
-            `OTP email could not be delivered to ${user.email}. Check Resend configuration.`,
+            `OTP email could not be delivered to ${user.email}. Check SMTP configuration.`,
           );
         }
       } catch (err) {
@@ -1070,9 +1277,14 @@ export class AuthService {
         this.RESET_OTP_TTL_MINUTES,
       );
 
-      // Dev-only console fallback so the code is visible even if email delivery is down.
-      if (!this.configService.isProduction) {
+      // A reset code alone re-owns the account once the mailbox is read, so it
+      // gets the same treatment as the verification code: plaintext only where
+      // `APP_ENV` names development, and elsewhere only the fact that one was
+      // issued. This line used to sit under `!isProduction`, the permissive gate.
+      if (this.configService.isDevelopment) {
         this.logger.debug(`PASSWORD RESET OTP FOR ${user.email}: ${otp}`);
+      } else {
+        this.logger.debug(`Password reset OTP issued for ${user.email}`);
       }
 
       try {
@@ -1082,7 +1294,7 @@ export class AuthService {
         );
         if (!sent) {
           this.logger.warn(
-            `Password reset OTP could not be delivered to ${user.email}. Check Resend configuration.`,
+            `Password reset OTP could not be delivered to ${user.email}. Check SMTP configuration.`,
           );
         }
       } catch (err) {
@@ -1160,11 +1372,53 @@ export class AuthService {
     };
   }
 
+  /**
+   * A checked-in fallback key is worse than a hard failure here, and the reason
+   * is that it fails invisibly: enrolment succeeds, verification succeeds, the
+   * operator sees nothing wrong, and every TOTP secret in the database is
+   * decryptable by anyone who can read the repository — 2FA becomes decoration
+   * while looking like 2FA. Refusing to proceed is the only way a missing key
+   * arrives as an outage instead of a quiet weakening.
+   *
+   * The emptiness test trims, but the bytes fed into the KDF do not: a value with
+   * surrounding whitespace was hashed as-is before, and trimming it here would
+   * silently re-derive a different key and strand the secrets already sealed
+   * under it.
+   */
   private getTotpEncryptionKey(): Buffer {
-    const rawKey =
-      this.configService.encryptionKey ||
-      "allinone-default-dev-totp-encryption-key-32b";
+    const rawKey = this.configService.encryptionKey;
+    if (!rawKey?.trim()) {
+      this.logger.error(
+        "[AuthService] ENCRYPTION_KEY is unset or blank, so TOTP secrets can be neither encrypted nor decrypted. Set ENCRYPTION_KEY to a unique secret of at least 32 characters; there is no default and there never will be one.",
+      );
+      throw new InternalServerErrorException(
+        "Two-factor authentication is unavailable on this server: ENCRYPTION_KEY is not configured.",
+      );
+    }
     return crypto.createHash("sha256").update(rawKey).digest();
+  }
+
+  /**
+   * The keys a stored secret may have been sealed under, current first.
+   *
+   * The mirror of the vault's pepper ring, and for the same reason: a secret can
+   * only be converted on a verification that presents it, so the retired key has to
+   * stay tryable for as long as any row still holds its ciphertext. Deriving only
+   * the current key made rotating `ENCRYPTION_KEY` equivalent to deleting everyone's
+   * second factor — codes failed forever, and each failure burned a lockout attempt.
+   *
+   * The retired key is hashed over the untrimmed value too, and resolved outside the
+   * caller's `try`, so a missing `ENCRYPTION_KEY` still surfaces as the deployment
+   * fault it is instead of degrading into "the code you typed is wrong" — and never
+   * falls back to the retired key to keep the current one's absence quiet.
+   */
+  private getTotpEncryptionKeyRing(): Buffer[] {
+    const ring = [this.getTotpEncryptionKey()];
+    const previous = this.configService.encryptionKeyPrevious;
+    if (previous) {
+      ring.push(crypto.createHash("sha256").update(previous).digest());
+    }
+    return ring;
   }
 
   private encryptTotpSecret(secret: string): string {
@@ -1179,7 +1433,10 @@ export class AuthService {
     return `v1:${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
   }
 
-  private decryptTotpSecret(stored: string): string {
+  private async decryptTotpSecret(
+    stored: string,
+    userId: string,
+  ): Promise<string> {
     if (!stored.startsWith("v1:")) {
       // Backward compatibility for existing plaintext / unencrypted secrets
       return stored;
@@ -1189,22 +1446,75 @@ export class AuthService {
       return stored;
     }
     const [, ivHex, tagHex, dataHex] = parts;
-    try {
-      const key = this.getTotpEncryptionKey();
-      const decipher = crypto.createDecipheriv(
-        "aes-256-gcm",
-        key,
-        Buffer.from(ivHex, "hex"),
-      );
-      decipher.setAuthTag(Buffer.from(tagHex, "hex"));
-      const decrypted = Buffer.concat([
-        decipher.update(Buffer.from(dataHex, "hex")),
-        decipher.final(),
-      ]);
-      return decrypted.toString("utf8");
-    } catch (err) {
-      this.logger.error("Failed to decrypt TOTP secret", err);
+    // Resolved before the `try`: a missing key is a deployment fault, and letting
+    // the handler below swallow it would report a broken server to the client as
+    // "the code you typed is wrong" — then return the ciphertext as if it were a
+    // secret and let otplib fail against that.
+    const ring = this.getTotpEncryptionKeyRing();
+
+    let plaintext: string | undefined;
+    let openedUnderCurrentKey = false;
+    let lastError: unknown;
+    for (const [index, key] of ring.entries()) {
+      try {
+        const decipher = crypto.createDecipheriv(
+          "aes-256-gcm",
+          key,
+          Buffer.from(ivHex, "hex"),
+        );
+        decipher.setAuthTag(Buffer.from(tagHex, "hex"));
+        const decrypted = Buffer.concat([
+          decipher.update(Buffer.from(dataHex, "hex")),
+          decipher.final(),
+        ]);
+        plaintext = decrypted.toString("utf8");
+        openedUnderCurrentKey = index === 0;
+        break;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    if (plaintext === undefined) {
+      // Unchanged fallback: nothing in the ring opened this blob, so it is handed
+      // back as it was found and the caller reports a wrong code. Newly throwing
+      // here would turn a corrupt or foreign row into a 500 on the login path.
+      this.logger.error("Failed to decrypt TOTP secret", lastError);
       return stored;
+    }
+
+    if (!openedUnderCurrentKey) {
+      await this.resealTotpSecret(userId, plaintext);
+    }
+    return plaintext;
+  }
+
+  /**
+   * Move a secret that opened under the retired key onto the current one, the way a
+   * vault row re-seals on unlock: a successful verification is the only moment the
+   * plaintext is in hand, and rewriting it is what drains the rotation window
+   * instead of leaving every future sign-in to try two keys indefinitely — which is
+   * also how a retired key ever gets cleared from the environment at all.
+   *
+   * Best-effort on purpose. The code just verified, so a write that fails here (a
+   * row deleted since the read, a transient error) must not fail the sign-in the
+   * user has already earned; the row stays sealed under the retired key and converts
+   * on the next verification.
+   */
+  private async resealTotpSecret(
+    userId: string,
+    secret: string,
+  ): Promise<void> {
+    try {
+      await this.prisma.mFASetting.update({
+        where: { userId },
+        data: { totpSecret: this.encryptTotpSecret(secret) },
+      });
+    } catch (err) {
+      this.logger.error(
+        `Failed to re-seal the TOTP secret for user ${userId} under the current ENCRYPTION_KEY. It remains sealed under the retired key; keep ENCRYPTION_KEY_PREVIOUS set until it converts.`,
+        err,
+      );
     }
   }
 
@@ -1266,7 +1576,7 @@ export class AuthService {
 
     const verifyRes = await verify({
       token: dto.totpCode,
-      secret: this.decryptTotpSecret(mfaSetting.totpSecret),
+      secret: await this.decryptTotpSecret(mfaSetting.totpSecret, userId),
     });
     const isValid = Boolean(
       verifyRes &&
@@ -1319,43 +1629,62 @@ export class AuthService {
       .update(rawCode.trim())
       .digest("hex");
 
-    return this.prisma.$transaction(async (tx) => {
-      const mfaSetting = await tx.mFASetting.findUnique({
-        where: { userId },
-      });
-
-      if (!mfaSetting || !mfaSetting.totpEnabled || !mfaSetting.recoveryCodes) {
-        return false;
-      }
-
-      const recoveryCodes: string[] = JSON.parse(mfaSetting.recoveryCodes);
-      const usedCodes: string[] = mfaSetting.backupCodesUsed
-        ? JSON.parse(mfaSetting.backupCodesUsed)
-        : [];
-
-      if (usedCodes.includes(codeHash)) {
-        return false;
-      }
-
-      const codeIndex = recoveryCodes.indexOf(codeHash);
-      if (codeIndex === -1) {
-        return false;
-      }
-
-      recoveryCodes.splice(codeIndex, 1);
-      usedCodes.push(codeHash);
-
-      await tx.mFASetting.update({
-        where: { userId },
-        data: {
-          recoveryCodes: JSON.stringify(recoveryCodes),
-          backupCodesUsed: JSON.stringify(usedCodes),
-          lastVerifiedAt: new Date(),
-        },
-      });
-
-      return true;
+    const mfaSetting = await this.prisma.mFASetting.findUnique({
+      where: { userId },
     });
+
+    if (!mfaSetting || !mfaSetting.totpEnabled || !mfaSetting.recoveryCodes) {
+      return false;
+    }
+
+    const recoveryCodes: string[] = JSON.parse(mfaSetting.recoveryCodes);
+    const usedCodes: string[] = mfaSetting.backupCodesUsed
+      ? JSON.parse(mfaSetting.backupCodesUsed)
+      : [];
+
+    if (usedCodes.includes(codeHash)) {
+      return false;
+    }
+
+    const codeIndex = recoveryCodes.indexOf(codeHash);
+    if (codeIndex === -1) {
+      return false;
+    }
+
+    recoveryCodes.splice(codeIndex, 1);
+    usedCodes.push(codeHash);
+
+    // Spend the code with a compare-and-swap rather than by writing back an array
+    // this request built from its own snapshot. A Mongo transaction does not lock
+    // the document against a concurrent reader of the same shape, so two redeems
+    // — of the same code or of two different ones — each wrote the list they had
+    // read, and the loser's write resurrected the code the winner had just spent
+    // while reverting its bookkeeping. Pinning both arrays in the `where` makes
+    // the second writer match zero rows instead of rewriting the document, which
+    // is also why the `$transaction` around the old version no longer earns its
+    // keep: nothing else in that callback read or wrote through `tx`.
+    const spent = await this.prisma.mFASetting.updateMany({
+      where: {
+        userId,
+        recoveryCodes: mfaSetting.recoveryCodes,
+        // `backupCodesUsed` is nullable, and a document nobody has spent from yet
+        // reads as `null`. `?? null` keeps the guard pinning that exact state —
+        // the connector treats it as "still absent or null", the same way the
+        // `lockedUntil` compare-and-swaps in this file do — instead of dropping
+        // the second half of the guard for the sake of a normalised literal.
+        backupCodesUsed: mfaSetting.backupCodesUsed ?? null,
+      },
+      data: {
+        recoveryCodes: JSON.stringify(recoveryCodes),
+        backupCodesUsed: JSON.stringify(usedCodes),
+        lastVerifiedAt: new Date(),
+      },
+    });
+
+    // Anything but exactly one row is a document that moved between the read and
+    // this write: the attempt is refused, and the code is not marked spent by a
+    // write that did not happen.
+    return spent.count === 1;
   }
 
   async disableMfa(
@@ -1399,7 +1728,7 @@ export class AuthService {
     if (dto.totpCode) {
       const verifyRes = await verify({
         token: dto.totpCode,
-        secret: this.decryptTotpSecret(mfaSetting.totpSecret),
+        secret: await this.decryptTotpSecret(mfaSetting.totpSecret, userId),
       });
       isSecondFactorValid = Boolean(
         verifyRes &&
@@ -1499,7 +1828,7 @@ export class AuthService {
     if (dto.totpCode) {
       const verifyRes = await verify({
         token: dto.totpCode,
-        secret: this.decryptTotpSecret(mfaSetting.totpSecret),
+        secret: await this.decryptTotpSecret(mfaSetting.totpSecret, userId),
       });
       isCodeValid = Boolean(
         verifyRes &&
@@ -1510,23 +1839,29 @@ export class AuthService {
     }
 
     if (!isCodeValid) {
-      const attempts = (user.failedLoginAttempts || 0) + 1;
       const MAX_FAILED_ATTEMPTS = 5;
       const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
-      const isNowLocked = attempts >= MAX_FAILED_ATTEMPTS;
-      const lockedUntil = isNowLocked
-        ? new Date(Date.now() + LOCKOUT_DURATION_MS)
-        : null;
 
-      await this.prisma.user.update({
+      // Same shape as the password path in `login`: the increment happens inside
+      // MongoDB, and the value that decides the cooldown is the one read back from
+      // the updated row, so a burst of concurrent guesses against the same
+      // `mfaToken` cannot each write `baseline + 1` and drop an attempt.
+      const counted = await this.prisma.user.update({
         where: { id: user.id },
-        data: {
-          failedLoginAttempts: attempts,
-          lockedUntil,
-        },
+        data: { failedLoginAttempts: { increment: 1 } },
+        select: { failedLoginAttempts: true, lockedUntil: true },
       });
+      const attempts = counted?.failedLoginAttempts ?? 0;
+      const isNowLocked = attempts >= MAX_FAILED_ATTEMPTS;
+      let lockedUntil: Date | null = null;
 
       if (isNowLocked) {
+        lockedUntil = new Date(Date.now() + LOCKOUT_DURATION_MS);
+        await this.prisma.user.updateMany({
+          where: { id: user.id, lockedUntil: counted?.lockedUntil ?? null },
+          data: { lockedUntil },
+        });
+
         await this.auditLogService?.recordAuditLog({
           userId: user.id,
           action: AuditAction.ACCOUNT_LOCKED,
@@ -1569,8 +1904,10 @@ export class AuthService {
     }
 
     if (user.failedLoginAttempts > 0 || user.lockedUntil !== null) {
-      await this.prisma.user.update({
-        where: { id: user.id },
+      // Guarded the same way as in `login`: a code that lands while another
+      // request is being locked out must not have that new lock erased.
+      await this.prisma.user.updateMany({
+        where: { id: user.id, lockedUntil: user.lockedUntil ?? null },
         data: {
           failedLoginAttempts: 0,
           lockedUntil: null,
@@ -1677,8 +2014,10 @@ export class AuthService {
         id,
         userId: data.userId,
         deviceId: data.deviceId,
-        accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken,
+        // Never persist bearer tokens. `accessToken` is a legacy required
+        // column, so it holds the already-public session id until removed.
+        accessToken: id,
+        refreshToken: this.hashRefreshToken(tokens.refreshToken),
         accessExpiresAt,
         refreshExpiresAt,
         ipAddress: data.ipAddress,

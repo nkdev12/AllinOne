@@ -38,4 +38,36 @@ describe("SetupVaultDto", () => {
       keySalt: "c2FsdF9iYXNlNjRfc3RyaW5n",
     });
   });
+
+  it("accepts a base64 recovery salt alongside the wrap", async () => {
+    await expect(
+      setup({
+        recoveryKdfSalt: "c2FsdF9iYXNlNjRfc3RyaW5n",
+        wrappedMasterKey: "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAh",
+        wrappedMasterIv: "AQIDBAUGBwgJCgsMDQ4PEA==",
+        wrappedMasterTag: "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+      }),
+    ).resolves.toMatchObject({ recoveryKdfSalt: "c2FsdF9iYXNlNjRfc3RyaW5n" });
+  });
+
+  it("refuses a setup that uploads an unwrapped recovery key", async () => {
+    // Storing this would let anyone with database access open every vault, so
+    // the field is not merely ignored — it fails the request outright.
+    await expect(
+      setup({ recoveryKey: "c3VwZXItc2VjcmV0LWtleS1tYXRlcmlhbCE=" }),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it.each([
+    ["shorter than the client derives", "bmV3LXNhbHQ="],
+    ["not base64 at all", "------------------------"],
+  ])(
+    "refuses a password salt %s, because recovery/complete would reject it",
+    async (_label, keySalt) => {
+      // `recovery/verify` returns this stored value and `recovery/complete`
+      // demands 24 base64 characters of it, so accepting a salt that cannot come
+      // back makes recovery fail months after the setup that caused it.
+      await expect(setup({ keySalt })).rejects.toThrow(BadRequestException);
+    },
+  );
 });

@@ -2,7 +2,6 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
-  Logger,
   Optional,
 } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
@@ -16,17 +15,12 @@ import {
   ExtractedTask,
   ExtractedTasksResult,
   SuggestedTagsResult,
-  SummaryFormat,
-  SummaryLength,
-  SummaryResult,
   TaskPriority,
 } from "./ai.interface";
-import { GeminiClient } from "./gemini.client";
 import {
   ConvertTasksDto,
   ExtractTasksDto,
   SuggestTagsDto,
-  SummarizeTextDto,
 } from "./dto/ai.dto";
 
 const STOP_WORDS = new Set([
@@ -208,11 +202,8 @@ const STOP_WORDS = new Set([
 
 @Injectable()
 export class AiService {
-  private readonly logger = new Logger(AiService.name);
-
   constructor(
     private readonly prisma: PrismaService,
-    private readonly gemini: GeminiClient,
     // `@Optional()` for the same reason the other write paths use it: this
     // service is constructed in unit graphs that register no sync module, and a
     // missing notifier costs the wake-up and nothing else.
@@ -247,6 +238,9 @@ export class AiService {
       if (!note) {
         throw new NotFoundException(`Note with ID '${noteId}' not found.`);
       }
+      if (note.isEncrypted) {
+        throw new BadRequestException("Encrypted notes cannot be processed by AI text utilities.");
+      }
       return {
         content: `${note.title}\n\n${note.content || ""}`.trim(),
         title: note.title,
@@ -256,147 +250,6 @@ export class AiService {
     throw new BadRequestException(
       "Either 'text' or 'noteId' must be provided.",
     );
-  }
-
-  /**
-   * Summarize raw text or one of the caller's own notes.
-   *
-   * `provider` reports what actually answered: `"gemini"` only when an
-   * operator has set a non-blank `GEMINI_API_KEY` *and* the call came back
-   * with usable text. Everything else — no key, a non-2xx, a transport
-   * failure, the `GEMINI_TIMEOUT_MS` deadline firing, an empty candidate —
-   * is logged at `warn` and answered by the deterministic heuristic below.
-   * This endpoint cannot fail because Google is slow or down; it just
-   * quietly answers less well.
-   */
-  async summarize(
-    userId: string,
-    dto: SummarizeTextDto,
-  ): Promise<SummaryResult> {
-    const { content } = await this.resolveText(userId, dto.text, dto.noteId);
-    const length: SummaryLength = dto.length || "brief";
-    const format: SummaryFormat = dto.format || "paragraph";
-
-    if (this.gemini.isConfigured) {
-      try {
-        const geminiResult = await this.summarizeWithGemini(
-          content,
-          length,
-          format,
-        );
-        if (geminiResult) {
-          return geminiResult;
-        }
-      } catch (err: any) {
-        // `err.message` is built by GeminiClient from a status code or an
-        // abort reason — it carries neither the API key nor the request URL.
-        this.logger.warn(
-          `Gemini API call failed, using heuristic fallback: ${err.message}`,
-        );
-      }
-    }
-
-    return this.summarizeHeuristic(content, length, format);
-  }
-
-  private async summarizeWithGemini(
-    content: string,
-    length: SummaryLength,
-    format: SummaryFormat,
-  ): Promise<SummaryResult | null> {
-    // Built from the full text, but `GeminiClient` caps what goes on the
-    // wire (`MAX_GEMINI_PROMPT_CHARS`, truncating rather than failing). The
-    // lengths reported below stay those of the caller's real input.
-    const prompt = `Summarize the following text in a ${length} manner, formatted as ${format}. Text:\n\n${content}`;
-    const generated = await this.gemini.generateText(prompt);
-
-    if (!generated) {
-      return null;
-    }
-
-    return {
-      summary: generated,
-      originalLength: content.length,
-      summaryLength: generated.length,
-      compressionRatio: +(generated.length / (content.length || 1)).toFixed(2),
-      format,
-      provider: "gemini",
-    };
-  }
-
-  /**
-   * Deterministic extractive summarizer, and the answer this endpoint gives
-   * whenever Gemini is unconfigured or fails. Its output is byte-for-byte
-   * fixed for a given input and is pinned by `ai.service.spec.ts`, because
-   * the Flutter client renders it directly — see docs/API_REFERENCE.md §12.
-   */
-  private summarizeHeuristic(
-    content: string,
-    length: SummaryLength,
-    format: SummaryFormat,
-  ): SummaryResult {
-    // 1. Split into sentences
-    const sentences = content
-      .split(/(?<=[.?!])\s+|\n+/)
-      .map((s) => s.trim())
-      .filter((s) => s.length > 15);
-
-    if (sentences.length <= 1) {
-      return {
-        summary: content,
-        originalLength: content.length,
-        summaryLength: content.length,
-        compressionRatio: 1.0,
-        format,
-        provider: "heuristic",
-      };
-    }
-
-    // 2. Compute word frequencies
-    const words = content.toLowerCase().match(/\b[a-z]{3,}\b/g) || [];
-    const freq: Record<string, number> = {};
-    for (const word of words) {
-      if (!STOP_WORDS.has(word)) {
-        freq[word] = (freq[word] || 0) + 1;
-      }
-    }
-
-    // 3. Score sentences
-    const scored = sentences.map((sentence, idx) => {
-      const sentenceWords =
-        sentence.toLowerCase().match(/\b[a-z]{3,}\b/g) || [];
-      let score = 0;
-      for (const w of sentenceWords) {
-        score += freq[w] || 0;
-      }
-      // Position boost (first sentence and introductory clauses are important)
-      const positionWeight = idx === 0 ? 1.5 : idx < 3 ? 1.2 : 1.0;
-      return { sentence, score: score * positionWeight, index: idx };
-    });
-
-    // 4. Select top sentences based on requested length
-    let targetCount = length === "brief" ? 2 : length === "detailed" ? 5 : 3;
-    targetCount = Math.min(targetCount, sentences.length);
-
-    const topSentences = scored
-      .sort((a, b) => b.score - a.score)
-      .slice(0, targetCount)
-      .sort((a, b) => a.index - b.index)
-      .map((s) => s.sentence);
-
-    const summary =
-      format === "bullet_points"
-        ? topSentences.map((s) => `• ${s}`).join("\n")
-        : topSentences.join(" ");
-
-    return {
-      summary,
-      originalLength: content.length,
-      summaryLength: summary.length,
-      compressionRatio: +(summary.length / (content.length || 1)).toFixed(2),
-      format,
-      provider: "heuristic",
-    };
   }
 
   /**

@@ -68,14 +68,14 @@ describe("JwtStrategy", () => {
     );
   });
 
-  it("still accepts tokens that carry no session as long as type is access", async () => {
+  it("rejects a legacy token that carries no revocable session id", async () => {
     await expect(
       strategy.validate({
         sub: "user-1",
         email: "test@example.com",
         type: "access",
       }),
-    ).resolves.toMatchObject({ id: "user-1" });
+    ).rejects.toMatchObject({ response: { code: ErrorCode.SESSION_REVOKED } });
 
     expect(usersService.isSessionLive).not.toHaveBeenCalled();
   });

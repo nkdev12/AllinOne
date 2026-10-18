@@ -58,8 +58,13 @@ function contextOf(
   user?: Record<string, unknown>,
   headers: Record<string, unknown> = {},
 ) {
+  const authenticatedUser = user
+    ? { emailVerifiedAt: new Date(), ...user }
+    : undefined;
   return {
-    switchToHttp: () => ({ getRequest: () => ({ user, headers }) }),
+    switchToHttp: () => ({
+      getRequest: () => ({ user: authenticatedUser, headers }),
+    }),
   } as any;
 }
 
@@ -171,6 +176,19 @@ describe("AdminGuard", () => {
       expect(
         guard.canActivate(contextOf({ id: "u", email: "ops@ALLINONE.APP" })),
       ).toBe(true);
+    });
+
+    it("rejects an unverified account even when its email is configured", () => {
+      const guard = guardFor({ ADMIN_EMAILS: "ops@allinone.app" });
+      expect(() =>
+        guard.canActivate(
+          contextOf({
+            id: "user-1",
+            email: "ops@allinone.app",
+            emailVerifiedAt: null,
+          }),
+        ),
+      ).toThrow(ForbiddenException);
     });
 
     it("rejects an address that is not configured", () => {

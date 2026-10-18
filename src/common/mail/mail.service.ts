@@ -1,7 +1,8 @@
 import { Injectable, Logger } from "@nestjs/common";
+import nodemailer from "nodemailer";
 import { ConfigurationService } from "@/config/configuration.service";
 
-interface ResendMail {
+interface OutgoingMail {
   from: string;
   to: string;
   subject: string;
@@ -9,59 +10,69 @@ interface ResendMail {
   html: string;
 }
 
+interface MailTransport {
+  sendMail(message: {
+    from: string;
+    to: string;
+    subject: string;
+    text: string;
+    html: string;
+  }): Promise<unknown>;
+}
+
 @Injectable()
 export class MailService {
   private readonly logger = new Logger(MailService.name);
+  private readonly transport?: MailTransport;
 
   constructor(private readonly configService: ConfigurationService) {
     if (!this.isConfigured) {
       this.logger.warn(
-        "Resend is not configured. OTP and verification emails will not be delivered.",
+        "SMTP is not configured. OTP and verification emails will not be delivered.",
       );
     } else {
+      const isImplicitTls =
+        configService.smtpTls && configService.smtpPort === 465;
+      this.transport = nodemailer.createTransport({
+        host: configService.smtpHost,
+        port: configService.smtpPort,
+        // Gmail's recommended port 587 starts unencrypted and upgrades with
+        // STARTTLS; port 465 is the implicit-TLS variant.
+        secure: isImplicitTls,
+        requireTLS: configService.smtpTls,
+        auth: {
+          user: configService.smtpUser,
+          pass: configService.smtpPassword,
+        },
+      });
       this.logger.log(
-        `Resend email delivery ready (from: ${configService.emailFrom})`,
+        `SMTP email delivery ready (from: ${configService.emailFrom})`,
       );
     }
   }
 
   get isConfigured(): boolean {
     return Boolean(
-      this.configService.resendApiKey && this.configService.emailFrom,
+      this.configService.smtpHost &&
+      this.configService.smtpUser &&
+      this.configService.smtpPassword &&
+      this.configService.emailFrom,
     );
   }
 
-  private async sendMail(mail: ResendMail): Promise<void> {
-    if (!this.isConfigured) {
-      throw new Error("RESEND_API_KEY and EMAIL_FROM are required");
+  private async sendMail(mail: OutgoingMail): Promise<void> {
+    if (!this.transport) {
+      throw new Error(
+        "SMTP_HOST, SMTP_USER, SMTP_PASSWORD, and SMTP_FROM are required",
+      );
     }
 
-    const response = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.configService.resendApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        from: mail.from,
-        to: [mail.to],
-        reply_to: this.configService.emailReplyTo || undefined,
-        subject: mail.subject,
-        text: mail.text,
-        html: mail.html,
-      }),
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    if (!response.ok) {
-      const details = (await response.text()).slice(0, 500);
-      throw new Error(`Resend API returned ${response.status}: ${details}`);
-    }
+    await this.transport.sendMail(mail);
   }
 
   /**
    * Send a 6-digit OTP code to the candidate. Used for email verification.
-   * Returns true when the mail was accepted by the Resend API.
+   * Returns true when the SMTP server accepts the message.
    * Never throws — callers must not fail registration just because mail is down.
    */
   async sendOtpEmail(email: string, otp: string): Promise<boolean> {

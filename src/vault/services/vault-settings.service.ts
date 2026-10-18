@@ -1,10 +1,18 @@
-import { Injectable, Logger, Optional } from "@nestjs/common";
+import {
+  Injectable,
+  Logger,
+  Optional,
+  ServiceUnavailableException,
+} from "@nestjs/common";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { OtpPurpose, AuditAction } from "@prisma/client";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { OtpService } from "@/common/otp/otp.service";
 import { MailService } from "@/common/mail/mail.service";
-import { ConfigurationService } from "@/config/configuration.service";
+import {
+  ConfigurationService,
+  secretFingerprint,
+} from "@/config/configuration.service";
 import { AuditLogService } from "@/common/audit/audit-log.service";
 import { UsersService } from "@/users/users.service";
 import { ErrorCode } from "@/common/errors/error-code";
@@ -27,12 +35,25 @@ const RECOVERY_OTP_TTL_MINUTES = 15;
  * applied. Rows written before it hold the verifier exactly as it arrived and
  * are recognised by the absence of this prefix.
  */
-const PEEPERED_VERIFIER_PREFIX = "hmac-sha256:";
+const PEPPERED_VERIFIER_PREFIX = "hmac-sha256:";
 
 /** Consecutive failed verifications tolerated before the endpoint cools down. */
 const UNLOCK_MAX_FAILED_ATTEMPTS = 5;
 const UNLOCK_COOLDOWN_BASE_MS = 60 * 1000;
 const UNLOCK_COOLDOWN_MAX_MS = 60 * 60 * 1000;
+
+/**
+ * One pepper of the ring: the name a row carries and the secret behind it.
+ *
+ * The name is stored beside every digest because the secret cannot be — a row
+ * that says only "an HMAC" cannot be re-sealed once there is a second candidate
+ * to have made it, and guessing by trying every key forever is how a rotation
+ * turns into a slow denial of service on the unlock path.
+ */
+interface PepperKey {
+  readonly id: string;
+  readonly secret: string;
+}
 
 /**
  * The Argon2id parameters the shipped client derives with (`p = 4` is not
@@ -61,31 +82,120 @@ export class VaultSettingsService {
   ) {}
 
   /**
-   * The verifier a client sends is a bearer secret — holding it is holding the
-   * unlock. It is stored as an HMAC under a server-only key so that reading the
-   * table is not reading every vault. Unlike a password hash this needs no
-   * per-row salt: the input is already 256 bits of Argon2id output, so guessing
-   * is not what the pepper defends against.
+   * The pepper that seals new rows: the current key, under the name the operator
+   * gave it.
+   *
+   * The fallback to a fingerprint is not decoration. A `ConfigurationService`
+   * doubled in a test or a stub carries `encryptionKey` and no id getter, and an
+   * id of `undefined` written into `masterKeyHashPepper` names a key nothing holds
+   * — the next unlock of that row would then report our own bookkeeping as a wrong
+   * master password.
    */
-  private pepperedVerifier(verifier: string): string {
-    return (
-      PEEPERED_VERIFIER_PREFIX +
-      createHmac("sha256", this.configService.encryptionKey)
-        .update(verifier)
-        .digest("base64")
+  private currentPepper(): PepperKey {
+    return pepperKey(
+      this.configService.encryptionKey,
+      this.configService.encryptionKeyId,
     );
   }
 
   /**
+   * The keys a stored verifier may have been sealed under, current first.
+   *
+   * Rotation is the only reason this is a list. What a row holds is a digest, not
+   * the verifier it digests, so an old row cannot be converted offline: it can
+   * only be converted on an unlock that presents the verifier, and refusing that
+   * unlock is exactly what used to make rotating `ENCRYPTION_KEY` equivalent to
+   * dropping the column. The retired key therefore stays in the ring for as long
+   * as any row still names it, and the re-seal below is what drains the window.
+   */
+  private pepperRing(): PepperKey[] {
+    const current = this.currentPepper();
+    const previous = this.configService.encryptionKeyPrevious;
+    if (!previous) {
+      return [current];
+    }
+    return [
+      current,
+      pepperKey(previous, this.configService.encryptionKeyPreviousId),
+    ];
+  }
+
+  /**
+   * The digest and the stamp for one write of a verifier under the current key.
+   * They travel together: a digest written without its name is a row the next
+   * rotation has to guess about.
+   */
+  private sealedRow(verifier: string): {
+    masterKeyHash: string;
+    masterKeyHashPepper: string;
+  } {
+    const key = this.currentPepper();
+    return {
+      masterKeyHash: sealWith(key, verifier),
+      masterKeyHashPepper: key.id,
+    };
+  }
+
+  /**
+   * Which pepper, if any, this row accepts the presented verifier under, or
+   * `undefined` when the master password is simply wrong.
+   *
    * Rows written before the pepper still hold the value the client sent, and
-   * refusing them would lock out every vault that existed first. They open the
+   * refusing them would lock out every vault that existed first; they open the
    * vault and are rewritten on the way out, because a successful unlock is the
    * only moment the raw verifier is in hand to convert.
+   *
+   * A row with no stamp was sealed before identifiers existed, which leaves only
+   * trying: the current key first, because a database that has never rotated holds
+   * nothing else, then the rotation-window key. A stamp that names no key this
+   * process holds fails closed and says so — a deployment that dropped a ring
+   * entry while rows still depend on it is our misconfiguration, and answering
+   * 401 would blame the owner of every one of those vaults and then count five of
+   * their correct passwords into a cooldown that locks them out for an hour.
    */
-  private matchesVerifier(stored: string, presented: string): boolean {
-    return stored.startsWith(PEEPERED_VERIFIER_PREFIX)
-      ? verifiersMatch(stored, this.pepperedVerifier(presented))
-      : verifiersMatch(stored, presented);
+  private findSealingKey(
+    setting: { masterKeyHash: string; masterKeyHashPepper?: string | null },
+    presented: string,
+  ): PepperKey | undefined {
+    if (!setting.masterKeyHash.startsWith(PEPPERED_VERIFIER_PREFIX)) {
+      return verifiersMatch(setting.masterKeyHash, presented)
+        ? this.currentPepper()
+        : undefined;
+    }
+
+    const stamp = setting.masterKeyHashPepper;
+    const ring = this.pepperRing();
+    const candidates = stamp ? ring.filter((key) => key.id === stamp) : ring;
+    if (stamp && candidates.length === 0) {
+      this.logger.error(
+        `Vault row is sealed under pepper "${stamp}", which is not in this process's key ring. Set ENCRYPTION_KEY_PREVIOUS (and ENCRYPTION_KEY_PREVIOUS_ID) to the retired key, or the owner must recover the vault.`,
+      );
+      throw pepperKeyUnavailable(stamp);
+    }
+
+    return candidates.find((key) =>
+      verifiersMatch(setting.masterKeyHash, sealWith(key, presented)),
+    );
+  }
+
+  /**
+   * Whether a stored row already holds this verifier — the retry-after-lost-response
+   * comparison in `completeRecovery`, which decides only whether to write.
+   *
+   * Deliberately never fails closed on an unknown stamp: recovery is how a vault
+   * stranded by a dropped ring key gets back, and refusing it here would remove the
+   * one path that still works without the key. Nor does it reach for the recovery
+   * envelope: after a recovery the row's verifier is `hash(passwordKey)` while the
+   * envelope wraps the *data* key, and the two are different secrets that must not
+   * be compared to each other.
+   */
+  private alreadyHolds(stored: string, presented: string): boolean {
+    if (!stored.startsWith(PEPPERED_VERIFIER_PREFIX)) {
+      return verifiersMatch(stored, presented);
+    }
+    return this.pepperRing().some((key) =>
+      verifiersMatch(stored, sealWith(key, presented)),
+    );
   }
 
   async setupVault(userId: string, dto: SetupVaultDto) {
@@ -111,27 +221,36 @@ export class VaultSettingsService {
       );
     }
 
+    // Both branches write the same digest and the same stamp: a setup that stored
+    // a verifier without naming its pepper would leave the next rotation to guess.
+    const sealed = this.sealedRow(dto.masterKeyHash);
+
     const vaultSetting = await this.prisma.vaultSetting.upsert({
       where: { userId },
       create: {
         userId,
-        masterKeyHash: this.pepperedVerifier(dto.masterKeyHash),
+        ...sealed,
         keySalt: dto.keySalt,
         kdfIterations: dto.kdfIterations ?? DEFAULT_KDF_ITERATIONS,
         kdfMemory: dto.kdfMemory ?? DEFAULT_KDF_MEMORY_KIB,
         isVaultConfigured: true,
-        recoveryKey: dto.recoveryKey ?? null,
+        recoveryKdfSalt: dto.recoveryKdfSalt ?? null,
+        // A setup is the one moment the client definitely holds the master key,
+        // so it is also the moment a legacy plaintext wrapping key can be
+        // deleted without stranding anyone.
+        recoveryKey: null,
         wrappedMasterKey: dto.wrappedMasterKey ?? null,
         wrappedMasterIv: dto.wrappedMasterIv ?? null,
         wrappedMasterTag: dto.wrappedMasterTag ?? null,
       },
       update: {
-        masterKeyHash: this.pepperedVerifier(dto.masterKeyHash),
+        ...sealed,
         keySalt: dto.keySalt,
         kdfIterations: dto.kdfIterations ?? DEFAULT_KDF_ITERATIONS,
         kdfMemory: dto.kdfMemory ?? DEFAULT_KDF_MEMORY_KIB,
         isVaultConfigured: true,
-        recoveryKey: dto.recoveryKey ?? null,
+        recoveryKdfSalt: dto.recoveryKdfSalt ?? null,
+        recoveryKey: null,
         wrappedMasterKey: dto.wrappedMasterKey ?? null,
         wrappedMasterIv: dto.wrappedMasterIv ?? null,
         wrappedMasterTag: dto.wrappedMasterTag ?? null,
@@ -179,10 +298,7 @@ export class VaultSettingsService {
     });
 
     if (!setting || !setting.isVaultConfigured) {
-      throw notFound(
-        ErrorCode.VAULT_NOT_CONFIGURED,
-        "Password vault has not been configured yet.",
-      );
+      throw vaultNotConfigured();
     }
 
     if (setting.passwordWrappedKey && dto.keyEnvelopeVersion !== 1) {
@@ -211,18 +327,42 @@ export class VaultSettingsService {
       );
     }
 
-    if (!this.matchesVerifier(setting.masterKeyHash, dto.masterKeyHash)) {
-      const attempts = (setting.unlockFailedAttempts ?? 0) + 1;
+    const sealingKey = this.findSealingKey(setting, dto.masterKeyHash);
+    if (!sealingKey) {
+      // A single atomic `$inc`, not "read, add one, write": two guesses from two
+      // devices that both read `3` used to both write `4`, and this is the one
+      // counter an attacker races on purpose. The row the connector hands back
+      // is the row *after* that increment, so the cooldown is computed from the
+      // count the vault now carries instead of the count this request happened
+      // to observe.
+      const burned = await this.prisma.vaultSetting
+        .update({
+          where: { userId },
+          data: { unlockFailedAttempts: { increment: 1 } },
+        })
+        .catch((err) => mapMissingRow(err, vaultNotConfigured));
+      const attempts = burned.unlockFailedAttempts;
       const cooldown = this.unlockCooldownMs(attempts);
-      await this.prisma.vaultSetting.update({
-        where: { userId },
-        data: {
-          unlockFailedAttempts: attempts,
-          ...(cooldown
-            ? { unlockLockedUntil: new Date(Date.now() + cooldown) }
-            : {}),
-        },
-      });
+      if (cooldown) {
+        // Only ever forward. Within a burst the writes land in whatever order
+        // the connector finishes them, so the guess that counted least can be
+        // the one that writes last — an unconditional `update` here would let a
+        // hundred parallel guesses collapse an escalation the row had already
+        // earned back to the base cooldown, which is exactly what the racing
+        // attacker is trying to buy. The filter is what makes "extend, never
+        // shorten" one statement instead of a read-check-write.
+        const lockedUntil = new Date(Date.now() + cooldown);
+        await this.prisma.vaultSetting.updateMany({
+          where: {
+            userId,
+            OR: [
+              { unlockLockedUntil: null },
+              { unlockLockedUntil: { lt: lockedUntil } },
+            ],
+          },
+          data: { unlockLockedUntil: lockedUntil },
+        });
+      }
       await this.auditLogService?.recordAuditLog({
         userId,
         action: AuditAction.LOGIN_FAILURE,
@@ -236,24 +376,44 @@ export class VaultSettingsService {
       );
     }
 
-    // A clean unlock writes nothing: the counters it might clear are already
-    // clear, and the row is already in the peppered form.
-    const needsUpgrade = !setting.masterKeyHash.startsWith(
-      PEEPERED_VERIFIER_PREFIX,
-    );
+    // A clean unlock writes nothing: the counters it might clear are already clear,
+    // the digest is the current key's, and the row already names it. Anything else
+    // is converted here, on the way out, because this is the only moment the bare
+    // verifier is in hand — a row still sealed under the retired key, or one whose
+    // pepper has never been stamped, or one that predates the pepper altogether.
+    const current = this.currentPepper();
+    const needsReseal =
+      !setting.masterKeyHash.startsWith(PEPPERED_VERIFIER_PREFIX) ||
+      sealingKey.id !== current.id ||
+      setting.masterKeyHashPepper !== current.id;
     const countersToClear = (setting.unlockFailedAttempts ?? 0) > 0;
-    if (needsUpgrade || countersToClear) {
-      await this.prisma.vaultSetting.update({
-        where: { userId },
+    if (needsReseal) {
+      // Guarded on the digest this request read, so a second unlock that had
+      // already re-sealed the row wins and this write simply matches nothing:
+      // without the filter the slower request stamps the row back to a pepper the
+      // faster one has already replaced, and the row then names a key nothing
+      // sealed it with. `updateMany` rather than `update` for the same reason a
+      // vanished row must not arrive as a database error — a lost race and a lost
+      // row are both answered by the count, not by an exception.
+      await this.prisma.vaultSetting.updateMany({
+        where: { userId, masterKeyHash: setting.masterKeyHash },
         data: {
-          ...(needsUpgrade
-            ? { masterKeyHash: this.pepperedVerifier(dto.masterKeyHash) }
-            : {}),
+          ...this.sealedRow(dto.masterKeyHash),
           ...(countersToClear
             ? { unlockFailedAttempts: 0, unlockLockedUntil: null }
             : {}),
         },
       });
+    } else if (countersToClear) {
+      // Cleared by constant rather than by arithmetic on the count this request
+      // read, so a guess that landed during it is never resurrected as a number
+      // this request invented — only a verified master password resets the streak.
+      await this.prisma.vaultSetting
+        .update({
+          where: { userId },
+          data: { unlockFailedAttempts: 0, unlockLockedUntil: null },
+        })
+        .catch((err) => mapMissingRow(err, vaultNotConfigured));
     }
 
     return {
@@ -265,7 +425,9 @@ export class VaultSettingsService {
   /**
    * How long the unlock endpoint refuses after `attempts` consecutive failures,
    * or null when it still answers. Five guesses is free, then a minute, then
-   * doubling to an hour.
+   * doubling to an hour. `attempts` is the count the row holds *after* this
+   * request's `$inc`, which is what keeps the curve honest under parallel
+   * guessing.
    *
    * Counted per vault rather than per account, and deliberately not reusing
    * `User.failedLoginAttempts`: a wrong *master password* — which the user can
@@ -288,10 +450,7 @@ export class VaultSettingsService {
     });
 
     if (!setting || !setting.isVaultConfigured) {
-      throw notFound(
-        ErrorCode.VAULT_NOT_CONFIGURED,
-        "Password vault has not been configured yet.",
-      );
+      throw vaultNotConfigured();
     }
 
     if (!setting.wrappedMasterKey) {
@@ -312,8 +471,11 @@ export class VaultSettingsService {
       RECOVERY_OTP_TTL_MINUTES,
     );
 
-    // Dev-only console fallback so the code is visible even if email delivery is down.
-    if (!this.configService.isProduction) {
+    // A logged recovery code is a credential — with the 12-word phrase it hands
+    // over the wrapped master key — so it is printed only where development is
+    // *declared* (`APP_ENV=development`), never merely where production is not
+    // labelled, which an unset or mistyped `APP_ENV` also satisfies.
+    if (this.configService.isDevelopment) {
       this.logger.debug(`VAULT RECOVERY OTP FOR ${user.email}: ${otp}`);
     }
 
@@ -324,7 +486,7 @@ export class VaultSettingsService {
       );
       if (!sent) {
         this.logger.warn(
-          `Vault recovery OTP could not be delivered to ${user.email}. Check Resend configuration.`,
+          `Vault recovery OTP could not be delivered to ${user.email}. Check SMTP configuration.`,
         );
         if (this.configService.isProduction) {
           throw badRequest(
@@ -379,23 +541,36 @@ export class VaultSettingsService {
     const setting = await this.prisma.vaultSetting.findUnique({
       where: { userId },
     });
-    if (!setting?.wrappedMasterKey || !setting.recoveryKey) {
+    if (!setting?.wrappedMasterKey) {
+      throw noRecoveryMaterialStored();
+    }
+    // `recoveryKdfSalt` is the modern envelope: the client re-derives the
+    // wrapping key from the phrase, so nothing here is key material. A row that
+    // predates that only has the unwrapped key an old app uploaded, and its
+    // owner must not be stranded by the fix — it is served as before.
+    if (!setting.recoveryKdfSalt && !setting.recoveryKey) {
       throw badRequest(
         ErrorCode.VAULT_RECOVERY_UNAVAILABLE,
-        "This vault has no recovery material stored.",
+        "This vault's recovery material is incomplete.",
       );
     }
 
     // Marks the window in which completeRecovery may rewrite the vault, so a
-    // bare access token is never enough to swap out the master key.
-    await this.prisma.vaultSetting.update({
-      where: { userId },
-      data: { recoveryGrantedAt: new Date() },
-    });
+    // bare access token is never enough to swap out the master key. The account
+    // can cascade away between the read above and this write — the row owning the
+    // recovery material is gone, so the answer is the one this method already
+    // gives for a row with no wrap, not `P2025`'s generic 404.
+    await this.prisma.vaultSetting
+      .update({
+        where: { userId },
+        data: { recoveryGrantedAt: new Date() },
+      })
+      .catch((err) => mapMissingRow(err, noRecoveryMaterialStored));
 
     return {
       keySalt: setting.keySalt,
-      recoveryKey: setting.recoveryKey,
+      recoveryKdfSalt: setting.recoveryKdfSalt,
+      recoveryKey: setting.recoveryKdfSalt ? null : setting.recoveryKey,
       wrappedMasterKey: setting.wrappedMasterKey,
       wrappedMasterIv: setting.wrappedMasterIv,
       wrappedMasterTag: setting.wrappedMasterTag,
@@ -430,7 +605,7 @@ export class VaultSettingsService {
     // Retrying after a lost response must not require a second recovery code.
     if (
       existing.keySalt === dto.keySalt &&
-      this.matchesVerifier(existing.masterKeyHash, dto.masterKeyHash) &&
+      this.alreadyHolds(existing.masterKeyHash, dto.masterKeyHash) &&
       existing.passwordWrappedKey === dto.passwordWrappedKey &&
       existing.passwordWrappedIv === dto.passwordWrappedIv &&
       existing.passwordWrappedTag === dto.passwordWrappedTag
@@ -454,7 +629,11 @@ export class VaultSettingsService {
         masterKeyHash: existing.masterKeyHash,
       },
       data: {
-        masterKeyHash: this.pepperedVerifier(dto.masterKeyHash),
+        // A recovery writes a verifier the pepper has never seen, so it is
+        // sealed and stamped under the current key: the row leaves the flow
+        // readable by the rotation logic rather than joining the rows that have
+        // to be guessed about.
+        ...this.sealedRow(dto.masterKeyHash),
         keySalt: dto.keySalt,
         kdfIterations: dto.kdfIterations,
         kdfMemory: dto.kdfMemory,
@@ -464,8 +643,20 @@ export class VaultSettingsService {
         recoveryGrantedAt: null,
         unlockFailedAttempts: 0,
         unlockLockedUntil: null,
-        // Keep the existing recovery key and wrap: they still wrap the SAME
-        // data key, including entries absent from this client's local cache.
+        // The phrase-derived wrap and the plaintext key it replaces travel in
+        // the same write, so a vault can never be left with neither.
+        ...(dto.recoveryKdfSalt &&
+        dto.wrappedMasterKey &&
+        dto.wrappedMasterIv &&
+        dto.wrappedMasterTag
+          ? {
+              recoveryKdfSalt: dto.recoveryKdfSalt,
+              wrappedMasterKey: dto.wrappedMasterKey,
+              wrappedMasterIv: dto.wrappedMasterIv,
+              wrappedMasterTag: dto.wrappedMasterTag,
+              recoveryKey: null,
+            }
+          : {}),
       },
     });
     if (result.count !== 1) {
@@ -493,7 +684,7 @@ function assertRecoveryMaterialComplete(
   message: string,
 ): void {
   const missing = [
-    ["recoveryKey", dto.recoveryKey],
+    ["recoveryKdfSalt", dto.recoveryKdfSalt],
     ["wrappedMasterKey", dto.wrappedMasterKey],
     ["wrappedMasterIv", dto.wrappedMasterIv],
     ["wrappedMasterTag", dto.wrappedMasterTag],
@@ -518,4 +709,75 @@ function verifiersMatch(stored: string, presented: string): boolean {
   return (
     expected.length === received.length && timingSafeEqual(expected, received)
   );
+}
+
+/**
+ * The verifier a client sends is a bearer secret — holding it is holding the
+ * unlock. It is stored as an HMAC under a server-only key so that reading the
+ * table is not reading every vault. Unlike a password hash this needs no
+ * per-row salt: the input is already 256 bits of Argon2id output, so guessing
+ * is not what the pepper defends against.
+ */
+function sealWith(key: PepperKey, verifier: string): string {
+  return (
+    PEPPERED_VERIFIER_PREFIX +
+    createHmac("sha256", key.secret).update(verifier).digest("base64")
+  );
+}
+
+/**
+ * Names a pepper without trusting whoever supplied the name: an id is only a
+ * label, and the fingerprint of the secret is what makes two entries of the ring
+ * distinguishable when an operator sets a key and forgets the id beside it.
+ */
+function pepperKey(secret: string, declaredId?: string): PepperKey {
+  return { id: declaredId?.trim() || secretFingerprint(secret), secret };
+}
+
+/** What a vault row that is not there reads like, from every method here. */
+function vaultNotConfigured(): ReturnType<typeof notFound> {
+  return notFound(
+    ErrorCode.VAULT_NOT_CONFIGURED,
+    "Password vault has not been configured yet.",
+  );
+}
+
+function noRecoveryMaterialStored(): ReturnType<typeof badRequest> {
+  return badRequest(
+    ErrorCode.VAULT_RECOVERY_UNAVAILABLE,
+    "This vault has no recovery material stored.",
+  );
+}
+
+/**
+ * Prisma answers an `update` on a row that cascaded away mid-request with
+ * `P2025`, and the exception filter turns that into a generic `NOT_FOUND` body —
+ * a different shape from the one the calling method already raises for the same
+ * missing row, which is the shape the client branches on. Same failure, same
+ * answer, same status.
+ */
+function mapMissingRow(err: unknown, missing: () => Error): never {
+  if ((err as { code?: string } | null)?.code !== "P2025") throw err;
+  throw missing();
+}
+
+/**
+ * A row stamped with a pepper this process does not hold.
+ *
+ * 503 with a code of its own, not a 401: nothing the person typed is wrong, the
+ * vault is intact, and the fix is an environment variable. A 401 would send them
+ * to try the password again — five times, after which the cooldown this method
+ * deliberately never reaches would lock a valid vault out of itself for an hour.
+ * The stamp is the only thing named here, and a stamp is a label rather than a
+ * secret.
+ */
+function pepperKeyUnavailable(
+  pepperKeyId: string,
+): ServiceUnavailableException {
+  return new ServiceUnavailableException({
+    code: ErrorCode.VAULT_PEPPER_KEY_UNAVAILABLE,
+    message:
+      "This vault is sealed under a server key that is not configured here. Nothing you entered is wrong; the service owner has to restore the retired key or you can recover the vault with your recovery code.",
+    details: { pepperKeyId },
+  });
 }

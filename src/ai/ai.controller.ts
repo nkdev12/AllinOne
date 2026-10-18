@@ -20,7 +20,6 @@ import {
   ConvertTasksDto,
   ExtractTasksDto,
   SuggestTagsDto,
-  SummarizeTextDto,
 } from "./dto/ai.dto";
 
 @ApiTags("AI")
@@ -29,21 +28,6 @@ import {
 @ApiBearerAuth("access-token")
 export class AiController {
   constructor(private readonly aiService: AiService) {}
-
-  @Post("summarize")
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary: "Generate an intelligent summary of text or a saved note",
-  })
-  @ApiResponse({ status: 200, description: "Summary generated successfully" })
-  @ApiResponse({ status: 400, description: "Missing text or noteId" })
-  @ApiResponse({ status: 404, description: "Note not found" })
-  async summarize(
-    @GetUser("id") userId: string,
-    @Body() dto: SummarizeTextDto,
-  ) {
-    return this.aiService.summarize(userId, dto);
-  }
 
   @Post("extract-tasks")
   @HttpCode(HttpStatus.OK)

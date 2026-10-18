@@ -39,7 +39,7 @@ Allinone is a **100% free, self-hosted** backend that combines:
 | **Database** | MongoDB 7.0 | ✅ |
 | **Cache & Queues** | Redis + BullMQ | ✅ |
 | **Object Storage** | MinIO (S3-compatible) | ✅ |
-| **Email** | Resend HTTPS API | ✅ |
+| **Email** | SMTP (Gmail supported) | ✅ |
 | **Reverse Proxy** | Caddy with auto HTTPS | ✅ |
 | **Monitoring** | Prometheus + Grafana | ✅ |
 | **Logging** | Structured JSON logs | ✅ |
@@ -75,6 +75,34 @@ APP_ENV=development
 DATABASE_URL=mongodb://localhost:27017/allinone_dev
 REDIS_URL=redis://localhost:6379
 ```
+
+That copy-then-run really does boot, and one line is the reason: `.env.example` ships
+`APP_ENV=development` (`.env.example:10`), and `development` is the only spelling that puts
+the secret gate on the skip path (`src/config/configuration.service.ts:280`, `:439-441`).
+The file's `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` and `ENCRYPTION_KEY` are template
+strings the gate knows by name (`:55-59`, `:82`, `:84`, `:142`).
+
+The trap is in what you edit afterwards, not in the copy:
+
+- Leave `APP_ENV=development` and a fresh clone needs no key ceremony — that is the
+  promise this quick start makes.
+- Clear `APP_ENV`, typo it, or set `staging`/`production`, and the same `.env` aborts the
+  boot: `JWT_ACCESS_SECRET is still the value .env.example ships as a template`. Anything
+  that is not an explicit `development` or a test run is treated as deployed
+  (`src/config/configuration.service.ts:455-466`), so a host that injects
+  `NODE_ENV=production` and never names `APP_ENV` gets the strict branch too.
+- To exercise the hardened path locally, generate secrets first: `openssl rand -base64 48`
+  three times, with the access and refresh secrets different from each other, and set
+  `ENCRYPTION_KEY_PREVIOUS` before you ever change `ENCRYPTION_KEY` again
+  ([docs/SECURITY.md](docs/SECURITY.md#encryption_key-the-vault-verifier-pepper)).
+- `REDIS_URL` is not only a cache address here: with it set, even a development process
+  keeps its rate-limit counters in Redis (`src/config/configuration.service.ts:823-831`).
+  If Redis is not listening, throttling degrades instead of stopping: the hit is counted in
+  this process's own bounded window table (`src/common/throttler/local-throttler.window.ts`),
+  so the limit still holds per replica rather than being lifted, and one line per 30 seconds
+  says so — `Rate limiting is degraded to this process only:`
+  (`src/common/throttler/redis-throttler.storage.ts:116-132`). Start the services in step 3
+  before you expect a limit that survives a restart or a second replica.
 
 ### 3. Start Services with Docker
 
@@ -162,16 +190,40 @@ allinone-backend/
 
 ### Environment Variables
 
-All variables are documented in [`.env.example`](.env.example):
+[`.env.example`](.env.example) is the reference and it is nearly, but not quite, the
+whole list. Six variables are read by `ConfigurationService` and validated in the Joi
+schema in `src/app/app.module.ts` without ever appearing in `.env.example`, commented or
+otherwise:
+
+| Variable | Read at | Declared only in |
+| --- | --- | --- |
+| `CORS_ORIGINS` | `src/config/configuration.service.ts:397-401` — inside the wildcard-origin refusal only; there is no `corsOrigins` getter — plus `src/main.ts:44` and `src/sync/adapters/sync-io.adapter.ts:94-105`, which read the variable themselves | `src/app/app.module.ts:152` |
+| `JWT_MFA_SECRET` | `src/config/configuration.service.ts:588` | `src/app/app.module.ts:121` |
+| `LOG_OUTPUT` | `src/config/configuration.service.ts:846` | `src/app/app.module.ts:195` |
+| `GOOGLE_CLIENT_ID` | `src/config/configuration.service.ts:891` | `src/app/app.module.ts:127` |
+| `APPLE_CLIENT_ID` | `src/config/configuration.service.ts:899` | `src/app/app.module.ts:128` |
+| `MICROSOFT_CLIENT_ID` | `src/config/configuration.service.ts:907` | `src/app/app.module.ts:129` |
+
+`DISABLE_RATE_LIMITING` is a seventh, outside that schema entirely: the guard reads it
+straight from `process.env` (`src/common/guards/custom-throttler.guard.ts:12-18`), so
+nothing validates it and `.env.example` does not mention it — the documented switch is
+`RATE_LIMIT_ENABLED=false` (`.env.example:188`).
+
+Conversely, the names `docker-compose.prod.yml` interpolates (`MONGO_KEYFILE`,
+`MONGO_ROOT_*`, `MONGO_APP_*`, `MINIO_ROOT_*`, `REDIS_PASSWORD`, `GRAFANA_ADMIN_*`,
+`DOMAIN`, `DB_NAME`, `APP_URL`, the JWT/encryption secrets) are deploy inputs, not
+`ConfigurationService` getters; they are absent from `.env.example` and step through the
+compose `:?` gate instead. [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) Step 2 lists them.
 
 **Critical variables:**
-- `DATABASE_URL` — MongoDB connection
-- `REDIS_URL` — Redis connection
+- `DATABASE_URL` — MongoDB connection; a deployed boot needs `?replicaSet=rs0`, because the driver will not use transactions without the set name
+- `REDIS_URL` — Redis connection, and where the rate-limit counters live; required on every boot that is not `APP_ENV=development` or a test run (`src/config/configuration.service.ts:308-321`)
+- `APP_ENV` — `development`, `staging` or `production` (`src/app/app.module.ts:84-86`); only an explicit `development` keeps the secret gate off
 - `JWT_ACCESS_SECRET` — Access token secret (generate: `openssl rand -hex 32`)
-- `JWT_REFRESH_SECRET` — Refresh token secret (generate: `openssl rand -hex 32`)
-- `ENCRYPTION_KEY` — Data encryption key (min 32 chars)
+- `JWT_REFRESH_SECRET` — Refresh token secret (generate separately; the boot refuses one key used for both)
+- `ENCRYPTION_KEY` — Data encryption key **and** the vault verifier pepper, min 32 characters and never the shipped template; rotating it is a two-variable operation (`docs/SECURITY.md`)
 - `OBJECT_STORAGE_*` — MinIO configuration
-- `RESEND_API_KEY`, `EMAIL_FROM`, and `EMAIL_REPLY_TO` — Email configuration
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, and `SMTP_FROM` — Email configuration
 
 ### Scripts
 
@@ -244,24 +296,44 @@ cp .env.example .env.prod
 # Edit with your values
 nano .env.prod
 
-# Key variables to set:
-# APP_URL=https://your-domain.com
-# DATABASE_URL=mongodb://user:password@mongo:27017/allinone_prod
-# JWT_ACCESS_SECRET=<generate: openssl rand -hex 32>
-# JWT_REFRESH_SECRET=<generate: openssl rand -hex 32>
-# ENCRYPTION_KEY=<generate: openssl rand -base64 32>
-# MINIO_ROOT_PASSWORD=<strong-password>
+# Compose interpolates only from its own environment and from a file named `.env`
+# next to the compose file — `.env.prod` is nothing special to it, so either name the
+# file `.env`, use `--env-file`, or export the values first.
+# See docs/DEPLOYMENT.md Step 6 for the exact commands.
+
+# Variables this stack will not render without (`${VAR:?…}` in
+# docker-compose.prod.yml — the deploy fails at `docker compose config` rather than
+# starting a service with an empty credential):
+# APP_URL=<the public origin the app issues cookies and CORS for>
+# DOMAIN=<the hostname Caddy terminates TLS for>
+# JWT_ACCESS_SECRET=<generate: openssl rand -base64 48>
+# JWT_REFRESH_SECRET=<generate separately; must differ from the access secret>
+# ENCRYPTION_KEY=<generate: openssl rand -base64 48 — also the vault verifier pepper>
+# MONGO_KEYFILE=<host path to the replica-set keyFile>
+# MONGO_ROOT_USERNAME / MONGO_ROOT_PASSWORD
+# MONGO_APP_USERNAME / MONGO_APP_PASSWORD
 # REDIS_PASSWORD=<strong-password>
+# MINIO_ROOT_USER / MINIO_ROOT_PASSWORD
 # GRAFANA_ADMIN_PASSWORD=<strong-password>
+# Optional, with defaults: DB_NAME (=allinone_prod), GRAFANA_ADMIN_USER (=admin),
+# and ENCRYPTION_KEY_ID / ENCRYPTION_KEY_PREVIOUS / ENCRYPTION_KEY_PREVIOUS_ID, which
+# are blank in the steady state and only filled during a rotation window.
+# DATABASE_URL and REDIS_URL are built for `api` and `worker` by the compose file from
+# the credentials above — including `?replicaSet=rs0&authSource=admin`, which the driver
+# needs for transactions — so setting them here changes nothing inside the stack.
+
+# The web app must live under the same registrable domain as this API, or the
+# `SameSite=strict` refresh cookie never arrives (docs/DEPLOYMENT.md, Step 2).
 
 # Start production stack
 docker compose up -d
 
-# Apply the schema
-docker compose exec api npm run db:push
+# Apply the schema — docs/DEPLOYMENT.md Step 6: no database port is published any more,
+# so a host-side `npm run db:push` no longer has a path to the replica set.
 
-# Verify health
-curl https://your-domain.com/api/health
+# Verify health (there is no global API prefix: `/api` is Swagger, the health route is
+# `/health` — src/main.ts:164, src/health/health.controller.ts:11)
+curl https://your-domain.com/health
 ```
 
 ### Backup & Recovery
@@ -281,11 +353,16 @@ docker compose exec minio mc mirror /data ./backups/minio
 
 ### Monitoring
 
-- **Prometheus** — Metrics collection (http://localhost:9090)
-- **Grafana** — Dashboards & alerts (http://localhost:3001)
-- **Logs** — Docker logs: `docker compose logs -f api`
-
-View API metrics at: `http://your-domain:9090/metrics`
+- **Prometheus** — scrapes `api:3000/metrics` on the compose network with the
+  `ADMIN_SECRET` bearer in `/run/secrets/metrics_scrape_secret`. The service publishes no
+  port (`docker-compose.prod.yml:382-412`), so read it through a Caddy reverse proxy or
+  `docker exec` — not `http://localhost:9090`.
+- **Grafana** — production serves it under `https://$DOMAIN/grafana`
+  (`docker-compose.prod.yml:436`) with the `GRAFANA_ADMIN_PASSWORD` you set, development
+  publishes `http://localhost:3001` with `admin`/`admin`.
+- **The API's own series** — `GET /metrics` on the API origin, behind `MetricsScrapeGuard`,
+  so an anonymous curl is a `401` (docs/DEPLOYMENT.md Step 10 has both credentials).
+- **Logs** — stdout only: `docker compose -f docker-compose.prod.yml logs -f api`
 
 ## API Documentation
 
@@ -419,7 +496,7 @@ Contributions welcome! See [CONTRIBUTING.md](docs/CONTRIBUTING.md)
 - [x] Notes & hierarchical folders, version history (`NoteHistory`), tags
 - [x] Tasks & projects, Kanban sections, RRULE recurrence, task reminders
 - [x] Calendar & events, attendees, RSVP management, date range queries
-- [x] Password vault: client-side AES-256-GCM entries synced as `vault_item` oplog changes, master-key unlock, OTP-verified master-password recovery (not zero-knowledge — see `docs/SECURITY.md`)
+- [x] Password vault: client-side AES-256-GCM entries synced as `vault_item` oplog changes, master-key unlock, OTP-verified master-password recovery through a phrase-derived envelope the server cannot unwrap (zero-knowledge for the plaintext, with a legacy-row exception — see `docs/SECURITY.md`)
 
 ### Stage 8 — Infrastructure & Security Hardening (Completed)
 - [x] Redis & BullMQ distributed job processing (`mail`, `notification`, `export`, `maintenance`)

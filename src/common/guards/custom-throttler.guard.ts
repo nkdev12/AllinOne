@@ -1,5 +1,5 @@
 import { Injectable, ExecutionContext } from "@nestjs/common";
-import { ThrottlerGuard } from "@nestjs/throttler";
+import { ThrottlerGuard, normalizeIp } from "@nestjs/throttler";
 
 @Injectable()
 export class CustomThrottlerGuard extends ThrottlerGuard {
@@ -11,7 +11,6 @@ export class CustomThrottlerGuard extends ThrottlerGuard {
    */
   static disabledByDefault(env: NodeJS.ProcessEnv): boolean {
     return (
-      env.APP_ENV === "development" ||
       env.NODE_ENV === "test" ||
       env.DISABLE_RATE_LIMITING === "true" ||
       env.RATE_LIMIT_ENABLED === "false"
@@ -23,10 +22,9 @@ export class CustomThrottlerGuard extends ThrottlerGuard {
   ): Promise<boolean> {
     const env = process.env;
 
-    // An explicit `RATE_LIMIT_ENABLED=true` outranks the environment default.
-    // Without that, the limits the controllers declare are inert in exactly the
-    // two places anyone ever runs them, and first meet a real workload in
-    // production.
+    // Limits are active by default. An explicit true is kept so an operator
+    // can override a temporary local disable without restarting with a new
+    // environment file.
     if (!CustomThrottlerGuard.disabledByDefault(env)) {
       return false;
     }
@@ -52,16 +50,21 @@ export class CustomThrottlerGuard extends ThrottlerGuard {
   }
 
   protected async getTracker(req: Record<string, any>): Promise<string> {
-    // Express resolves the trusted proxy chain. Raw forwarding headers are
-    // client-controlled and must never select a rate-limit bucket.
-    const ip = req.ip || req.socket?.remoteAddress || "127.0.0.1";
-
     // Compound key: Throttle authenticated users per-user, unauthenticated per-IP
     const userId = req.user?.id || req.user?.userId || req.user?.sub;
     if (userId) {
       return `user:${userId}`;
     }
 
-    return `ip:${ip}`;
+    // Express resolves the trusted proxy chain into `req.ip`. The raw forwarding
+    // headers are client-controlled, and a bucket a client can pick is a bucket a
+    // client can refill.
+    const ip = req.ip || req.socket?.remoteAddress || "127.0.0.1";
+
+    // One client owns an IPv6 subnet rather than an address, so an unmasked IPv6
+    // tracker hands out a fresh allowance for every address in its /64 — a limit
+    // that only looks enforced. The prefix stays configurable because a network
+    // handing out shorter prefixes than /64 needs to widen it.
+    return `ip:${normalizeIp(ip, this.ipv6SubnetPrefix)}`;
   }
 }

@@ -17,11 +17,18 @@ export class HealthController {
   @ApiResponse({ status: 503, description: "Application is unhealthy" })
   async health(@Res() response: Response) {
     const result = await this.healthService.checkTerminusHealth();
-    return response
-      .status(
-        result.status === "ok" ? HttpStatus.OK : HttpStatus.SERVICE_UNAVAILABLE,
-      )
-      .json(result);
+    return (
+      response
+        .status(
+          result.status === "ok"
+            ? HttpStatus.OK
+            : HttpStatus.SERVICE_UNAVAILABLE,
+        )
+        // Public probes need only the aggregate result. Component names,
+        // topology and latency belong in authenticated monitoring, not an
+        // internet-facing endpoint.
+        .json({ status: result.status })
+    );
   }
 
   @Get("health/live")
@@ -44,7 +51,7 @@ export class HealthController {
       .status(
         result.status === "ok" ? HttpStatus.OK : HttpStatus.SERVICE_UNAVAILABLE,
       )
-      .json(result);
+      .json({ status: result.status });
   }
 
   @Get("info")

@@ -84,7 +84,18 @@ services:
   # Prometheus (Metrics - open-source monitoring)
   # ============================================================================
   prometheus:
-    image: prom/prometheus:latest
+    # Same pin as docker-compose.prod.yml, same reason in miniature: `latest` made
+    # the version a function of when an image was last pulled, and the commented
+    # scrape-credential stanza in infrastructure/prometheus/prometheus.dev.yml is
+    # written against `authorization.credentials_file` (Prometheus >= 2.24), so the
+    # tag has to be a number someone checked rather than a moving target.
+    #
+    # No credentials mount here on purpose. The file it would mount holds
+    # ADMIN_SECRET, which is a production value; a dev compose everybody clones
+    # cannot ship it and must not invent a committed placeholder for it. Until an
+    # operator supplies their own and uncomments the stanza in that config, these
+    # scrapes answer 401 — documented there, not silent.
+    image: prom/prometheus:v3.13.4
     container_name: allinone-prometheus-dev
     ports:
       - "9090:9090"
@@ -107,7 +118,11 @@ services:
   # Grafana (Visualization - open-source dashboards)
   # ============================================================================
   grafana:
-    image: grafana/grafana:latest
+    # Pinned to the same tag as production so a panel built on a laptop means the
+    # same thing on the server; the version was confirmed against the registry, not
+    # guessed. See the note on the production service about the deprecated
+    # `grafana-piechart-panel` in `GF_INSTALL_PLUGINS` before this moves again.
+    image: grafana/grafana:13.2.4
     container_name: allinone-grafana-dev
     ports:
       - "3001:3000"

@@ -9,7 +9,7 @@ import {
   HttpStatus,
 } from "@nestjs/common";
 import { ErrorCode } from "@/common/errors/error-code";
-import { unauthorized } from "@/common/errors/http-errors";
+import { forbidden, unauthorized } from "@/common/errors/http-errors";
 import {
   ApiTags,
   ApiOperation,
@@ -22,7 +22,10 @@ import { AuthService } from "./auth.service";
 import { ConfigurationService } from "@/config/configuration.service";
 import { RegisterDto } from "./dto/register.dto";
 import { LoginDto } from "./dto/login.dto";
-import { RefreshTokenDto } from "./dto/refresh-token.dto";
+import {
+  RefreshTokenDto,
+  REFRESH_REQUEST_HEADER,
+} from "./dto/refresh-token.dto";
 import { VerifyEmailRequestDto, ConfirmEmailDto } from "./dto/verify-email.dto";
 import { ForgotPasswordDto, ResetPasswordDto } from "./dto/password-reset.dto";
 import { OAuthLoginDto } from "./dto/oauth.dto";
@@ -37,6 +40,8 @@ import { AuthResponseDto } from "./dto/auth-response.dto";
 import { JwtAuthGuard } from "./guards/jwt-auth.guard";
 import { GetUser } from "./decorators/get-user.decorator";
 
+const REFRESH_COOKIE_NAME = "refresh_token";
+
 @ApiTags("Auth")
 @Controller("auth")
 export class AuthController {
@@ -45,20 +50,40 @@ export class AuthController {
     private readonly configService: ConfigurationService,
   ) {}
 
+  /**
+   * Read one cookie out of the raw `Cookie` header.
+   *
+   * The decode has to be total: this header is attacker-controlled bytes on an
+   * unauthenticated route, and `decodeURIComponent("%")` throws `URIError`, which
+   * used to leave the handler as a 500 — a free way for anybody to probe the
+   * error path of a session endpoint with nothing more than a malformed cookie.
+   * A value that cannot be percent-decoded was never written by `cookie()` for a
+   * JWT we minted, so it is treated as absent rather than passed on raw: the raw
+   * bytes would reach `refreshTokens` as a credential no client could have sent,
+   * and the request would then read as a barrier failure (403) instead of the
+   * plain "no token" 401 it actually is.
+   */
   private extractCookie(
     cookieHeader: string | undefined,
     name: string,
   ): string | undefined {
     if (!cookieHeader) return undefined;
     const match = cookieHeader.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
-    return match ? decodeURIComponent(match[1]) : undefined;
+    if (!match) return undefined;
+    try {
+      return decodeURIComponent(match[1]);
+    } catch {
+      return undefined;
+    }
   }
 
   private setRefreshTokenCookie(res: Response, token?: string) {
     if (!token) return;
-    res.cookie("refresh_token", token, {
+    res.cookie(REFRESH_COOKIE_NAME, token, {
       httpOnly: true,
-      secure: process.env.APP_ENV === "production",
+      // This API is hosted behind HTTPS. Never downgrade a bearer credential
+      // because an environment flag was misconfigured.
+      secure: true,
       sameSite: "strict",
       path: "/auth/refresh",
       // The cookie and the token it carries expire together. A literal week
@@ -80,8 +105,18 @@ export class AuthController {
   @ApiResponse({ status: 400, description: "Validation error" })
   @ApiResponse({ status: 409, description: "Email already exists" })
   @ApiResponse({ status: 429, description: "Too many requests" })
-  async register(@Body() dto: RegisterDto): Promise<AuthResponseDto> {
-    return this.authService.register(dto);
+  async register(
+    @Body() dto: RegisterDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<AuthResponseDto> {
+    const result = await this.authService.register(dto);
+    // Where registration opens a session, the web client's session *is* the
+    // cookie: it holds the access token in memory only, so a register-then-
+    // navigate flow that got the token in the body but no cookie has nothing to
+    // refresh with and silently signs out at the first 401. Returns early when
+    // email verification is required, because then there is no session.
+    this.setRefreshTokenCookie(res, result.tokens?.refreshToken);
+    return result;
   }
 
   @Post("login")
@@ -182,15 +217,40 @@ export class AuthController {
   @ApiOperation({ summary: "Refresh authentication access token" })
   @ApiResponse({ status: 200, description: "Tokens successfully refreshed" })
   @ApiResponse({ status: 401, description: "Invalid or expired refresh token" })
+  @ApiResponse({
+    status: 403,
+    description: `Cookie-only refresh without the ${REFRESH_REQUEST_HEADER} header`,
+  })
   async refresh(
     @Body() dto: RefreshTokenDto,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
+    // `cookie-parser` is not a dependency of this app and no middleware registers
+    // it, so `req.cookies` is never populated on a real request: the header parse
+    // below is the path a browser's cookie actually travels, and it is the one
+    // that has to survive a malformed value. The parsed lookup stays first for a
+    // deployment that does add the parser — its `cookie` package hands back an
+    // already-decoded string, and anything that is not a string is not a
+    // credential.
+    const parsedCookie = (req as any).cookies?.[REFRESH_COOKIE_NAME];
     const cookieToken =
-      (req as any).cookies?.refresh_token ||
-      this.extractCookie(req.headers.cookie, "refresh_token");
+      (typeof parsedCookie === "string" ? parsedCookie : undefined) ||
+      this.extractCookie(req.headers.cookie, REFRESH_COOKIE_NAME);
     const refreshToken = dto.refreshToken || cookieToken;
+
+    // A body token proves possession and needs nothing else; that is the native
+    // path. A cookie proves nothing — the browser attaches it to a cross-site form
+    // post on its own, and only `SameSite=strict` stands between that post and a
+    // minted access token. SameSite is a deployment property someone can change by
+    // accident, and a foreign page cannot add a custom header to the request, so a
+    // cookie-only refresh without one is refused rather than trusted.
+    if (!dto.refreshToken && cookieToken && !this.hasRefreshBarrier(req)) {
+      throw forbidden(
+        ErrorCode.TOKEN_INVALID,
+        `Refresh with the ambient cookie requires the ${REFRESH_REQUEST_HEADER} header`,
+      );
+    }
 
     if (!refreshToken) {
       throw unauthorized(ErrorCode.TOKEN_INVALID, "Refresh token is required");
@@ -199,6 +259,15 @@ export class AuthController {
     const result = await this.authService.refreshTokens({ refreshToken });
     this.setRefreshTokenCookie(res, result.tokens.refreshToken);
     return result;
+  }
+
+  /**
+   * Express lower-cases header names, so the one this compares against is the
+   * spelling the client's own header set uses.
+   */
+  private hasRefreshBarrier(req: Request): boolean {
+    const value = req.headers[REFRESH_REQUEST_HEADER];
+    return typeof value === "string" && value.trim().length > 0;
   }
 
   @Post("logout")
@@ -211,7 +280,7 @@ export class AuthController {
     @GetUser("sessionId") sessionId: string,
     @Res({ passthrough: true }) res: Response,
   ) {
-    res.clearCookie("refresh_token", { path: "/auth/refresh" });
+    res.clearCookie(REFRESH_COOKIE_NAME, { path: "/auth/refresh" });
     return this.authService.logout(sessionId);
   }
 

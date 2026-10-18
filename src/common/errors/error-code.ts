@@ -36,6 +36,11 @@ export enum ErrorCode {
   VAULT_MASTER_KEY_MISMATCH = "VAULT_MASTER_KEY_MISMATCH",
   VAULT_RECOVERY_NOT_PENDING = "VAULT_RECOVERY_NOT_PENDING",
   VAULT_RECOVERY_UNAVAILABLE = "VAULT_RECOVERY_UNAVAILABLE",
+  // The row is sealed under a pepper key this process does not hold, which is an
+  // operator configuration gap and not a wrong password: a client must be able to
+  // tell the two apart, because retrying a master password against this one walks
+  // the user into a cooldown that locks a healthy vault out of itself.
+  VAULT_PEPPER_KEY_UNAVAILABLE = "VAULT_PEPPER_KEY_UNAVAILABLE",
 
   // Devices and sync
   DEVICE_NOT_REGISTERED = "DEVICE_NOT_REGISTERED",

@@ -55,9 +55,12 @@ const WORKER_ENV: Record<string, string> = {
   OBJECT_STORAGE_SECRET_KEY: "test-secret-key",
   OBJECT_STORAGE_BUCKET: "test-bucket",
   ENCRYPTION_KEY: "x".repeat(32),
-  RESEND_API_KEY: "",
-  EMAIL_FROM: "",
-  EMAIL_REPLY_TO: "",
+  SMTP_HOST: "",
+  SMTP_PORT: "587",
+  SMTP_USER: "",
+  SMTP_PASSWORD: "",
+  SMTP_FROM: "",
+  SMTP_TLS: "true",
 };
 
 /** Stand-in for a Bull `Queue`: records what the module graph hands out. */

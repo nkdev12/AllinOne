@@ -7,6 +7,31 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:3000']
     metrics_path: '/metrics'
+    # `/metrics` is guarded in every environment, not just production: the guard
+    # answers an anonymous scrape with 401, so this job has never returned metrics.
+    # The fix is the bearer credential block below, identical to the live one in
+    # prometheus.prod.yml, pointed at the same in-container path.
+    #
+    # It stays commented out here on purpose. That file holds ADMIN_SECRET, and a
+    # dev compose is the one everybody clones — mounting a path nobody has, or worse
+    # committing a placeholder secret to make the mount succeed, trades a dead
+    # dashboard for a leaked credential. So an operator who wants dev metrics
+    # supplies the host file themselves (same contents as production: ADMIN_SECRET
+    # verbatim, mode 600, never committed), bind-mounts it onto
+    # /run/secrets/metrics_scrape_secret in docker-compose.dev.yml's `prometheus`
+    # service, and uncomments this stanza.
+    #
+    # Until then the failure is expected and stated rather than silent: the API job
+    # returns 401 and `up{job="allinone-api"} == 0`. Note the target is a second,
+    # unrelated reason this job has never worked — `localhost:3000` inside this
+    # container is Prometheus talking to itself on the bridge network, not the API,
+    # so a laptop that runs the API on the host has to either point this at
+    # `host.docker.internal:3000` (with `extra_hosts` on Linux) or run the API as a
+    # service on `allinone-dev`. Fixing that is a dev-workflow decision, not
+    # something to invent here.
+    # authorization:
+    #   type: Bearer
+    #   credentials_file: /run/secrets/metrics_scrape_secret
     scrape_interval: 5s
 
   - job_name: 'prometheus'

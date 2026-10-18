@@ -27,6 +27,15 @@ export class SetupVaultDto {
   })
   @IsString()
   @IsNotEmpty()
+  // The same rule `CompleteVaultRecoveryDto` applies, and for the same field:
+  // `recovery/verify` hands this exact string back to the client, which sends it
+  // to `recovery/complete`. A salt that does not satisfy that DTO strands the
+  // rotation in a 400 the client has no way to construct its way out of — the
+  // check belongs on the write, not on the recovery attempt months later.
+  // 16 random bytes base64-encoded is 24 characters, which is what the shipped
+  // client derives with.
+  @IsBase64()
+  @Length(24, 24)
   keySalt!: string;
 
   @ApiPropertyOptional({
@@ -53,13 +62,16 @@ export class SetupVaultDto {
   @Min(1024)
   kdfMemory?: number;
 
-  // Recovery blob: the master key wrapped so an OTP-verified reset can
-  // re-encrypt the vault instead of discarding it.
-  @ApiPropertyOptional({ description: "Key that wraps the master key" })
+  // Recovery envelope: the master key wrapped under a key the client derives
+  // from the user's 12-word phrase and this salt. The wrapping key itself is
+  // never uploaded — a build that sends one is refused here, because a stored
+  // key-encryption-key makes every vault on the server recoverable by anyone
+  // with database access.
+  @ApiPropertyOptional({ description: "Base64 salt for the recovery KDF" })
   @IsOptional()
-  @IsString()
-  @IsNotEmpty()
-  recoveryKey?: string;
+  @IsBase64()
+  @Length(24, 24)
+  recoveryKdfSalt?: string;
 
   @ApiPropertyOptional({ description: "AES-GCM ciphertext of the master key" })
   @IsOptional()
@@ -114,4 +126,31 @@ export class CompleteVaultRecoveryDto {
 
   @Equals(65536)
   kdfMemory!: number;
+
+  // Optional envelope upgrade. A client that recovers a vault whose row still
+  // holds a legacy unwrapped `recoveryKey` supplies a phrase-derived wrap here,
+  // and the service replaces the plaintext key with it in the same write.
+  @ApiPropertyOptional({ description: "Base64 salt for the recovery KDF" })
+  @IsOptional()
+  @IsBase64()
+  @Length(24, 24)
+  recoveryKdfSalt?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBase64()
+  @Length(44, 44)
+  wrappedMasterKey?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBase64()
+  @Length(16, 16)
+  wrappedMasterIv?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBase64()
+  @Length(24, 24)
+  wrappedMasterTag?: string;
 }

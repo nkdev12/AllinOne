@@ -203,9 +203,28 @@ describe("AdminController", () => {
       const guard = await realGuard({ adminEmails: ["ops@allinone.app"] });
       expect(
         guard.canActivate(
-          httpContext({ id: "user-1", email: "ops@allinone.app" }),
+          httpContext({
+            id: "user-1",
+            email: "ops@allinone.app",
+            emailVerifiedAt: new Date("2026-01-01"),
+          }),
         ),
       ).toBe(true);
+    });
+
+    it("denies a configured address whose mailbox control is unproven", async () => {
+      // The address on the row is a string the caller's own sign-in produced;
+      // ADMIN_EMAILS is only a second factor once something verified it.
+      const guard = await realGuard({ adminEmails: ["ops@allinone.app"] });
+      expect(() =>
+        guard.canActivate(
+          httpContext({
+            id: "user-1",
+            email: "ops@allinone.app",
+            emailVerifiedAt: null,
+          }),
+        ),
+      ).toThrow(ForbiddenException);
     });
 
     it("admits an authenticated caller that presents the configured x-admin-secret", async () => {
