@@ -35,13 +35,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # The workflow and both Dockerfiles now agree on 22: `node:22-alpine` is
-          # what `Dockerfile` (:6, :36) and `Dockerfile.worker` (:3, :23) build and
-          # run on, so this job tests the runtime that ships instead of a version
-          # nothing ever runs. There is no third place to keep in step — package.json
-          # declares no `engines` field — which makes these two `node-version`s and
-          # those four `FROM`s the whole agreement: moving the images means moving the
-          # steps, in the same commit, or the green check means nothing again.
+          # Node 22 LTS runtime matching the production and Railway deployment
           node-version: "22"
           cache: npm
 
@@ -109,9 +103,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # 22 here too, matching the build job above and both Dockerfiles. The e2e
-          # specs are ordinary Jest-in-TS suites, so the runtime they are checked on
-          # has to be the runtime the images run.
+          # Node 22 LTS runtime matching the build job above
           node-version: "22"
           cache: npm
 

@@ -85,6 +85,7 @@ export class ThrottlerStorageModule {}
           .valid("development", "staging", "production")
           .default("development"),
         APP_PORT: Joi.number().default(3000),
+        PORT: Joi.number().optional(),
         APP_URL: Joi.string().required(),
         // The same accepted set as `src/worker.module.ts`, taken from one constant
         // so the two processes cannot answer a `NODE_ENV` differently: `allowUnknown`

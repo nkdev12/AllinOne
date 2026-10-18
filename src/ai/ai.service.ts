@@ -17,11 +17,7 @@ import {
   SuggestedTagsResult,
   TaskPriority,
 } from "./ai.interface";
-import {
-  ConvertTasksDto,
-  ExtractTasksDto,
-  SuggestTagsDto,
-} from "./dto/ai.dto";
+import { ConvertTasksDto, ExtractTasksDto, SuggestTagsDto } from "./dto/ai.dto";
 
 const STOP_WORDS = new Set([
   "a",
@@ -239,7 +235,9 @@ export class AiService {
         throw new NotFoundException(`Note with ID '${noteId}' not found.`);
       }
       if (note.isEncrypted) {
-        throw new BadRequestException("Encrypted notes cannot be processed by AI text utilities.");
+        throw new BadRequestException(
+          "Encrypted notes cannot be processed by AI text utilities.",
+        );
       }
       return {
         content: `${note.title}\n\n${note.content || ""}`.trim(),

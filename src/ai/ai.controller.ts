@@ -16,11 +16,7 @@ import {
 import { JwtAuthGuard } from "@/auth/guards/jwt-auth.guard";
 import { GetUser } from "@/auth/decorators/get-user.decorator";
 import { AiService } from "./ai.service";
-import {
-  ConvertTasksDto,
-  ExtractTasksDto,
-  SuggestTagsDto,
-} from "./dto/ai.dto";
+import { ConvertTasksDto, ExtractTasksDto, SuggestTagsDto } from "./dto/ai.dto";
 
 @ApiTags("AI")
 @Controller("ai")

@@ -13,6 +13,8 @@
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main.js",
+    "start:worker": "node dist/worker.js",
+    "postinstall": "prisma generate",
     "lint": "eslint \"{src,test}/**/*.ts\" --fix",
     "test": "jest",
     "test:watch": "jest --watch",
@@ -31,9 +33,9 @@
     "db:seed": "ts-node prisma/seed.ts",
     "db:studio": "prisma studio",
     "sync:backfill:cursor": "ts-node scripts/backfill-change-cursor.ts",
-    "docker:up": "docker-compose up -d",
-    "docker:down": "docker-compose down",
-    "docker:logs": "docker-compose logs -f",
+    "docker:up": "docker compose -f docker-compose.dev.yml up -d",
+    "docker:down": "docker compose -f docker-compose.dev.yml down",
+    "docker:logs": "docker compose -f docker-compose.dev.yml logs -f",
     "audit": "npm audit --audit-level=high"
   },
   "dependencies": {

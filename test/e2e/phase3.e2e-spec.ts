@@ -86,22 +86,6 @@ describe("Phase 3: Product Capabilities (E2E)", () => {
     };
 
     aiServiceMock = {
-      summarize: jest.fn().mockImplementation(async (_userId, dto) => {
-        if (!dto.text && !dto.noteId) {
-          throw new BadRequestException(
-            "Either 'text' or 'noteId' must be provided.",
-          );
-        }
-        return {
-          summary: "This is a concise executive summary of the document.",
-          originalLength: (dto.text || "Sample content").length,
-          summaryLength: 52,
-          compressionRatio: 0.35,
-          format: dto.format || "paragraph",
-          provider: "heuristic",
-        };
-      }),
-
       extractTasks: jest.fn().mockImplementation(async (_userId, _dto) => ({
         tasks: [
           {
@@ -300,22 +284,6 @@ describe("Phase 3: Product Capabilities (E2E)", () => {
   // Subsystem 2: AI & Semantic Capabilities
   // ==========================================
   describe("Subsystem 2: AI & Semantic Capabilities", () => {
-    it("POST /ai/summarize - should generate document summary", async () => {
-      const response = await request(app.getHttpServer())
-        .post("/ai/summarize")
-        .set("Authorization", validAuthHeader)
-        .send({
-          text: "AllinOne provides notes, projects, tasks, and calendar sync.",
-          length: "brief",
-          format: "paragraph",
-        })
-        .expect(200);
-
-      expect(response.body.summary).toBeDefined();
-      expect(response.body.compressionRatio).toBeDefined();
-      expect(response.body.provider).toBe("heuristic");
-    });
-
     it("POST /ai/extract-tasks - should extract tasks from text", async () => {
       const response = await request(app.getHttpServer())
         .post("/ai/extract-tasks")

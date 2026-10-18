@@ -1584,7 +1584,9 @@ describe("AuthService", () => {
 
       await expect(
         service.resetPassword("test@example.com", "123456", "NewPassword123!"),
-      ).rejects.toThrow("does not use a password");
+      ).rejects.toThrow(
+        "No password-based authentication record found for this account.",
+      );
     });
   });
 

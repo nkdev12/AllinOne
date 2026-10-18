@@ -189,7 +189,8 @@ async function bootstrap() {
   // Must be registered before listen() so the hooks exist once requests flow.
   app.enableShutdownHooks();
 
-  const port = configService.get<number>("APP_PORT", 3000);
+  const port =
+    Number(process.env.PORT) || configService.get<number>("APP_PORT", 3000);
   await app.listen(port, "0.0.0.0");
 
   logger.log(`🚀 Allinone Backend started on http://localhost:${port}`);

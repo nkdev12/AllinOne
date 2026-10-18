@@ -490,7 +490,7 @@ export class ConfigurationService {
   }
 
   get appPort(): number {
-    return this.configService.get("APP_PORT", 3000);
+    return Number(process.env.PORT) || this.configService.get("APP_PORT", 3000);
   }
 
   get appUrl(): string {
