@@ -161,7 +161,7 @@ describe("AuthService", () => {
         findFirst: jest.fn(),
         findMany: jest
           .fn()
-          .mockResolvedValue([{ id: "oauth-1", userId: "user-uuid-123" }]),
+          .mockResolvedValue([{ id: "auth-1", userId: "user-uuid-123" }]),
         findUnique: jest.fn().mockResolvedValue({ id: "auth-1" }),
         update: jest.fn().mockResolvedValue({ id: "auth-1" }),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
@@ -1479,133 +1479,6 @@ describe("AuthService", () => {
       await expect(
         service.enableMfa(mockUser.id, { totpCode: token }),
       ).resolves.toHaveProperty("recoveryCodes");
-    });
-
-    it("never attaches an unbound provider identity to an existing email", async () => {
-      prismaService.authentication.findMany.mockResolvedValue([]);
-      await expect(
-        (service as any).processOAuthLogin(
-          "GOOGLE",
-          "unbound-sub",
-          mockUser.email,
-        ),
-      ).rejects.toMatchObject({
-        response: { code: ErrorCode.EMAIL_ALREADY_REGISTERED },
-      });
-      expect(prismaService.authentication.create).not.toHaveBeenCalled();
-      expect(prismaService.session.create).not.toHaveBeenCalled();
-    });
-
-    it("uses the bound provider subject even after its email changes", async () => {
-      const result = await (service as any).processOAuthLogin(
-        "GOOGLE",
-        "bound-sub",
-        "changed@example.com",
-      );
-      expect(usersService.getUserById).toHaveBeenCalledWith(mockUser.id);
-      expect(prismaService.user.findFirst).not.toHaveBeenCalled();
-      expect(result.user.id).toBe(mockUser.id);
-    });
-
-    it("requires account MFA after OAuth instead of issuing session tokens", async () => {
-      prismaService.mFASetting.findUnique.mockResolvedValue(mockMfaSetting);
-      const result = await (service as any).processOAuthLogin(
-        "GOOGLE",
-        "bound-sub",
-        mockUser.email,
-      );
-      expect(result.mfaRequired).toBe(true);
-      expect(result.tokens).toBeUndefined();
-      expect(prismaService.session.create).not.toHaveBeenCalled();
-    });
-
-    it("rejects ambiguous legacy provider bindings", async () => {
-      prismaService.authentication.findMany.mockResolvedValue([
-        { userId: "a" },
-        { userId: "b" },
-      ]);
-      await expect(
-        (service as any).processOAuthLogin(
-          "GOOGLE",
-          "duplicate-sub",
-          mockUser.email,
-        ),
-      ).rejects.toThrow("Ambiguous OAuth identity");
-      expect(prismaService.session.create).not.toHaveBeenCalled();
-    });
-  });
-
-  describe("OAuth integration", () => {
-    it("should authenticate user with Apple ID token", async () => {
-      usersService.findByEmail.mockResolvedValue(mockUser);
-      jest.spyOn(service, "verifyAppleToken").mockResolvedValue({
-        sub: "apple-123",
-        email: "test@example.com",
-        name: "Test User",
-      });
-
-      const result = await service.loginWithApple({
-        idToken: "valid-apple-id-token",
-      });
-
-      expect(result).toBeDefined();
-      expect(result.user?.email).toBe("test@example.com");
-      expect(result.tokens?.accessToken).toBe("mock-jwt-token");
-    });
-
-    it("should authenticate user with Microsoft ID token", async () => {
-      usersService.findByEmail.mockResolvedValue(mockUser);
-      jest.spyOn(service, "verifyMicrosoftToken").mockResolvedValue({
-        sub: "ms-123",
-        email: "test@example.com",
-        name: "Test User",
-      });
-
-      const result = await service.loginWithMicrosoft({
-        idToken: "valid-microsoft-id-token",
-      });
-
-      expect(result).toBeDefined();
-      expect(result.user?.email).toBe("test@example.com");
-      expect(result.tokens?.accessToken).toBe("mock-jwt-token");
-    });
-
-    it("fails closed if Google client ID is not configured", async () => {
-      (configService as any).googleClientId = undefined;
-      await expect(
-        (service as any).verifyGoogleToken("some-id-token"),
-      ).rejects.toThrow(UnauthorizedException);
-    });
-
-    it("fails closed if Apple client ID is not configured", async () => {
-      (configService as any).appleClientId = undefined;
-      await expect(service.verifyAppleToken("some-id-token")).rejects.toThrow(
-        UnauthorizedException,
-      );
-    });
-
-    it("fails closed if Microsoft client ID is not configured", async () => {
-      (configService as any).microsoftClientId = undefined;
-      await expect(
-        service.verifyMicrosoftToken("some-id-token"),
-      ).rejects.toThrow(UnauthorizedException);
-    });
-
-    it("rejects OAuth login if user account is deleted or inactive", async () => {
-      usersService.getUserById.mockResolvedValue({
-        ...mockUser,
-        deletedAt: new Date(),
-      });
-
-      await expect(
-        (service as any).processOAuthLogin(
-          "GOOGLE",
-          "google-123",
-          "test@example.com",
-        ),
-      ).rejects.toMatchObject({
-        response: { code: ErrorCode.ACCOUNT_DISABLED },
-      });
     });
   });
 

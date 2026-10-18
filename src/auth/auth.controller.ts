@@ -28,7 +28,6 @@ import {
 } from "./dto/refresh-token.dto";
 import { VerifyEmailRequestDto, ConfirmEmailDto } from "./dto/verify-email.dto";
 import { ForgotPasswordDto, ResetPasswordDto } from "./dto/password-reset.dto";
-import { OAuthLoginDto } from "./dto/oauth.dto";
 import {
   EnableMfaDto,
   VerifyMfaLoginDto,
@@ -138,75 +137,6 @@ export class AuthController {
     const ipAddress = req.ip || (req.headers["x-forwarded-for"] as string);
     const userAgent = req.headers["user-agent"];
     const result = await this.authService.login(dto, ipAddress, userAgent);
-    this.setRefreshTokenCookie(res, result.tokens?.refreshToken);
-    return result;
-  }
-
-  // ========================================================================
-  // OAuth Integration Endpoints (Google, Apple, Microsoft)
-  // ========================================================================
-
-  @Post("oauth/google")
-  @Throttle({ default: { limit: 10, ttl: 60000 } })
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: "Authenticate using Google OAuth ID token" })
-  @ApiResponse({
-    status: 200,
-    description: "Successfully authenticated via Google",
-    type: AuthResponseDto,
-  })
-  async loginWithGoogle(
-    @Body() dto: OAuthLoginDto,
-    @Req() req: Request,
-    @Res({ passthrough: true }) res: Response,
-  ): Promise<AuthResponseDto> {
-    const ipAddress = req.ip || (req.headers["x-forwarded-for"] as string);
-    const userAgent = req.headers["user-agent"];
-    const result = await this.authService.loginWithGoogle(
-      dto,
-      ipAddress,
-      userAgent,
-    );
-    this.setRefreshTokenCookie(res, result.tokens?.refreshToken);
-    return result;
-  }
-
-  @Post("oauth/apple")
-  @Throttle({ default: { limit: 10, ttl: 60000 } })
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: "Authenticate using Apple OAuth ID token" })
-  async loginWithApple(
-    @Body() dto: OAuthLoginDto,
-    @Req() req: Request,
-    @Res({ passthrough: true }) res: Response,
-  ): Promise<AuthResponseDto> {
-    const ipAddress = req.ip || (req.headers["x-forwarded-for"] as string);
-    const userAgent = req.headers["user-agent"];
-    const result = await this.authService.loginWithApple(
-      dto,
-      ipAddress,
-      userAgent,
-    );
-    this.setRefreshTokenCookie(res, result.tokens?.refreshToken);
-    return result;
-  }
-
-  @Post("oauth/microsoft")
-  @Throttle({ default: { limit: 10, ttl: 60000 } })
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: "Authenticate using Microsoft OAuth ID token" })
-  async loginWithMicrosoft(
-    @Body() dto: OAuthLoginDto,
-    @Req() req: Request,
-    @Res({ passthrough: true }) res: Response,
-  ): Promise<AuthResponseDto> {
-    const ipAddress = req.ip || (req.headers["x-forwarded-for"] as string);
-    const userAgent = req.headers["user-agent"];
-    const result = await this.authService.loginWithMicrosoft(
-      dto,
-      ipAddress,
-      userAgent,
-    );
     this.setRefreshTokenCookie(res, result.tokens?.refreshToken);
     return result;
   }

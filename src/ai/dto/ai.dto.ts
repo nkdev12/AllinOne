@@ -6,6 +6,7 @@ import {
   IsArray,
   ValidateNested,
 } from "class-validator";
+import { Type } from "class-transformer";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { TaskPriority } from "../ai.interface";
 

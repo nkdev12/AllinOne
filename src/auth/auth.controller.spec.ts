@@ -41,9 +41,6 @@ describe("AuthController", () => {
     authService = {
       register: jest.fn().mockResolvedValue(mockAuthResponse),
       login: jest.fn().mockResolvedValue(mockAuthResponse),
-      loginWithGoogle: jest.fn().mockResolvedValue(mockAuthResponse),
-      loginWithApple: jest.fn().mockResolvedValue(mockAuthResponse),
-      loginWithMicrosoft: jest.fn().mockResolvedValue(mockAuthResponse),
       refreshTokens: jest
         .fn()
         .mockResolvedValue({ tokens: mockAuthResponse.tokens }),
@@ -136,39 +133,6 @@ describe("AuthController", () => {
     );
 
     expect(res.cookie).not.toHaveBeenCalled();
-  });
-
-  it("should authenticate user via Google OAuth", async () => {
-    const reqMock: any = { ip: "127.0.0.1", headers: {} };
-    const res = await controller.loginWithGoogle(
-      { idToken: "google-token" },
-      reqMock,
-      resMock,
-    );
-    expect(res).toEqual(mockAuthResponse);
-    expect(authService.loginWithGoogle).toHaveBeenCalled();
-  });
-
-  it("should authenticate user via Apple OAuth", async () => {
-    const reqMock: any = { ip: "127.0.0.1", headers: {} };
-    const res = await controller.loginWithApple(
-      { idToken: "apple-token" },
-      reqMock,
-      resMock,
-    );
-    expect(res).toEqual(mockAuthResponse);
-    expect(authService.loginWithApple).toHaveBeenCalled();
-  });
-
-  it("should authenticate user via Microsoft OAuth", async () => {
-    const reqMock: any = { ip: "127.0.0.1", headers: {} };
-    const res = await controller.loginWithMicrosoft(
-      { idToken: "microsoft-token" },
-      reqMock,
-      resMock,
-    );
-    expect(res).toEqual(mockAuthResponse);
-    expect(authService.loginWithMicrosoft).toHaveBeenCalled();
   });
 
   describe("refresh", () => {

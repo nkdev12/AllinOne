@@ -881,32 +881,4 @@ export class ConfigurationService {
   get backupRetentionDays(): number {
     return this.configService.get("BACKUP_RETENTION_DAYS", 30);
   }
-
-  // ========================================================================
-  // OAuth Configuration
-  // ========================================================================
-
-  get googleClientId(): string | undefined {
-    return (
-      this.configService.get<string>("GOOGLE_CLIENT_ID")?.trim() ||
-      this.configService.get<string>("OAUTH_GOOGLE_CLIENT_ID")?.trim() ||
-      undefined
-    );
-  }
-
-  get appleClientId(): string | undefined {
-    return (
-      this.configService.get<string>("APPLE_CLIENT_ID")?.trim() ||
-      this.configService.get<string>("OAUTH_APPLE_CLIENT_ID")?.trim() ||
-      undefined
-    );
-  }
-
-  get microsoftClientId(): string | undefined {
-    return (
-      this.configService.get<string>("MICROSOFT_CLIENT_ID")?.trim() ||
-      this.configService.get<string>("OAUTH_MICROSOFT_CLIENT_ID")?.trim() ||
-      undefined
-    );
-  }
 }
