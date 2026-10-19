@@ -1,4 +1,4 @@
-import { Injectable, Logger, Optional } from "@nestjs/common";
+import { Injectable, Logger, Optional, HttpException } from "@nestjs/common";
 import { ChangeOperation, Prisma } from "@prisma/client";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { PushSyncDto } from "./dto/push-sync.dto";
@@ -8,8 +8,15 @@ import { MetricsService } from "@/common/metrics/metrics.service";
 import { ErrorCode } from "@/common/errors/error-code";
 import { badRequest, forbidden, notFound } from "@/common/errors/http-errors";
 import { appendChange, getHighestChangeCursor } from "./change-cursor";
-import { assertPushableChanges } from "./change-payload.validator";
-import { projectAcceptedChange } from "./change-projection";
+import {
+  changePayloadRejection,
+  type ChangeRejection,
+} from "./change-payload.validator";
+import {
+  projectAcceptedChange,
+  SYNC_PUSH_UNAUTHORIZED,
+  type ProjectableChange,
+} from "./change-projection";
 
 export interface SyncConflictEntry {
   entityId: string;
@@ -21,12 +28,87 @@ export interface SyncConflictEntry {
 }
 
 /**
+ * One change this server did not store, keyed by the id the pushing device
+ * recognises.
+ *
+ * `id` is the change's `entityId`, not a `Change` row id: the row was never
+ * written, so a server-side id would name something that does not exist, and the
+ * device can only settle a queue entry it can find. `conflicts` already
+ * identifies a refused change by `entityType`/`entityId` for the same reason.
+ *
+ * Cross-repo invariant: `id` is the change's `entityId` as pushed by the client.
+ * This matches the device's queue entries unambiguously because clients coalesce
+ * their queue by `entityType:entityId` before batching, guaranteeing that one
+ * entity appears at most once per push batch. A client that queued multiple
+ * changes for one entity in a single batch without coalescing would find
+ * matching by `id` ambiguous.
+ */
+export interface SyncRejectionEntry {
+  id: string;
+  entityType?: string;
+  errorCode: string;
+  message: string;
+}
+
+/**
+ * What one `/sync/push` did with the batch it was handed.
+ *
+ * Every key this endpoint returned before is still returned, with the same names
+ * and the same meaning. `rejected` and `truncated` are the only additions and both
+ * are optional on the wire: they appear only when a change was refused, so a batch
+ * that landed whole answers exactly as it always did.
+ */
+export interface SyncPushResult {
+  success: boolean;
+  accepted: string[];
+  conflicts: SyncConflictEntry[];
+  rejected?: SyncRejectionEntry[];
+  /**
+   * Whether `rejected` is the whole story.
+   *
+   * A push may carry `MAX_CHANGES_PER_PUSH` changes and one response names at most
+   * `MAX_REJECTED_ENTRIES` of them, so the array is a bounded report and not a
+   * receipt. Without this flag a client cannot tell "these are the broken rows"
+   * from "these are the first broken rows", and the second reading is the one that
+   * silently drops healthy work: a device that cleared its queue by id would delete
+   * the unnamed rows it was never told about. Absent means every rejection is
+   * listed.
+   */
+  truncated?: boolean;
+  newCursor: string;
+  processedCount: number;
+  conflictsResolved: number;
+  highestCursor: string;
+  lastPushedSequence: number;
+}
+
+/**
  * The largest page one pull may hand back. A change row is unbounded up to the
  * 64 KiB payload ceiling (`change-payload.validator.ts`), so 500 rows is already
  * a ~32 MB response; anything larger is a client bug or a denial-of-service
  * attempt, and it is answered with a shorter page instead of an error.
  */
 const MAX_PULL_PAGE_SIZE = 500;
+
+/**
+ * The most rejections one response names.
+ *
+ * A push may carry up to `MAX_CHANGES_PER_PUSH` changes (500), so an all-invalid
+ * batch could otherwise answer with hundreds of prose entries. Responses exceeding
+ * this bound drop subsequent rejections from the response body and set `truncated: true`.
+ * Note: clients whose batch sizes are smaller than or equal to this cap (such as
+ * the Flutter client whose push batch size is 50) will never hit truncation.
+ */
+const MAX_REJECTED_ENTRIES = 100;
+
+/**
+ * How long one rejection's `message` runs.
+ *
+ * The prose is for a developer reading a log line, and a payload violation can
+ * stack a sentence per field onto every change in a batch. The `errorCode` is the
+ * part a client branches on, and that is fixed-width.
+ */
+const MAX_REJECTED_MESSAGE_CHARS = 240;
 
 @Injectable()
 export class SyncService {
@@ -45,183 +127,246 @@ export class SyncService {
   /**
    * Push changes from a device to the server database.
    * Filters on `where: { userId }` server-side unconditionally.
-   * A batch holding a change no device could replay is refused whole, before any
-   * write, so the log never carries a row that every device then copies.
+   *
+   * Each change is decided on its own. It used to be the batch that was judged:
+   * one row no device could replay threw before any write, and the client's
+   * answer to a refused batch is to keep the whole queue — so the poisoned row
+   * retried forever and every healthy change queued behind it retried with it. A
+   * failure now costs the one change that caused it: it is named in `rejected`,
+   * its `Change` row is not written, and the rest of the request is applied and
+   * committed as normal.
+   *
+   * Isolation is per change and not finer. The log append, the domain projection
+   * and the cursor allocation for one change stay inside one `$transaction`, so a
+   * change is never half-applied; the cost is that a large batch is now several
+   * round trips instead of one, which is the trade the wedge makes worth paying.
    */
-  async pushChanges(userId: string, dto: PushSyncDto) {
+  async pushChanges(userId: string, dto: PushSyncDto): Promise<SyncPushResult> {
     await assertSyncDevice(this.prisma, userId, dto.deviceId);
-
-    assertPushableChanges(dto.changes);
 
     const replicaRecipients = new Set<string>();
     const timeoutMs = Number(process.env.SYNC_TRANSACTION_TIMEOUT_MS) || 30000;
     const maxWaitMs = Number(process.env.SYNC_TRANSACTION_MAX_WAIT_MS) || 10000;
 
-    const result = await this.prisma.$transaction(
-      async (tx) => {
-        const conflictsResolved = 0;
-        const accepted: string[] = [];
-        const conflicts: SyncConflictEntry[] = [];
-        let lastAssignedCursor: bigint | undefined;
-        const latestInBatch = new Map<
-          string,
-          { version: number; payload?: any }
-        >();
+    const conflictsResolved = 0;
+    const accepted: string[] = [];
+    const conflicts: SyncConflictEntry[] = [];
+    const rejected: SyncRejectionEntry[] = [];
+    let droppedRejections = 0;
+    let lastAssignedCursor: bigint | undefined;
+    const latestInBatch = new Map<string, { version: number; payload?: any }>();
 
-        for (const change of dto.changes) {
-          const entityKey = `${change.entityType}:${change.entityId}`;
-          let existingChange = latestInBatch.get(entityKey);
-          if (!existingChange) {
-            const storedChange = await tx.change.findFirst({
-              where: {
-                userId,
-                entityType: change.entityType,
-                entityId: change.entityId,
-              },
-              orderBy: { cursor: "desc" },
-            });
-            if (storedChange) {
-              existingChange = {
-                version: storedChange.version,
-                payload: storedChange.payload,
+    const reject = (entry: SyncRejectionEntry) => {
+      if (rejected.length < MAX_REJECTED_ENTRIES) {
+        rejected.push(entry);
+        return;
+      }
+      droppedRejections += 1;
+    };
+
+    for (const [index, change] of dto.changes.entries()) {
+      // Payload shape first, and without touching the database: a change no
+      // device could ever replay costs this request one write and nothing else.
+      const refusal = changePayloadRejection(change, index);
+      if (refusal) {
+        reject(rejectionEntry(change, refusal));
+        continue;
+      }
+
+      const entityKey = `${change.entityType}:${change.entityId}`;
+      const finalPayload = change.payload;
+
+      let outcome:
+        | { kind: "conflict"; conflict: SyncConflictEntry }
+        | {
+            kind: "accepted";
+            id: string;
+            cursor: bigint;
+            recipients: string[];
+          };
+
+      try {
+        outcome = await this.prisma.$transaction(
+          async (tx) => {
+            let existingChange = latestInBatch.get(entityKey);
+            if (!existingChange) {
+              const storedChange = await readStoredChange(tx, userId, change);
+              if (storedChange) {
+                existingChange = storedChange;
+                latestInBatch.set(entityKey, storedChange);
+              }
+            }
+
+            // A stale write is refused whole, never merged into what is already
+            // there. Merging would put a payload on the log that no device ever
+            // authored or signed — for a `vault_item` that is impossible anyway
+            // (the blob is opaque ciphertext), and for notes, tasks and events the
+            // client is the thing that knows what the user meant. This is the only
+            // conflict rule; the field-merge `ConflictResolverService` that used to
+            // sit beside it was deleted rather than wired in, for that reason.
+            //
+            // `<` and not `<=`, which makes an equal version a decision rather than
+            // an oversight. Two things arrive here at the version already stored:
+            // a retry — a push whose response was lost re-sends the same change at
+            // the same number, and refusing it would report a conflict over work the
+            // log already holds and drop the client's queue entry for it — and two
+            // devices that edited from the same version, which is a genuine
+            // concurrent write. Nothing here can tell the two apart: both
+            // are the same entity at the same version, and `deviceId` is not a tie
+            // break because a retry comes from the same device that made the edit.
+            // So both are accepted, and the concurrent pair resolves to whichever
+            // row the log reached last, in cursor order — every device converges on
+            // it, because they all replay the same log.
+            // The author whose version is overwritten does find out one layer up: the
+            // winner reaches their next pull, rewrites the note under them, and the
+            // client reloads the open editor rather than leaving the discarded text
+            // on screen to be typed over and re-pushed at a higher version
+            // (`SyncManager.rewrittenNotes` in the Flutter client). That makes the
+            // loss visible where the user is looking; recovering the discarded
+            // version is a product decision the log does not pretend to have made.
+            //
+            // The comparison is with the newest stored *version*, which the row
+            // carries whether or not it carries a payload: a DELETE is legitimately
+            // logged with `payload: null` (see `CONTENT_CARRYING_OPERATIONS`), and
+            // gating on the payload shape used to disarm the whole rule for that
+            // entity — once a delete tail sat there, a stale UPDATE at version 3
+            // against stored version 9 was accepted and resurrected the row on every
+            // device. `serverPayload` is still only echoed when it is an object.
+            if (existingChange && change.version < existingChange.version) {
+              return {
+                kind: "conflict" as const,
+                conflict: {
+                  entityId: change.entityId,
+                  entityType: change.entityType,
+                  reason: "VERSION_MISMATCH",
+                  clientVersion: change.version,
+                  serverVersion: existingChange.version,
+                  serverPayload:
+                    existingChange.payload &&
+                    typeof existingChange.payload === "object"
+                      ? existingChange.payload
+                      : undefined,
+                },
               };
-              latestInBatch.set(entityKey, existingChange);
             }
-          }
 
-          const finalPayload = change.payload;
-
-          // A stale write is refused whole, never merged into what is already
-          // there. Merging would put a payload on the log that no device ever
-          // authored or signed — for a `vault_item` that is impossible anyway
-          // (the blob is opaque ciphertext), and for notes, tasks and events the
-          // client is the thing that knows what the user meant. This is the only
-          // conflict rule; the field-merge `ConflictResolverService` that used to
-          // sit beside it was deleted rather than wired in, for that reason.
-          //
-          // `<` and not `<=`, which makes an equal version a decision rather than
-          // an oversight. Two things arrive here at the version already stored:
-          // a retry — a push whose response was lost re-sends the same change at
-          // the same number, and refusing it would report a conflict over work the
-          // log already holds and drop the client's queue entry for it — and two
-          // devices that edited from the same version, which is a genuine
-          // concurrent write. Nothing here can tell the two apart: both
-          // are the same entity at the same version, and `deviceId` is not a tie
-          // break because a retry comes from the same device that made the edit.
-          // So both are accepted, and the concurrent pair resolves to whichever
-          // row the log reached last, in cursor order — every device converges on
-          // it, because they all replay the same log.
-          // The author whose version is overwritten does find out one layer up: the
-          // winner reaches their next pull, rewrites the note under them, and the
-          // client reloads the open editor rather than leaving the discarded text
-          // on screen to be typed over and re-pushed at a higher version
-          // (`SyncManager.rewrittenNotes` in the Flutter client). That makes the
-          // loss visible where the user is looking; recovering the discarded
-          // version is a product decision the log does not pretend to have made.
-          //
-          // The comparison is with the newest stored *version*, which the row
-          // carries whether or not it carries a payload: a DELETE is legitimately
-          // logged with `payload: null` (see `CONTENT_CARRYING_OPERATIONS`), and
-          // gating on the payload shape used to disarm the whole rule for that
-          // entity — once a delete tail sat there, a stale UPDATE at version 3
-          // against stored version 9 was accepted and resurrected the row on every
-          // device. `serverPayload` is still only echoed when it is an object.
-          if (existingChange) {
-            if (change.version < existingChange.version) {
-              conflicts.push({
-                entityId: change.entityId,
-                entityType: change.entityType,
-                reason: "VERSION_MISMATCH",
-                clientVersion: change.version,
-                serverVersion: existingChange.version,
-                serverPayload:
-                  existingChange.payload &&
-                  typeof existingChange.payload === "object"
-                    ? existingChange.payload
-                    : undefined,
-              });
-              continue;
-            }
-          }
-
-          const createdChange = await appendChange(tx, {
-            userId,
-            deviceId: dto.deviceId,
-            entityType: change.entityType,
-            entityId: change.entityId,
-            operation: change.operation as any,
-            version: change.version,
-            payload: finalPayload,
-            // The device's own stamp for when the edit happened, kept separate
-            // from `createdAt` so a pull can hand back the edit time rather than
-            // this server's receive time. Nothing here decides conflicts with it.
-            clientTimestamp: change.clientTimestamp ?? null,
-          });
-          lastAssignedCursor = createdChange.cursor;
-
-          // The row behind the log entry. Only a change that got this far is
-          // projected — a refused one is a write the log never accepted, and the
-          // mirror has to agree with the log rather than with whatever a device
-          // happened to try. Inside this transaction on purpose: a push that
-          // rolled back would otherwise leave a domain row edited by changes no
-          // device will ever be handed.
-          await projectAcceptedChange(tx, userId, change);
-          for (const recipient of await this.replicateGroupChange(
-            tx,
-            userId,
-            {
+            const createdChange = await appendChange(tx, {
+              userId,
+              deviceId: dto.deviceId,
               entityType: change.entityType,
               entityId: change.entityId,
-              operation: change.operation as ChangeOperation,
+              operation: change.operation as any,
               version: change.version,
-            },
-            finalPayload as Prisma.InputJsonValue,
-            dto.deviceId,
-          )) {
-            replicaRecipients.add(recipient);
-          }
+              payload: finalPayload,
+              // The device's own stamp for when the edit happened, kept separate
+              // from `createdAt` so a pull can hand back the edit time rather than
+              // this server's receive time. Nothing here decides conflicts with it.
+              clientTimestamp: change.clientTimestamp ?? null,
+            });
 
-          latestInBatch.set(entityKey, {
-            version: change.version,
-            payload: finalPayload,
-          });
+            // The row behind the log entry. Only a change that got this far is
+            // projected — a refused one is a write the log never accepted, and the
+            // mirror has to agree with the log rather than with whatever a device
+            // happened to try. Inside this transaction on purpose: a change that
+            // rolled back would otherwise leave a domain row edited by a change no
+            // device will ever be handed.
+            await projectAcceptedChange(tx, userId, change);
+            const recipients = await this.replicateGroupChange(
+              tx,
+              userId,
+              {
+                entityType: change.entityType,
+                entityId: change.entityId,
+                operation: change.operation as ChangeOperation,
+                version: change.version,
+              },
+              finalPayload as Prisma.InputJsonValue,
+              dto.deviceId,
+            );
 
-          accepted.push(createdChange.id);
+            return {
+              kind: "accepted" as const,
+              id: createdChange.id,
+              cursor: createdChange.cursor,
+              recipients,
+            };
+          },
+          {
+            maxWait: maxWaitMs,
+            timeout: timeoutMs,
+          },
+        );
+      } catch (error) {
+        const projectionRefusal = rejectionFromProjection(error);
+        if (!projectionRefusal) {
+          // Not a decision about this change: the database, the transaction or a
+          // bug. Those stay fatal, because a client that dropped its queue over an
+          // outage would lose edits the server never refused.
+          throw error;
         }
+        // This change's own transaction rolled back, so its log row, its domain
+        // row and its cursor are all unsent; the changes already committed in this
+        // request stay committed.
+        reject(rejectionEntry(change, projectionRefusal));
+        continue;
+      }
 
-        const updatedSyncState = await tx.deviceSyncState.upsert({
-          where: { deviceId: dto.deviceId },
-          create: {
-            deviceId: dto.deviceId,
-            lastPushedSequence: dto.changes.length,
-            lastSuccessfulSyncAt: new Date(),
-          },
-          update: {
-            lastPushedSequence: { increment: dto.changes.length },
-            lastSuccessfulSyncAt: new Date(),
-          },
-        });
+      if (outcome.kind === "conflict") {
+        conflicts.push(outcome.conflict);
+        continue;
+      }
 
-        const highestCursor = (
-          lastAssignedCursor ?? (await getHighestChangeCursor(tx, userId))
-        ).toString();
+      lastAssignedCursor = outcome.cursor;
+      for (const recipient of outcome.recipients) {
+        replicaRecipients.add(recipient);
+      }
+      latestInBatch.set(entityKey, {
+        version: change.version,
+        payload: finalPayload,
+      });
+      accepted.push(outcome.id);
+    }
 
-        return {
-          success: true,
-          accepted,
-          conflicts,
-          newCursor: highestCursor,
-          processedCount: dto.changes.length,
-          conflictsResolved,
-          highestCursor,
-          lastPushedSequence: updatedSyncState.lastPushedSequence,
-        };
+    if (droppedRejections > 0) {
+      this.logger.warn(
+        `Push from device ${dto.deviceId} carried ${droppedRejections} rejected change(s) beyond the ${MAX_REJECTED_ENTRIES} this response names. Truncated flag set in response.`,
+      );
+    }
+
+    const updatedSyncState = await this.prisma.deviceSyncState.upsert({
+      where: { deviceId: dto.deviceId },
+      create: {
+        deviceId: dto.deviceId,
+        lastPushedSequence: dto.changes.length,
+        lastSuccessfulSyncAt: new Date(),
       },
-      {
-        maxWait: maxWaitMs,
-        timeout: timeoutMs,
+      update: {
+        lastPushedSequence: { increment: dto.changes.length },
+        lastSuccessfulSyncAt: new Date(),
       },
-    );
+    });
+
+    const highestCursor = (
+      lastAssignedCursor ?? (await getHighestChangeCursor(this.prisma, userId))
+    ).toString();
+
+    const result: SyncPushResult = {
+      success: true,
+      accepted,
+      conflicts,
+      // Absent rather than an empty array for a batch that landed whole, so this
+      // response is exactly the one this endpoint has always answered with.
+      ...(rejected.length > 0 ? { rejected } : {}),
+      // Only when the list above is a prefix of the truth, for the same reason:
+      // a client that has never heard of either key reads the same body it read
+      // before.
+      ...(droppedRejections > 0 ? { truncated: true } : {}),
+      newCursor: highestCursor,
+      processedCount: dto.changes.length,
+      conflictsResolved,
+      highestCursor,
+      lastPushedSequence: updatedSyncState.lastPushedSequence,
+    };
 
     if (this.syncNotifications) {
       this.syncNotifications.notifyMutation({
@@ -438,6 +583,89 @@ export class SyncService {
 }
 
 /**
+ * The newest row this account's log holds for one entity, which is the version a
+ * push is compared against. Read inside the same transaction that writes the next
+ * row, so two pushes racing for one entity cannot both see the older version and
+ * both be told they won.
+ */
+async function readStoredChange(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  change: ProjectableChange,
+): Promise<{ version: number; payload?: any } | null> {
+  const stored = await tx.change.findFirst({
+    where: {
+      userId,
+      entityType: change.entityType,
+      entityId: change.entityId,
+    },
+    orderBy: { cursor: "desc" },
+  });
+
+  return stored ? { version: stored.version, payload: stored.payload } : null;
+}
+
+/**
+ * The `rejected` entry for one change, with its message trimmed to the bound.
+ *
+ * The prose comes from two very different places — a field-path list from the
+ * payload validator, or whatever a domain guard said — and both are allowed to be
+ * long. The id and the code are the parts a client acts on.
+ */
+function rejectionEntry(
+  change: { entityId: string },
+  rejection: ChangeRejection,
+): SyncRejectionEntry {
+  const { message } = rejection;
+  return {
+    id: change.entityId,
+    errorCode: rejection.errorCode,
+    message:
+      message.length <= MAX_REJECTED_MESSAGE_CHARS
+        ? message
+        : `${message.slice(0, MAX_REJECTED_MESSAGE_CHARS - 1)}…`,
+  };
+}
+
+/**
+ * Whether a projection's throw is a decision about this change or an outage.
+ *
+ * A domain guard in `change-projection.ts` answers with a 4xx — the same
+ * `BadRequestException`/`ForbiddenException` the equivalent REST write raises for
+ * the same row — and per-change rejection means that answer now travels inside a
+ * 200 body instead of unwinding the request. Anything else (a Prisma error, a
+ * transaction timeout, a 5xx) stays fatal: a device that dropped its queue over
+ * an outage would lose edits the server never actually refused.
+ *
+ * The code is the guard's own when it carried one, and otherwise derived from the
+ * status exactly the way the exception filter derives it for a 4xx that reaches
+ * the wire: 403 is an authority answer about a row the pusher may not write,
+ * which is `SYNC_PUSH_UNAUTHORIZED`; a 400 is the payload's shape or its
+ * arithmetic, which is the key a declined change has always carried. Keeping the
+ * two apart is what lets a client tell "my builder is broken" from "I am no
+ * longer in this group", because only one of those is worth retrying.
+ */
+function rejectionFromProjection(error: unknown): ChangeRejection | null {
+  if (!(error instanceof HttpException)) return null;
+
+  const status = error.getStatus();
+  if (status >= 500) return null;
+
+  const body = error.getResponse() as any;
+  const code =
+    typeof body?.code === "string"
+      ? body.code
+      : status === 403
+        ? SYNC_PUSH_UNAUTHORIZED
+        : ErrorCode.SYNC_PUSH_REJECTED;
+
+  const raw = body?.message ?? error.message;
+  const message = Array.isArray(raw) ? raw.join(" ") : String(raw);
+
+  return { errorCode: code, message };
+}
+
+/**
  * The device check every `/sync/*` entry point opens with, and the only place
  * that decides *why* a device cannot sync.
  *
@@ -449,6 +677,13 @@ export class SyncService {
  * own device can fix that by registering; a client whose device was revoked
  * cannot, and must not try, because minting a fresh row would undo the decision
  * in silence.
+ *
+ * The second read asks the same scoped question without `revokedAt`, so the only
+ * thing it can learn is that this account's own row is not usable. Comparing the
+ * owner afterwards would have put a row belonging to another account in the
+ * process's memory on a path whose whole job is deciding what to tell the caller
+ * about it; scoping the query is what keeps "not yours" indistinguishable from
+ * "not there" by construction rather than by the discipline of the code below it.
  */
 async function assertSyncDevice(
   prisma: Pick<PrismaService, "device">,
@@ -460,8 +695,10 @@ async function assertSyncDevice(
   });
   if (device) return device;
 
-  const named = await prisma.device.findFirst({ where: { id: deviceId } });
-  if (named?.userId === userId) {
+  const own = await prisma.device.findFirst({
+    where: { id: deviceId, userId },
+  });
+  if (own) {
     throw forbidden(
       ErrorCode.DEVICE_REVOKED,
       `Device '${deviceId}' was revoked for this account. Syncing stops until it is registered again.`,

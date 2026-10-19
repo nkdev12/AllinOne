@@ -79,6 +79,55 @@ export async function bootstrap() {
     );
   }
 
+  try {
+    const financeQueue = app.get<Queue>(getQueueToken("finance"));
+
+    // Enqueue startup recurring processing with retry configuration
+    await financeQueue.add(
+      "process-recurring",
+      {},
+      {
+        attempts: 3,
+        backoff: { type: "exponential", delay: 5000 },
+        removeOnComplete: true,
+      },
+    );
+
+    // Schedule repeatable finance recurring rule processing (daily)
+    await financeQueue.add(
+      "process-recurring",
+      {},
+      {
+        repeat: { every: 24 * 60 * 60 * 1000 },
+        attempts: 3,
+        backoff: { type: "exponential", delay: 5000 },
+        removeOnComplete: true,
+      },
+    );
+
+    // Schedule repeatable budget threshold check (every 6 hours)
+    await financeQueue.add(
+      "check-budget-alerts",
+      {},
+      {
+        repeat: { every: 6 * 60 * 60 * 1000 },
+        attempts: 3,
+        backoff: { type: "exponential", delay: 5000 },
+        removeOnComplete: true,
+      },
+    );
+
+    logger.log(
+      "✓ BullMQ Finance Queue initialized with repeatable recurring and budget monitoring jobs.",
+    );
+  } catch (err: any) {
+    logger.error(
+      "Failed to schedule startup tasks on the 'finance' queue. " +
+        `Redis may be unreachable: ${err?.message}`,
+      err?.stack,
+    );
+  }
+
   logger.log("Worker ready and listening for BullMQ distributed jobs.");
 
   const shutdown = async (signal: string) => {

@@ -594,6 +594,294 @@ describe("SyncService", () => {
         }),
       );
     });
+
+    /**
+     * The wedge this replaced: one unstorable change threw before any write, so a
+     * client whose answer to a refused batch is to keep the queue retried the
+     * broken row forever behind every healthy change beside it. A failure now
+     * costs the one change that caused it.
+     */
+    it("applies the sound half of a batch and names the sick half", async () => {
+      prismaService.device.findFirst.mockResolvedValue(mockDevice);
+
+      const result = await service.pushChanges(userId, {
+        deviceId,
+        changes: [
+          // No `content` key: a device applying it would blank the body.
+          {
+            entityType: "note",
+            entityId: "note-uuid-invalid",
+            operation: ChangeOperation.CREATE,
+            version: 1,
+            payload: { title: "Half a note" },
+          },
+          {
+            entityType: "note",
+            entityId: "note-uuid-valid",
+            operation: ChangeOperation.CREATE,
+            version: 1,
+            payload: { title: "Whole note", content: "and its body" },
+          },
+        ],
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.accepted).toHaveLength(1);
+      expect(result.rejected).toEqual([
+        {
+          id: "note-uuid-invalid",
+          errorCode: ErrorCode.SYNC_PUSH_REJECTED,
+          message: expect.stringContaining("payload.content"),
+        },
+      ]);
+
+      // Only the sound change reached the log, and only its own row.
+      expect(prismaService.change.create).toHaveBeenCalledTimes(1);
+      expect(prismaService.change.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ entityId: "note-uuid-valid" }),
+        }),
+      );
+    });
+
+    /**
+     * A batch that is entirely invalid is still a request the server completed:
+     * 200, every change named, nothing written. A 400 here would put the client
+     * back to retrying all of them.
+     */
+    it("answers 200 with every id in `rejected` when nothing in the batch is storable", async () => {
+      prismaService.device.findFirst.mockResolvedValue(mockDevice);
+
+      const result = await service.pushChanges(userId, {
+        deviceId,
+        changes: [
+          {
+            entityType: "note",
+            entityId: "note-uuid-a",
+            operation: ChangeOperation.CREATE,
+            version: 1,
+            payload: { title: "no body" },
+          },
+          {
+            entityType: "vault_item",
+            entityId: "vault-uuid-b",
+            operation: ChangeOperation.CREATE,
+            version: 1,
+            payload: { type: "LOGIN", encryptedData: "blob" },
+          },
+        ],
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.accepted).toEqual([]);
+      expect(result.conflicts).toEqual([]);
+      expect(result.rejected?.map((entry) => entry.id)).toEqual([
+        "note-uuid-a",
+        "vault-uuid-b",
+      ]);
+      expect(prismaService.change.create).not.toHaveBeenCalled();
+    });
+
+    /**
+     * A batch that landed whole answers exactly as this endpoint always answered —
+     * the new key is absent rather than an empty array, so a client that has not
+     * heard of it parses the same body it parsed before.
+     */
+    it("omits `rejected` entirely for a batch that landed whole", async () => {
+      prismaService.device.findFirst.mockResolvedValue(mockDevice);
+
+      const result = await service.pushChanges(userId, {
+        deviceId,
+        changes: [
+          {
+            entityType: "note",
+            entityId: "note-uuid-10",
+            operation: ChangeOperation.CREATE,
+            version: 1,
+            payload: { title: "Test Note", content: "Body of the test note" },
+          },
+        ],
+      });
+
+      expect(result).not.toHaveProperty("rejected");
+    });
+
+    /**
+     * A push may carry `MAX_CHANGES_PER_PUSH` changes, so an all-invalid batch
+     * would otherwise answer with 500 prose entries to a device that is already
+     * misbehaving. Entries past the cap stay on the queue and are named by the
+     * smaller retry.
+     */
+    it("caps how many rejections one response names", async () => {
+      prismaService.device.findFirst.mockResolvedValue(mockDevice);
+
+      const result = await service.pushChanges(userId, {
+        deviceId,
+        changes: Array.from({ length: 150 }, (_unused, index) => ({
+          entityType: "note",
+          entityId: `note-uuid-${index}`,
+          operation: ChangeOperation.CREATE,
+          version: 1,
+          payload: { title: `no body ${index}` },
+        })),
+      });
+
+      expect(result.rejected).toHaveLength(100);
+      expect(result.accepted).toEqual([]);
+
+      // The array is a bounded report, not a receipt. Without this a client that
+      // cleared its queue by the ids it was handed would delete the 50 changes it
+      // was never told about, which is the data loss the wedge was only annoying
+      // about.
+      expect(result.truncated).toBe(true);
+    });
+
+    it("says nothing about truncation when every rejection is listed", async () => {
+      prismaService.device.findFirst.mockResolvedValue(mockDevice);
+
+      // Two bad rows in a batch of four: both are named, so the list is the whole
+      // truth and the flag has nothing to admit.
+      const result = await service.pushChanges(userId, {
+        deviceId,
+        changes: [
+          {
+            entityType: "note",
+            entityId: "note-uuid-under-cap-a",
+            operation: ChangeOperation.CREATE,
+            version: 1,
+            payload: { title: "no body" },
+          },
+          {
+            entityType: "note",
+            entityId: "note-uuid-under-cap-b",
+            operation: ChangeOperation.CREATE,
+            version: 1,
+            payload: { title: "no body either" },
+          },
+          {
+            entityType: "note",
+            entityId: "note-uuid-under-cap-c",
+            operation: ChangeOperation.CREATE,
+            version: 1,
+            payload: { title: "fine", content: "body" },
+          },
+        ],
+      });
+
+      expect(result.rejected).toHaveLength(2);
+      expect(result).not.toHaveProperty("truncated");
+    });
+
+    /**
+     * An unknown `entityType` is refused by the DTO before this method runs, so
+     * the question here is whether the service would ever store one if a caller
+     * reached it directly. It must not: a row nothing replays is copied to every
+     * device for the life of the log.
+     */
+    it("refuses a change whose entity type nothing replays", async () => {
+      prismaService.device.findFirst.mockResolvedValue(mockDevice);
+
+      const result = await service.pushChanges(userId, {
+        deviceId,
+        changes: [
+          {
+            entityType: "not_a_synced_type",
+            entityId: "note-uuid-10",
+            operation: ChangeOperation.CREATE,
+            version: 1,
+            payload: { title: "x", content: "y" },
+          } as any,
+        ],
+      });
+
+      expect(result.rejected).toHaveLength(1);
+      expect(result.rejected?.[0].errorCode).toBe(ErrorCode.SYNC_PUSH_REJECTED);
+      expect(prismaService.change.create).not.toHaveBeenCalled();
+    });
+
+    /**
+     * Finding 1 and Finding 2 have to land together: the authority guard lives in
+     * the projection, inside the transaction, and a push that could only answer it
+     * by throwing would put the device right back to retrying a change this server
+     * will never accept. So a forged attribution costs that one change its write,
+     * carries the code a client can tell "I am no longer in this group" from "my
+     * builder is broken" by, and the healthy neighbour still commits.
+     */
+    it("refuses a forged group expense on its own and still lands the note beside it", async () => {
+      prismaService.device.findFirst.mockResolvedValue(mockDevice);
+
+      const strangerId = "user-stranger-99999999-9999-4999-8999-999999999999";
+      prismaService.financeSharedExpense = {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({ id: "expense-1" }),
+        update: jest.fn().mockResolvedValue({ id: "expense-1" }),
+      };
+      prismaService.financeGroup = {
+        findUnique: jest.fn().mockResolvedValue({
+          ownerId: userId,
+          deletedAt: null,
+          currency: "INR",
+          members: [{ id: userId, name: "You" }],
+        }),
+      };
+      prismaService.resourceShare = {
+        findFirst: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
+      };
+
+      const result = await service.pushChanges(userId, {
+        deviceId,
+        changes: [
+          {
+            entityType: "finance_shared_expense",
+            entityId: "expense-uuid-1",
+            operation: ChangeOperation.CREATE,
+            version: 1,
+            payload: {
+              groupId: "group-uuid-1",
+              // Somebody who is in neither the member list nor the grant list.
+              paidByUserId: strangerId,
+              title: "Dinner nobody agreed to",
+              totalAmountMinor: 9000,
+              currency: "INR",
+              splitType: "EXACT",
+              date: "2026-10-05T19:00:00.000Z",
+              shares: [{ userId, owedAmountMinor: 9000 }],
+            },
+          },
+          {
+            entityType: "note",
+            entityId: "note-uuid-forged-neighbour",
+            operation: ChangeOperation.CREATE,
+            version: 1,
+            payload: { title: "Unrelated note", content: "and its body" },
+          },
+        ],
+      });
+
+      expect(result.rejected).toHaveLength(1);
+      expect(result.rejected?.[0]).toEqual({
+        id: "expense-uuid-1",
+        errorCode: "SYNC_PUSH_UNAUTHORIZED",
+        message: expect.stringContaining("payer"),
+      });
+
+      // What the mocks can prove: the domain row is never written, so
+      // `replicateGroupChange` has no group to read and nothing is copied into the
+      // named stranger's oplog, while the co-batched note still lands. (That the
+      // refused change's own `Change` row and cursor go back with the transaction is
+      // a property of the real client — `$transaction` is mocked as a direct call
+      // here and in `sync.cursor.spec.ts`, so neither can observe a rollback.)
+      expect(result.accepted).toHaveLength(1);
+      expect(prismaService.financeSharedExpense.create).not.toHaveBeenCalled();
+      expect(prismaService.note.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            id: "note-uuid-forged-neighbour",
+          }),
+        }),
+      );
+    });
   });
 
   describe("the reason a device cannot sync", () => {
@@ -639,10 +927,18 @@ describe("SyncService", () => {
       ]);
     });
 
+    /**
+     * The foreign row used to be refused by reading it and comparing `userId`
+     * afterwards, which put another account's device row in memory on the path
+     * whose job is deciding what to tell the caller about it. The lookup now
+     * carries `userId` in its `where`, so the answer is structural: a scoped query
+     * cannot return that row in the first place, and both reads are issued with
+     * the same filter, so "not yours" and "not there" share one answer.
+     */
     it("does not say whether another account's device exists", async () => {
-      prismaService.device.findFirst
-        .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce({ ...mockDevice, userId: "someone-else" });
+      // Both scoped reads return nothing, which is exactly what a real database
+      // answers for a row whose `userId` does not match.
+      prismaService.device.findFirst.mockResolvedValue(null);
 
       const rejection: any = await service
         .pushChanges(userId, { deviceId, changes: [] })
@@ -655,6 +951,14 @@ describe("SyncService", () => {
       expect(rejection.getResponse().code).toBe(
         ErrorCode.DEVICE_NOT_REGISTERED,
       );
+
+      const scopes = prismaService.device.findFirst.mock.calls.map(
+        ([args]: any[]) => args.where,
+      );
+      expect(scopes).toHaveLength(2);
+      for (const where of scopes) {
+        expect(where).toMatchObject({ id: deviceId, userId });
+      }
     });
   });
 

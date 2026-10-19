@@ -1,5 +1,4 @@
 import { Test, TestingModule } from "@nestjs/testing";
-import { BadRequestException } from "@nestjs/common";
 import { ChangeOperation } from "@prisma/client";
 import { SyncService } from "./sync.service";
 import { SyncGateway } from "./sync.gateway";
@@ -393,29 +392,40 @@ describe("SyncService change cursor", () => {
     expect(status.lastPulledCursor).toBe("1");
   });
 
+  /**
+   * The old behaviour this replaced was a throw: one unstorable vault blob
+   * refused the whole batch, and a client that keeps a refused batch queued
+   * retried the broken row forever behind every healthy change beside it. Rejection
+   * is per change now, so this asserts the same thing the throw used to — nothing
+   * is written for a blob a device could not decrypt — without the collateral.
+   */
   it("refuses a vault change another device could not decrypt, writing nothing", async () => {
     const broken = { ...vaultPayload() };
     delete (broken as any).authTag;
 
-    const rejection: any = await service
-      .pushChanges(userA, {
-        deviceId: phoneA,
-        changes: [
-          {
-            entityType: "vault_item",
-            entityId: "vault-1",
-            operation: ChangeOperation.CREATE,
-            version: 1,
-            payload: broken as any,
-          },
-        ],
-      })
-      .catch((error) => error);
-
-    expect(rejection).toBeInstanceOf(BadRequestException);
-    expect(rejection.getResponse()).toMatchObject({
-      code: ErrorCode.SYNC_PUSH_REJECTED,
+    const declined = await service.pushChanges(userA, {
+      deviceId: phoneA,
+      changes: [
+        {
+          entityType: "vault_item",
+          entityId: "vault-1",
+          operation: ChangeOperation.CREATE,
+          version: 1,
+          payload: broken as any,
+        },
+      ],
     });
+
+    // A 200 that names the sick change, not a 400 that unwinds the request.
+    expect(declined.success).toBe(true);
+    expect(declined.accepted).toEqual([]);
+    expect(declined.rejected).toEqual([
+      {
+        id: "vault-1",
+        errorCode: ErrorCode.SYNC_PUSH_REJECTED,
+        message: expect.stringContaining("payload.authTag"),
+      },
+    ]);
     expect(changes).toEqual([]);
 
     const accepted = await service.pushChanges(userA, {
@@ -439,10 +449,45 @@ describe("SyncService change cursor", () => {
     });
 
     expect(accepted.accepted).toHaveLength(2);
+    // The refused change allocated no cursor, so this batch still opens the log.
     expect(changes.map((change) => change.cursor.toString())).toEqual([
       "1",
       "2",
     ]);
+  });
+
+  /**
+   * The mixed batch is the whole point of the change: a refusal used to cost its
+   * neighbours their write, and now costs only itself.
+   */
+  it("applies a sound change that shares a batch with an unstorable one", async () => {
+    const broken = { ...vaultPayload() };
+    delete (broken as any).iv;
+
+    const mixed = await service.pushChanges(userA, {
+      deviceId: phoneA,
+      changes: [
+        {
+          entityType: "vault_item",
+          entityId: "vault-1",
+          operation: ChangeOperation.CREATE,
+          version: 1,
+          payload: broken as any,
+        },
+        {
+          entityType: "note",
+          entityId: "note-1",
+          operation: ChangeOperation.CREATE,
+          version: 1,
+          payload: { title: "Survived", content: "and was written" },
+        },
+      ],
+    });
+
+    expect(mixed.accepted).toHaveLength(1);
+    expect(mixed.rejected).toHaveLength(1);
+    expect(mixed.rejected?.[0].id).toBe("vault-1");
+    expect(changes.map((change) => change.entityId)).toEqual(["note-1"]);
   });
 
   /**

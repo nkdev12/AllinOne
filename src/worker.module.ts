@@ -2,12 +2,61 @@ import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
 import * as Joi from "joi";
 import { ConfigurationModule } from "@/config/configuration.module";
-import { ACCEPTED_NODE_ENV } from "@/config/configuration.service";
+import { ENV_GATING_SCHEMA_KEYS } from "@/config/configuration.service";
 import { LoggingModule } from "@/common/logging/logging.module";
 import { PrismaModule } from "@/common/prisma/prisma.module";
 import { MailModule } from "@/common/mail/mail.module";
 import { MetricsModule } from "@/common/metrics/metrics.module";
 import { QueuesModule } from "@/queues/queues.module";
+
+/**
+ * The worker's boot schema, exported so its env-gating keys are testable as an
+ * object (`src/worker.module.spec.ts`, `src/config/configuration.service.spec.ts`)
+ * rather than only by observing whether a Nest compile survives them.
+ *
+ * This is a deliberate copy of `ENV_VALIDATION_SCHEMA` in `src/app/app.module.ts`,
+ * narrowed to what a headless process needs. The duplication is the risk: an
+ * `APP_ENV` default on one side and not the other is how a worker began skipping
+ * `validateProductionSecrets()` that the API refused to boot through. So every key
+ * `ConfigurationService` decides on is spread from `ENV_GATING_SCHEMA_KEYS` and this
+ * file declares only what a worker alone has — `GEMINI_*` and the SMTP transport
+ * keys — and `src/app/app.module.spec.ts` asserts that the two still answer the same
+ * way for the shared set.
+ */
+export const WORKER_ENV_VALIDATION_SCHEMA = Joi.object({
+  // `APP_ENV` and `NODE_ENV` come from here, not from a local copy, for the reason
+  // spelled out in `src/app/app.module.ts`: a schema default is written back into
+  // `process.env`, so `development` inferred from an absent `APP_ENV` is not a
+  // development environment. The worker seals TOTP secrets with `ENCRYPTION_KEY` and
+  // counts its rate limits in Redis, so the branch this value selects is the one
+  // that matters most, not least. `REDIS_URL` has no default in the same set for the
+  // same kind of reason — `ConfigurationService.declaredRedisUrl` is the "was it
+  // actually declared?" test behind refusing an unnamed Redis outside development.
+  ...ENV_GATING_SCHEMA_KEYS,
+
+  SMTP_HOST: Joi.string().allow("").optional(),
+  SMTP_PORT: Joi.number().port().optional(),
+  SMTP_USER: Joi.string().allow("").optional(),
+  // Optional in both processes: `MailService.isConfigured` reads a blank one as
+  // "mail is off", and a written one is gated as a passphrase outside development
+  // by `validateProductionSecrets()`. `SMTP_PASSWORD` itself is in the shared set.
+  SMTP_FROM: Joi.string().allow("").optional(),
+  SMTP_TLS: Joi.boolean().default(true),
+  // Admin access keys are declared here too so `ConfigurationService`
+  // sees one schema across both processes. Optional, no default: unset
+  // means no admin admit path, and the worker serves no /admin routes.
+  // A *set* value is held to the JWT rules in every environment, so the
+  // length-and-entropy checks cannot be satisfied here and skipped there.
+  // `ADMIN_SECRET` is in the shared set.
+  ADMIN_EMAILS: Joi.string().allow("").optional(),
+  ADMIN_USER_IDS: Joi.string().allow("").optional(),
+  // Gemini settings, declared here too so this schema and AppModule's stay
+  // in step. Nothing in the worker calls the AI module today; an unset or
+  // blank key leaves it on the heuristic fallback.
+  GEMINI_API_KEY: Joi.string().allow("").optional(),
+  GEMINI_MODEL: Joi.string().default("gemini-1.5-flash"),
+  GEMINI_TIMEOUT_MS: Joi.number().default(5000),
+});
 
 /**
  * WorkerModule encapsulates the dependency injection tree required for
@@ -22,60 +71,7 @@ import { QueuesModule } from "@/queues/queues.module";
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: ".env",
-      validationSchema: Joi.object({
-        APP_ENV: Joi.string()
-          .valid("development", "staging", "production")
-          .default("development"),
-        // Declared here too, from the one list `ACCEPTED_NODE_ENV`, so this process
-        // cannot answer a `NODE_ENV` differently from the API. The combination of an
-        // undeclared key and `allowUnknown` was the whole hole: `ConfigService`
-        // passes unknown keys straight through, and
-        // `ConfigurationService.isTestEnvironment` reads `NODE_ENV` as "skip the
-        // secret gate", so a worker started with a borrowed or typo'd value could
-        // drop checks the API refuses to boot without.
-        NODE_ENV: Joi.string()
-          .valid(...ACCEPTED_NODE_ENV)
-          .default("development"),
-        DATABASE_URL: Joi.string().required(),
-        // No `.default()` on purpose. `@nestjs/config` writes every schema default
-        // back into `process.env`, and `ConfigurationService.declaredRedisUrl` is
-        // the "was `REDIS_URL` actually declared?" test behind the refusal of an
-        // unnamed Redis outside development — a default here would answer that with
-        // the default and switch the gate off forever. The `redis://localhost:6379`
-        // fallback belongs in the `redisUrl` getter, which only consumers read.
-        REDIS_URL: Joi.string().allow("").optional(),
-        JWT_ACCESS_SECRET: Joi.string().required(),
-        JWT_REFRESH_SECRET: Joi.string().required(),
-        OBJECT_STORAGE_ENDPOINT: Joi.string().required(),
-        OBJECT_STORAGE_ACCESS_KEY: Joi.string().required(),
-        OBJECT_STORAGE_SECRET_KEY: Joi.string().required(),
-        OBJECT_STORAGE_BUCKET: Joi.string().required(),
-        ENCRYPTION_KEY: Joi.string().min(32).required(),
-        // Pepper key ring, declared here too so this schema and AppModule's stay
-        // in step. ENCRYPTION_KEY_PREVIOUS only exists inside a rotation window,
-        // so blank has to validate as "no previous key".
-        ENCRYPTION_KEY_ID: Joi.string().allow("").optional(),
-        ENCRYPTION_KEY_PREVIOUS: Joi.string().min(32).allow("").optional(),
-        ENCRYPTION_KEY_PREVIOUS_ID: Joi.string().allow("").optional(),
-        SMTP_HOST: Joi.string().allow("").optional(),
-        SMTP_PORT: Joi.number().port().optional(),
-        SMTP_USER: Joi.string().allow("").optional(),
-        SMTP_PASSWORD: Joi.string().allow("").optional(),
-        SMTP_FROM: Joi.string().allow("").optional(),
-        SMTP_TLS: Joi.boolean().default(true),
-        // Admin access keys are declared here too so `ConfigurationService`
-        // sees one schema across both processes. Optional, no default: unset
-        // means no admin admit path, and the worker serves no /admin routes.
-        ADMIN_EMAILS: Joi.string().allow("").optional(),
-        ADMIN_USER_IDS: Joi.string().allow("").optional(),
-        ADMIN_SECRET: Joi.string().allow("").optional(),
-        // Gemini settings, declared here too so this schema and AppModule's stay
-        // in step. Nothing in the worker calls the AI module today; an unset or
-        // blank key leaves it on the heuristic fallback.
-        GEMINI_API_KEY: Joi.string().allow("").optional(),
-        GEMINI_MODEL: Joi.string().default("gemini-1.5-flash"),
-        GEMINI_TIMEOUT_MS: Joi.number().default(5000),
-      }),
+      validationSchema: WORKER_ENV_VALIDATION_SCHEMA,
       validationOptions: {
         allowUnknown: true,
         abortEarly: true,

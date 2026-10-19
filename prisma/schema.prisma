@@ -1000,6 +1000,7 @@ model FinanceBudget {
   userId          String
   categoryId      String?
   amountMinor     BigInt
+  currency        String              @default("INR")
   period          FinanceBudgetPeriod @default(MONTHLY)
   startDate       DateTime?
   endDate         DateTime?
@@ -1024,6 +1025,7 @@ model FinanceSavingsGoal {
   name               String
   targetAmountMinor  BigInt
   currentAmountMinor BigInt    @default(0)
+  currency           String    @default("INR")
   targetDate         DateTime?
   color              String?
   iconKey            String?
@@ -1073,6 +1075,7 @@ model FinanceLoan {
   counterpartyContact  String?
   principalAmountMinor BigInt
   remainingAmountMinor BigInt
+  currency             String          @default("INR")
   dueDate              DateTime?
   notes                String?
   isSettled            Boolean         @default(false)

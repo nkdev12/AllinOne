@@ -195,6 +195,42 @@ describe("EventsService", () => {
         }),
       );
     });
+
+    it("matches one attendee row by the email the DTO carried", async () => {
+      await service.updateAttendeeRSVP(
+        userId,
+        eventId,
+        attendeeEmail,
+        AttendeeStatus.DECLINED,
+      );
+
+      // `RsvpDto`'s `@IsString()`/`@IsEmail()` are what guarantee this is a string
+      // by the time it gets here; the shape of the clause is the reason that
+      // matters — an object in this position used to be read by MongoDB as
+      // operator syntax, and `{"$ne": null}` matches every attendee of the event.
+      expect(prismaService.eventAttendee.findFirst).toHaveBeenCalledWith({
+        where: { eventId, email: attendeeEmail },
+      });
+    });
+
+    it("answers an unknown attendee without repeating what was submitted", async () => {
+      prismaService.eventAttendee.findFirst.mockResolvedValue(null);
+
+      const error: any = await service
+        .updateAttendeeRSVP(
+          userId,
+          eventId,
+          "whoever@example.com",
+          AttendeeStatus.ACCEPTED,
+        )
+        .catch((e) => e);
+
+      expect(error.getStatus()).toBe(404);
+      expect(JSON.stringify(error.getResponse())).not.toContain(
+        "whoever@example.com",
+      );
+      expect(prismaService.eventAttendee.update).not.toHaveBeenCalled();
+    });
   });
 
   describe("deleteEvent", () => {

@@ -19,6 +19,7 @@ import { JwtAuthGuard } from "@/auth/guards/jwt-auth.guard";
 import { GetUser } from "@/auth/decorators/get-user.decorator";
 import { PushSyncDto } from "./dto/push-sync.dto";
 import { PullSyncDto } from "./dto/pull-sync.dto";
+import { SyncStatusQueryDto } from "./dto/sync-status-query.dto";
 
 @ApiTags("Sync")
 @Controller("sync")
@@ -52,8 +53,8 @@ export class SyncController {
   @ApiResponse({ status: 404, description: "Device not found" })
   async getSyncStatus(
     @GetUser("id") userId: string,
-    @Query("deviceId") deviceId: string,
+    @Query() query: SyncStatusQueryDto,
   ) {
-    return this.syncService.getSyncStatus(userId, deviceId);
+    return this.syncService.getSyncStatus(userId, query.deviceId);
   }
 }

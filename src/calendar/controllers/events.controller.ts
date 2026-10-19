@@ -24,7 +24,7 @@ import { CreateEventDto } from "../dto/create-event.dto";
 import { UpdateEventDto } from "../dto/update-event.dto";
 import { QueryEventsDto } from "../dto/query-events.dto";
 import { CreateEventReminderDto } from "../dto/create-event-reminder.dto";
-import { AttendeeStatus } from "@prisma/client";
+import { RsvpDto } from "../dto/rsvp.dto";
 
 @ApiTags("Events")
 @Controller("events")
@@ -81,17 +81,24 @@ export class EventsController {
   @Patch(":id/rsvp")
   @ApiOperation({ summary: "Update attendee RSVP status" })
   @ApiResponse({ status: 200, description: "RSVP updated" })
+  @ApiResponse({
+    status: 400,
+    description: "Email or status failed validation and was never queried",
+  })
+  @ApiResponse({
+    status: 404,
+    description: "Event not found, or no attendee of it matches the email",
+  })
   async updateRSVP(
     @Param("id") eventId: string,
     @GetUser("id") userId: string,
-    @Body("email") email: string,
-    @Body("status") status: AttendeeStatus,
+    @Body() dto: RsvpDto,
   ) {
     return this.eventsService.updateAttendeeRSVP(
       userId,
       eventId,
-      email,
-      status,
+      dto.email,
+      dto.status,
     );
   }
 

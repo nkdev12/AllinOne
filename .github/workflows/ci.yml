@@ -6,9 +6,28 @@ name: CI
 #   npm test           -> jest (unit config is inline in package.json, rootDir: src,
 #                          testRegex *.spec.ts, "@/*" mapped to src)
 #   npm run test:e2e   -> jest --config ./test/jest-e2e.json (testRegex *.e2e-spec.ts)
-#   npm run db:generate-> prisma generate (required first: @prisma/client types do
-#                          not exist until the client is generated, and there is no
-#                          postinstall hook to do it for us)
+#   npm run db:generate-> prisma generate (@prisma/client types do not exist until
+#                          the client is generated)
+#   npm run audit:prod -> npm audit --omit=dev --audit-level=high (lockfile only, no
+#                          install needed)
+#
+# About `postinstall`: package.json:18 has had `"postinstall": "prisma generate"`
+# since 1c1cc7d, so `npm ci` does generate the client as an implicit step. The
+# explicit "Generate Prisma client" step below is kept anyway, and is not a
+# duplicate of nothing: it is the only line in this workflow that says out loud
+# which artifact the typecheck is depending on, and it fails with a Prisma error
+# rather than a hundred "Property 'user' does not exist on type 'PrismaClient'"
+# errors if generation half-succeeds. It also runs on the exact same
+# `prisma` devDependency that the Railway build gets — Nixpacks sets
+# `NPM_CONFIG_PRODUCTION=false`, so dev dependencies are installed there too and
+# the postinstall is what populates the client in the image.
+#
+# What postinstall does NOT do is touch a database. `prisma generate` only writes
+# a client into node_modules; nothing in this repo runs `prisma db push` or
+# `prisma migrate deploy` at deploy time, because there is no deploy hook that
+# would. That is a manual gate, spelled out in docs/DEPLOYMENT.md ("Schema
+# population is a manual deploy gate") and not something CI can assert — CI has
+# no database.
 
 on:
   push:
@@ -35,9 +54,79 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # Node 22 LTS runtime matching the production and Railway deployment
+          # Node 22, and this is now a real agreement rather than an aspiration:
+          # `.nvmrc` says `22` and package.json:43 declares `engines.node: "22.x"`,
+          # which is what Nixpacks reads when it picks a runtime. That matters more
+          # than it looks — the Nixpacks Node provider's own default is 18, and
+          # nodemailer 10 (the release that fixes the prod-reachable SMTP
+          # advisories) declares `engines.node: ">=20"`. Without the pin the API
+          # image would build on a runtime its mail dependency has ruled out.
+          # Nothing here can verify the Railway side from the repo, so the pin is
+          # the verification: same file, same number, both builders read it.
           node-version: "22"
           cache: npm
+
+      # Production dependency advisories, gated separately from the dev tree.
+      #
+      # Blocking, and green as of this commit: `npm audit --omit=dev` reports zero
+      # findings. Before this step existed the pipeline was auditing everything and
+      # acting on nothing — `npm audit` exits 1 on 43 advisories, 42 of which are
+      # reachable only from jest/eslint/ts-jest, so the one that actually shipped in
+      # the API image (nodemailer, three SMTP/header-injection advisories) hid in
+      # the noise and nothing failed for it.
+      #
+      # The dev tree is deliberately not gated here: every remaining advisory is a
+      # jest->micromatch/braces/brace-expansion/handlebars chain whose fix is a
+      # semver-major jest 30 bump, and a test-runner major is not something a
+      # dependency step gets to force into this repo. `npm audit --json` still shows
+      # them; `npm run audit` prints them locally.
+      #
+      # If this step turns red, it is a production dependency change that needs
+      # looking at, and it should stay red until it does. Do not add
+      # `continue-on-error` to it.
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      # The deploy surface, checked as text rather than booted. `railway.json` is
+      # the only thing Railway reads from the repo, `railway.worker.json` is the
+      # template for the second service, and `Procfile` is read by any
+      # Procfile-aware host; none of them is exercised by a test, and a typo in a
+      # start command costs a deploy, not a build error. This step catches the
+      # realistic failure: the two worker entry points disagreeing, or a start
+      # command naming an npm script that package.json does not have.
+      - name: Validate deploy configuration
+        run: |
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const read = (f) => JSON.parse(fs.readFileSync(f, "utf8"));
+            const api = read("railway.json");
+            const worker = read("railway.worker.json");
+            const scripts = Object.keys(pkg.scripts || {});
+            const scriptOf = (cmd) => {
+              const m = /^npm run (\S+)/.exec(cmd || "");
+              return m ? m[1] : null;
+            };
+            const problems = [];
+            for (const [name, cfg] of [["railway.json", api], ["railway.worker.json", worker]]) {
+              const s = scriptOf(cfg.deploy && cfg.deploy.startCommand);
+              if (!s) problems.push(`${name}: startCommand is not an "npm run <script>" invocation`);
+              else if (!scripts.includes(s)) problems.push(`${name}: startCommand runs "${s}", which package.json does not define`);
+            }
+            if (api.deploy.startCommand !== "npm run start:prod") problems.push("railway.json must start the API (npm run start:prod)");
+            if (worker.deploy.startCommand !== "npm run start:worker") problems.push("railway.worker.json must start the worker (npm run start:worker)");
+            const proc = fs.readFileSync("Procfile", "utf8").split(/\r?\n/).filter((l) => l.trim() !== "");
+            if (proc.length === 0) problems.push("Procfile is empty again — it was 0 bytes from 1c1cc7d and nothing started the worker");
+            for (const line of proc) {
+              const [type, ...rest] = line.split(":");
+              const s = scriptOf(rest.join(":").trim());
+              if (s && !scripts.includes(s)) problems.push(`Procfile: ${type} runs "${s}", which package.json does not define`);
+            }
+            if (!fs.existsSync(".nvmrc")) problems.push(".nvmrc is missing, so Nixpacks would default to Node 18");
+            if (!fs.existsSync(".dockerignore")) problems.push(".dockerignore is missing, so a CLI deploy ships .env, node_modules and dist");
+            if (problems.length) { console.error(problems.map((p) => "  - " + p).join("\n")); process.exit(1); }
+            console.log("deploy configuration is consistent");
+          '
 
       - name: Install dependencies
         run: npm ci
@@ -103,7 +192,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # Node 22 LTS runtime matching the build job above
+          # 22 here too: the same number `.nvmrc` and package.json `engines.node`
+          # give the Nixpacks image, so a green e2e run describes the runtime that
+          # actually ships. See the build job for why that pin stopped being
+          # cosmetic.
           node-version: "22"
           cache: npm
 

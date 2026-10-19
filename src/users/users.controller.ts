@@ -7,11 +7,13 @@ import {
   Body,
   Param,
   Query,
+  Res,
   UseGuards,
   NotFoundException,
   HttpCode,
   HttpStatus,
 } from "@nestjs/common";
+import { Response } from "express";
 import {
   ApiTags,
   ApiOperation,
@@ -23,6 +25,7 @@ import { JwtAuthGuard } from "@/auth/guards/jwt-auth.guard";
 import { GetUser } from "@/auth/decorators/get-user.decorator";
 import { UpdateUserProfileDto } from "./dto/update-user-profile.dto";
 import { SuggestAccountsQueryDto } from "./dto/suggest-accounts-query.dto";
+import { DeleteAccountDto } from "./dto/delete-account.dto";
 
 @ApiTags("Users")
 @Controller("users")
@@ -68,22 +71,71 @@ export class UsersController {
   }
 
   @Post("me/export")
-  @HttpCode(HttpStatus.ACCEPTED)
-  @ApiOperation({ summary: "Request GDPR/CCPA data export package" })
-  @ApiResponse({
-    status: 202,
-    description: "Export request accepted and queued",
+  @ApiOperation({
+    summary:
+      "Download this account's data as an NDJSON export bundle (GDPR/CCPA portability)",
   })
-  async requestDataExport(@GetUser("id") userId: string) {
-    return this.usersService.requestDataExport(userId);
+  @ApiResponse({
+    status: 200,
+    description:
+      "`application/x-ndjson`: one JSON object per line — a `header`, every `record` this account owns grouped by `collection` markers, and a final `summary` whose counts the erasure is measured against. Bearer credentials (session tokens, the vault verifier and its wrapped keys) are withheld; the vault's content leaves as its own sealed blobs. Streaming starts immediately, so a large account is never buffered whole.",
+  })
+  @ApiResponse({ status: 404, description: "Account not found" })
+  async requestDataExport(
+    @GetUser("id") userId: string,
+    @Res({ passthrough: false }) res: Response,
+  ): Promise<void> {
+    res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="allinone-account-export.ndjson"`,
+    );
+    // An export bundle is a copy of somebody's notes, calendar and change log. It
+    // must not be cached by a shared proxy or linger in a browser's HTTP cache on
+    // a machine the account owner does not control.
+    res.setHeader("Cache-Control", "no-store");
+
+    // The service reads the account row before the first line is produced, so a
+    // missing account still reaches the exception filter as a normal 404. After
+    // that the status line is already on the wire and the only honest way to
+    // report a failure is a line inside the stream.
+    try {
+      await this.usersService.exportAccount(userId, (line) => {
+        res.write(`${line}\n`);
+      });
+    } catch (error: any) {
+      if (!res.headersSent) throw error;
+      res.write(
+        `${JSON.stringify({
+          kind: "error",
+          message: "Export stopped before it finished. No deletion is authorised by this bundle.",
+        })}\n`,
+      );
+    }
+
+    res.end();
   }
 
   @Delete("me")
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: "Soft delete account and revoke all sessions" })
-  @ApiResponse({ status: 200, description: "Account successfully deleted" })
-  async softDeleteAccount(@GetUser("id") userId: string) {
-    return this.usersService.softDeleteAccount(userId);
+  @ApiOperation({
+    summary:
+      "Erase the account: its content, grants, vault row and change log, plus its sessions and devices",
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      "Account deleted; the response counts the rows removed per collection",
+  })
+  @ApiResponse({
+    status: 400,
+    description: "`skipExport` was missing, or no export backs this deletion",
+  })
+  async deleteAccount(
+    @GetUser("id") userId: string,
+    @Body() dto: DeleteAccountDto,
+  ) {
+    return this.usersService.deleteAccount(userId, dto);
   }
 
   @Get("me/sessions")

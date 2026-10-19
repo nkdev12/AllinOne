@@ -11,6 +11,10 @@ build/
 .env
 .env.local
 .env.*.local
+# `.env` above does not match `.env.example` (the extension is part of the name),
+# so the template stays tracked without a negation rule. If a future glob ever
+# broadens, keep `!.env.example` beside it: the build context ignores `.env*`
+# and re-includes the example, and the two lists should not diverge.
 
 # IDE
 .vscode/
@@ -42,6 +46,17 @@ prisma/migrations/
 tmp/
 temp/
 *.tmp
+
+# Backup output. scripts/backup-database.sh falls back to `.backup/` in the
+# current directory when /opt/allinone-backup is not writable, and a production
+# archive that lands there is a plaintext copy of every user, session and vault
+# row — it must never be one `git add .` away from a commit.
+.backup/
+allinone-db-*.archive.gz
+allinone-db-*.archive.gz.enc
+allinone-minio-*.tar.gz
+allinone-minio-*.tar.gz.enc
+allinone-manifest-*.json
 
 # Sensitive
 .env.production

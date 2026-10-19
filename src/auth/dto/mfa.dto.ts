@@ -24,8 +24,9 @@ export class VerifyMfaLoginDto {
   totpCode?: string;
 
   @ApiPropertyOptional({
-    example: "ABCD-1234-EFGH",
-    description: "Single-use backup recovery code",
+    example: "A1B2-C3D4-E5F6-7890-ABCD-EF01",
+    description:
+      "Single-use backup recovery code, 24 hex characters in six groups of four",
   })
   @IsOptional()
   @IsString()
@@ -45,8 +46,9 @@ export class DisableMfaDto {
   totpCode?: string;
 
   @ApiPropertyOptional({
-    example: "ABCD-1234-EFGH",
-    description: "Single-use backup recovery code",
+    example: "A1B2-C3D4-E5F6-7890-ABCD-EF01",
+    description:
+      "Single-use backup recovery code, same shape as `/auth/mfa/enable` issued it",
   })
   @IsOptional()
   @IsString()
@@ -72,8 +74,9 @@ export class MfaSecretResponseDto {
 
 export class MfaEnableResponseDto {
   @ApiProperty({
-    example: ["A1B2-C3D4", "E5F6-G7H8"],
-    description: "10 single-use recovery codes (save these securely)",
+    example: ["A1B2-C3D4-E5F6-7890-ABCD-EF01", "0123-4567-89AB-CDEF-0123-4567"],
+    description:
+      "Ten single-use recovery codes, 96 bits each (save these securely — only their keyed digests are stored)",
   })
   recoveryCodes!: string[];
 }

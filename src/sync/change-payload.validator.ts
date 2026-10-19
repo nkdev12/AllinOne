@@ -930,6 +930,12 @@ const FINANCE_BUDGET_FIELDS: ReadonlyArray<DocumentField> = [
     expected: "a non-negative integer",
   },
   {
+    key: "currency",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
     key: "period",
     required: false,
     accepts: (value) => typeof value === "string",
@@ -993,6 +999,12 @@ const FINANCE_SAVINGS_GOAL_FIELDS: ReadonlyArray<DocumentField> = [
     accepts: (value) =>
       typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
     expected: "a non-negative integer",
+  },
+  {
+    key: "currency",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
   },
   {
     key: "targetDate",
@@ -1140,6 +1152,12 @@ const FINANCE_LOAN_FIELDS: ReadonlyArray<DocumentField> = [
     accepts: (value) =>
       typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
     expected: "a non-negative integer",
+  },
+  {
+    key: "currency",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
   },
   {
     key: "dueDate",
@@ -1658,9 +1676,13 @@ function violationsForChange(
 }
 
 /**
- * Every problem in the batch, in push order, without stopping at the first one:
- * a client that gets a whole batch refused learns about all of its bad rows in
- * one trip instead of one per retry.
+ * Every problem in a batch, in push order, without stopping at the first one.
+ *
+ * The batch view of `changePayloadViolations`, and no longer the push gate: the
+ * request path asks the question one change at a time so a row no device could
+ * ever replay costs only itself. This stays for anything that wants the whole
+ * picture in one call — the suite asserts the field paths of a multi-change
+ * batch through it.
  *
  * Messages go through `toSentence()` so an entry from here is the same shape as
  * one from `createValidationPipe()`, which a push body never reaches for these:
@@ -1669,18 +1691,85 @@ function violationsForChange(
 export function collectChangeViolations(
   changes: readonly ChangeEnvelope[],
 ): FieldValidationError[] {
-  return changes
-    .flatMap((change, index) => violationsForChange(change, index))
-    .map(({ field, messages }) => ({
-      field,
-      messages: messages.map(toSentence),
-    }));
+  return changes.flatMap((change, index) =>
+    changePayloadViolations(change, index),
+  );
 }
 
 /**
- * Rejects a push whose changes could not be replayed on another device. Throwing
- * before any write happens is the point: a stored row is copied to every device
- * for the life of the log and cannot be unsent.
+ * One change the server will not store, in the shape `/sync/push` hands back.
+ *
+ * `errorCode` is machine-readable for the same reason every other failure key in
+ * this repo is: a client branches on it and shows its own copy, while `message`
+ * is the developer-facing detail that stays in the diagnostics view.
+ */
+export interface ChangeRejection {
+  errorCode: string;
+  message: string;
+}
+
+/**
+ * What is wrong with a single change, in push order.
+ *
+ * Rejection used to be asked of the whole batch, and that is the defect this
+ * answers: one row no device could ever replay cost every healthy change beside
+ * it its write, and a client that keeps a refused batch queued retried the same
+ * broken row forever behind them. Asking per change is what lets the server
+ * apply the sound ones and name only the sick ones.
+ *
+ * `index` is the change's position in the request, so a field path in a message
+ * still points at the entry the device sent; the caller walking a batch numbers
+ * its own rejections.
+ */
+export function changePayloadViolations(
+  change: ChangeEnvelope,
+  index: number,
+): FieldValidationError[] {
+  return violationsForChange(change, index).map(({ field, messages }) => ({
+    field,
+    messages: messages.map(toSentence),
+  }));
+}
+
+/**
+ * Why this one change cannot be replayed on another device, or `null`.
+ *
+ * The field paths are kept in the prose rather than in a `details.fields`
+ * envelope because the rejection now travels inside a 200 response, one entry
+ * per change: the batch-level 400 this replaced is gone, and a client that has
+ * to reassemble which change an entry described from a sibling array would be
+ * back to guessing.
+ *
+ * A stored row is copied to every device for the life of the log, so this stays
+ * the only gate on what a push may write.
+ */
+export function changePayloadRejection(
+  change: ChangeEnvelope,
+  index: number,
+): ChangeRejection | null {
+  const fields = changePayloadViolations(change, index);
+  if (fields.length === 0) return null;
+
+  return {
+    // The key a declined payload has always carried, so an app that already
+    // knows what to do with an unstorable change keeps knowing it.
+    errorCode: ErrorCode.SYNC_PUSH_REJECTED,
+    message: fields
+      .map(({ field, messages }) => `${field}: ${messages.join(" ")}`)
+      .join(" "),
+  };
+}
+
+/**
+ * Reject a whole batch at once, the way `/sync/push` used to.
+ *
+ * No longer the request path — that question is asked per change now, through
+ * `changePayloadRejection`, because a batch-level throw is the wedge: a client
+ * that keeps a refused batch queued retried the broken row forever behind every
+ * healthy one. It stays exported because a caller that wants one throw for many
+ * changes (a pre-flight over a locally built queue, or the suite checking the
+ * field paths of a multi-change batch) still wants a 400 in the global envelope
+ * rather than an array to walk.
  *
  * The envelope is the global one — a summary in `message`, every problem in
  * `details.fields` — because a client branches on `code`, which stays

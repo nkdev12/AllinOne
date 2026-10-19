@@ -1,5 +1,20 @@
 version: '3.8'
 
+# ============================================================================
+# Development dependencies only. Nothing in this file is the deployment.
+#
+# The API and the queue worker run on the host (`npm run start:dev`,
+# `npm run start:worker`); the deployed topology is two Railway services built by
+# Nixpacks from `railway.json` / `railway.worker.json`, on managed Atlas MongoDB
+# and managed Redis. That means the services below stand in for things that are
+# managed elsewhere: `mongodb` for Atlas, `redis` for Upstash, `minio` for the S3
+# bucket, `mailpit` for Gmail SMTP, and `prometheus`/`grafana` for the monitoring
+# stack that has no production counterpart any more.
+#
+# Docker is not required to develop against a real Atlas/Upstash pair either —
+# point DATABASE_URL and REDIS_URL at them and start nothing here.
+# ============================================================================
+
 services:
   # ============================================================================
   # MongoDB Database
@@ -81,26 +96,35 @@ services:
       - allinone-dev
 
   # ============================================================================
-  # Prometheus (Metrics - open-source monitoring)
+  # Prometheus (Metrics — DEV ONLY; there is no production scraper any more)
+  #
+  # This stack is now the only place Prometheus and Grafana are started at all:
+  # the production compose file, its Caddyfront and `prometheus.prod.yml` were
+  # deleted in 1c1cc7d, and Railway runs neither. `infrastructure/grafana/**`
+  # survives only because it is mounted here.
   # ============================================================================
   prometheus:
-    # Same pin as docker-compose.prod.yml, same reason in miniature: `latest` made
-    # the version a function of when an image was last pulled, and the commented
-    # scrape-credential stanza in infrastructure/prometheus/prometheus.dev.yml is
-    # written against `authorization.credentials_file` (Prometheus >= 2.24), so the
-    # tag has to be a number someone checked rather than a moving target.
-    #
-    # No credentials mount here on purpose. The file it would mount holds
-    # ADMIN_SECRET, which is a production value; a dev compose everybody clones
-    # cannot ship it and must not invent a committed placeholder for it. Until an
-    # operator supplies their own and uncomments the stanza in that config, these
-    # scrapes answer 401 — documented there, not silent.
+    # Pinned rather than `latest` so the version is a number somebody checked: the
+    # scrape stanza in infrastructure/prometheus/prometheus.dev.yml is written
+    # against `authorization.credentials_file` (Prometheus >= 2.24) and the
+    # alternative `http_headers` form against >= 2.53.
     image: prom/prometheus:v3.13.4
     container_name: allinone-prometheus-dev
     ports:
       - "9090:9090"
+    # The API's scrape target is `host.docker.internal:3000` — the API is not a
+    # service in this file, it runs on the host (`npm run start:dev`). Docker
+    # Desktop maps that name already; on Linux Docker it only resolves with this
+    # line, so without it the one dev dashboard that exists reports `up 0` for a
+    # reason that has nothing to do with credentials.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./infrastructure/prometheus/prometheus.dev.yml:/etc/prometheus/prometheus.yml:ro
+      # An operator who wants dev metrics to authenticate supplies their own file
+      # holding ADMIN_SECRET verbatim (mode 600, never committed) and uncomments
+      # both this mount and the `authorization` stanza in that config.
+      # - /run/secrets/metrics_scrape_secret:/run/secrets/metrics_scrape_secret:ro
       - prometheus_data_dev:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -115,18 +139,17 @@ services:
       - allinone-dev
 
   # ============================================================================
-  # Grafana (Visualization - open-source dashboards)
+  # Grafana (Visualization — DEV ONLY, same reason as above)
   # ============================================================================
   grafana:
-    # Pinned to the same tag as production so a panel built on a laptop means the
-    # same thing on the server; the version was confirmed against the registry, not
-    # guessed. See the note on the production service about the deprecated
-    # `grafana-piechart-panel` in `GF_INSTALL_PLUGINS` before this moves again.
     image: grafana/grafana:13.2.4
     container_name: allinone-grafana-dev
     ports:
       - "3001:3000"
     environment:
+      # Local-only credentials for a dashboard nobody outside this machine can
+      # reach. They are here because the dev stack has to start without prompting;
+      # change them if you expose 3001 anywhere.
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_SECURITY_ADMIN_USER: admin
       GF_INSTALL_PLUGINS: grafana-piechart-panel

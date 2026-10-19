@@ -1,6 +1,6 @@
-import { Processor, Process } from "@nestjs/bull";
-import { Logger } from "@nestjs/common";
-import { Job } from "bull";
+import { Processor, Process, InjectQueue } from "@nestjs/bull";
+import { Logger, Optional } from "@nestjs/common";
+import { Job, Queue } from "bull";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { RecurringService } from "@/finance/recurring/recurring.service";
 import { BudgetsService } from "@/finance/budgets/budgets.service";
@@ -13,6 +13,9 @@ export class FinanceProcessor {
     private readonly prisma: PrismaService,
     private readonly recurringService: RecurringService,
     private readonly budgetsService: BudgetsService,
+    @Optional()
+    @InjectQueue("notification")
+    private readonly notificationQueue?: Queue,
   ) {}
 
   @Process("process-recurring")
@@ -80,6 +83,33 @@ export class FinanceProcessor {
               where: { id: b.id },
               data: { alertSentAt: now },
             });
+            if (this.notificationQueue) {
+              await this.notificationQueue.add(
+                "send-notification",
+                {
+                  userId,
+                  title:
+                    thresholdCrossed === "exceeded"
+                      ? "Budget Exceeded"
+                      : "Budget Warning",
+                  body:
+                    thresholdCrossed === "exceeded"
+                      ? "You have exceeded 100% of your budget limit."
+                      : `You have reached ${percent}% of your budget limit.`,
+                  channel: "NOTIFICATION",
+                  metadata: {
+                    budgetId: b.id,
+                    threshold: thresholdCrossed,
+                    percentUsed: percent,
+                  },
+                },
+                {
+                  attempts: 3,
+                  backoff: { type: "exponential", delay: 3000 },
+                  removeOnComplete: true,
+                },
+              );
+            }
             alertsGenerated++;
           }
         }

@@ -4,6 +4,7 @@ import { PrismaService } from "@/common/prisma/prisma.service";
 import { ConfigService } from "@nestjs/config";
 import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { SyncNotificationService } from "@/sync/sync-notification.service";
+import { changePayloadRejection } from "@/sync/change-payload.validator";
 
 describe("AiService", () => {
   let service: AiService;
@@ -172,6 +173,77 @@ describe("AiService", () => {
       expect(response.createdCount).toBe(1);
       expect(prismaMock.task.create).toHaveBeenCalled();
       expect(prismaMock.change.create).toHaveBeenCalled();
+    });
+
+    /**
+     * The payload this route logs used to be three keys — `title`, `priority`,
+     * `extractedFromNoteId` — while the `Task` row beside it held the rest. A device
+     * applying the change writes an absent key as nothing, so every other device of
+     * the account rebuilt the task with no status, no description, no dates and no
+     * place in the tree, and the next REST read answered from a row the log had
+     * already contradicted. `TASK_FIELDS` treats every key as optional, so nothing
+     * on the way in could have caught it.
+     */
+    it("logs the whole task, not the keys the request happened to carry", async () => {
+      prismaMock.note.findFirst.mockResolvedValue({
+        id: "note-10",
+        title: "DevOps Checklist",
+      });
+      prismaMock.task.create.mockResolvedValue({
+        id: "task-1",
+        title: "Audit IAM roles",
+        description: "Follow up with the devops team",
+        priority: "P2_HIGH",
+        status: "TODO",
+        dueDate: new Date("2026-10-20T00:00:00.000Z"),
+        dueTime: null,
+        recurrenceRule: null,
+        completedAt: null,
+        sectionId: null,
+        parentId: null,
+        projectId: null,
+        sortOrder: 0,
+        timeSpentSeconds: 0,
+        createdAt: new Date("2026-10-18T09:00:00.000Z"),
+        version: 1,
+      });
+
+      await service.convertTasksForNote("user-1", "note-10", {
+        tasks: [{ title: "Audit IAM roles", priority: "HIGH" }],
+      });
+
+      const payload = prismaMock.change.create.mock.calls[0][0].data.payload;
+      expect(payload).toEqual({
+        title: "Audit IAM roles",
+        description: "Follow up with the devops team",
+        priority: "P2_HIGH",
+        status: "TODO",
+        dueDate: "2026-10-20T00:00:00.000Z",
+        dueTime: null,
+        recurrenceRule: null,
+        completedAt: null,
+        sectionId: null,
+        parentId: null,
+        projectId: null,
+        sortOrder: 0,
+        timeSpentSeconds: 0,
+        createdAt: "2026-10-18T09:00:00.000Z",
+        version: 1,
+        // The provenance key is this route's own: `TasksService` writes the same
+        // document without it, because only a note-to-task conversion has a note to
+        // come from.
+        extractedFromNoteId: "note-10",
+      });
+
+      // And the document is one a device may be handed: the same validator
+      // `/sync/push` runs on it accepts it, which is the check a REST write never
+      // gets to make for itself.
+      expect(
+        changePayloadRejection(
+          { entityType: "task", operation: "CREATE", payload },
+          0,
+        ),
+      ).toBeNull();
     });
 
     it("numbers every task change it logs, not just the first", async () => {

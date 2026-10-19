@@ -1,14 +1,23 @@
 #!/bin/bash
 
 # Allinone Backend - Database & Object Storage Restore Script
-# Restores a MongoDB archive produced by backup-database.sh with point-in-time
-# oplog replay, restores MinIO object storage (attachments/exports), and validates
-# sync cursor invariants to prevent silent sync loss.
+# Restores a MongoDB archive produced by backup-database.sh into exactly one
+# database (`--nsInclude` scopes both the writes and `--drop`), restores MinIO
+# object storage (attachments/exports), and validates sync cursor invariants to
+# prevent silent sync loss.
+#
+# A whole-server oplog archive is replayed only when the operator names
+# OPLOG_WHOLE_SERVER_RESTORE=true, and never against a managed cluster: point-in-
+# time recovery there is the cluster's own feature, not something this script can
+# reproduce from an archive.
 #
 # Requires:
 #   - mongorestore and mongosh (MongoDB Database Tools) on PATH
 #   - tar (for MinIO object storage restore)
 #   - openssl (when restoring encrypted backups)
+#
+# Run it from a checkout, not from inside the deployed image — see the note in
+# scripts/backup-database.sh about `.dockerignore`.
 
 set -e
 
@@ -33,10 +42,81 @@ if [ -f "$BACKUP_ENV_FILE" ]; then
   set +a
 fi
 
-# Configuration
-DB_NAME="${DB_NAME:-allinone_prod}"
+# Configuration. DB_HOST/DB_PORT only ever describe the last-resort localhost
+# target; DB_NAME is resolved from the URI below when the operator did not set it.
+DB_NAME="${DB_NAME:-}"
 DB_HOST="${DB_HOST:-localhost}"
 DB_PORT="${DB_PORT:-27017}"
+
+# directConnection is required because a self-hosted single-node replica set is
+# initiated as 127.0.0.1:27017; without it a client in another container
+# discovers that address and talks to itself. It is only the last-resort default:
+# the target comes from DATABASE_URL when one is declared, because that is the
+# variable the API and the worker connect with, and a Railway deployment has
+# nothing else. Nothing here prints a URI verbatim — a production DATABASE_URL
+# carries the Atlas password in its authority, and a restore is run under pressure
+# into a terminal somebody else may read the history of.
+URI_INPUT="${MONGO_URI:-${DATABASE_URL:-mongodb://$DB_HOST:$DB_PORT/?directConnection=true}}"
+
+URI_BASE="${URI_INPUT%%\?*}"
+URI_QUERY=""
+if [ "$URI_BASE" != "$URI_INPUT" ]; then
+  URI_QUERY="?${URI_INPUT#*\?}"
+fi
+URI_SCHEME="${URI_BASE%%://*}"
+URI_AUTHORITY="${URI_BASE#*://}"
+
+URI_CREDENTIALS=""
+URI_HOSTPART="$URI_AUTHORITY"
+case "$URI_AUTHORITY" in
+  *@*)
+    URI_CREDENTIALS="${URI_AUTHORITY%%@*}@"
+    URI_HOSTPART="${URI_AUTHORITY#*@}"
+    ;;
+esac
+URI_HOSTPORT="${URI_HOSTPART%%/*}"
+URI_DB_FROM_URL=""
+if [ "$URI_HOSTPORT" != "$URI_HOSTPART" ]; then
+  URI_DB_FROM_URL="${URI_HOSTPART#*/}"
+fi
+
+SERVER_URI="$URI_SCHEME://$URI_HOSTPORT/"
+if [ -n "$URI_QUERY" ]; then
+  SERVER_URI="$URI_SCHEME://$URI_HOSTPORT$URI_QUERY"
+fi
+
+# Explicit DB_NAME wins, then the database the URI names, then the pre-Atlas default.
+if [ -z "$DB_NAME" ] && [ -n "$URI_DB_FROM_URL" ]; then
+  DB_NAME="$URI_DB_FROM_URL"
+fi
+if [ -z "$DB_NAME" ]; then
+  DB_NAME="allinone_prod"
+fi
+
+# The only form this script prints.
+TARGET_SHOWN="$URI_SCHEME://$URI_HOSTPORT/$DB_NAME"
+
+# A restore is the one path in the repo that destroys data. Refuse a target that
+# is not an application database before anything is read from the archive.
+case "$DB_NAME" in
+  ""|admin|local|config|test)
+    echo -e "${RED}✗ Refusing to restore into '$DB_NAME' at $TARGET_SHOWN${NC}" >&2
+    echo -e "${RED}  The target must be a real application database. Set DB_NAME, or use${NC}" >&2
+    echo -e "${RED}  a DATABASE_URL whose path names one.${NC}" >&2
+    exit 1
+    ;;
+esac
+
+# mongosh ignores --db and falls back to `test`, so probes need the database in
+# the URI path. This is the only place the authority is still needed, and it is
+# never echoed.
+DB_URI="$URI_SCHEME://$URI_CREDENTIALS$URI_HOSTPORT/$DB_NAME$URI_QUERY"
+
+# The authenticated URI with no database in its path. The MongoDB tools read a
+# URI's path component as a default --db, and `--db` is exactly what `--nsInclude`
+# is here to avoid: naming the database twice leaves it ambiguous which one
+# `--drop` is allowed to touch.
+AUTH_SERVER_URI="$URI_SCHEME://$URI_CREDENTIALS$URI_HOSTPORT/${URI_QUERY}"
 
 # MinIO / Object Storage Configuration
 RESTORE_MINIO="${RESTORE_MINIO:-true}"
@@ -52,21 +132,6 @@ if [ -z "$CONTAINER_TOOL" ]; then
   fi
 fi
 
-# directConnection is required because both compose stacks run a single-member
-# replica set initiated as 127.0.0.1:27017; without it a client in another
-# container discovers that address and talks to itself.
-MONGO_URI="${MONGO_URI:-mongodb://$DB_HOST:$DB_PORT/?directConnection=true}"
-
-# mongosh ignores --db and falls back to `test`, so probes need the database in
-# the URI path.
-URI_BASE="${MONGO_URI%%\?*}"
-URI_QUERY=""
-[ "$URI_BASE" != "$MONGO_URI" ] && URI_QUERY="?${MONGO_URI#*\?}"
-URI_SCHEME="${URI_BASE%%://*}"
-URI_AUTH="${URI_BASE#*://}"
-URI_AUTH="${URI_AUTH%%/*}"
-DB_URI="$URI_SCHEME://$URI_AUTH/$DB_NAME$URI_QUERY"
-
 for TOOL in mongorestore mongosh tar; do
   if ! command -v "$TOOL" >/dev/null 2>&1; then
     echo -e "${RED}✗ $TOOL not found on PATH${NC}"
@@ -80,9 +145,16 @@ if [ $# -eq 0 ]; then
   echo ""
   echo "Usage: $0 <backup-file.archive.gz[.enc]> [minio-backup.tar.gz[.enc]]"
   echo ""
+  echo "The target database is resolved in this order (see docs/DISASTER_RECOVERY.md):"
+  echo "  MONGO_URI > DATABASE_URL > mongodb://\$DB_HOST:\$DB_PORT/?directConnection=true"
+  echo "and the database it lands on is DB_NAME if set, otherwise the path component of"
+  echo "that URI. Nothing prints the authority of a URI, and a target of admin, local,"
+  echo "config, test or nothing at all is refused."
+  echo ""
   echo "Examples:"
   echo "  $0 .backup/allinone-db-20260928_100000.archive.gz"
-  echo "  BACKUP_PASSPHRASE=... $0 /opt/allinone-backup/allinone-db-20260928_100000.archive.gz.enc"
+  echo "  DATABASE_URL='…' $0 /opt/allinone-backup/allinone-db-20260928_100000.archive.gz.enc"
+  echo "  BACKUP_PASSPHRASE=… ASSUME_YES=true $0 <archive>   # unattended, still one-database scoped"
   echo ""
   echo "Available backups:"
   find .backup /opt/allinone-backup \
@@ -180,13 +252,60 @@ if [ -n "$MINIO_BACKUP_FILE" ]; then
   fi
 fi
 
-# Point-in-time oplog check
+# ============================================================================
+# Archive shape decides the restore mode.
+#
+# `mongodump --oplog` cannot be combined with `--db`, so an oplog archive is by
+# construction a whole-server archive: replaying it is a server-level operation
+# and needs server-level privileges. The default database dump from
+# backup-database.sh contains `$DB_NAME.*` namespaces and nothing else, so the
+# restore below stays scoped to one database with `--nsInclude` — the flag that
+# keeps `--drop` from reaching anything outside the application database, which is
+# what made the unscoped `--drop --archive` version of this script dangerous on a
+# shared server.
+#
+# Detection is a dry run against the resolved target, never against whatever
+# mongod happens to be listening on localhost:27017 of the machine running this
+# script.
+# ============================================================================
+IS_ATLAS=false
+[ "$URI_SCHEME" = "mongodb+srv" ] && IS_ATLAS=true
+IS_REPLICA_SEEDLIST=false
+case "$URI_HOSTPORT" in
+  *,*) IS_REPLICA_SEEDLIST=true ;;
+esac
+case "$URI_QUERY" in
+  *replicaSet=*) IS_REPLICA_SEEDLIST=true ;;
+esac
+
+HAS_OPLOG=false
+if mongorestore \
+  --uri "$AUTH_SERVER_URI" \
+  --dryRun \
+  --oplogReplay \
+  --nsInclude="$DB_NAME.*" \
+  --gzip \
+  --archive="$ARCHIVE" >/dev/null 2>&1; then
+  HAS_OPLOG=true
+fi
+
 OPLOG_REPLAY_FLAG=""
-if mongorestore --dryRun --oplogReplay --gzip --archive="$ARCHIVE" >/dev/null 2>&1; then
-  OPLOG_REPLAY_FLAG="--oplogReplay"
-  OPLOG_MSG="Active (Point-in-time transaction consistency guaranteed)"
+if [ "$HAS_OPLOG" = "true" ]; then
+  if [ "${OPLOG_WHOLE_SERVER_RESTORE:-false}" = "true" ]; then
+    if [ "$IS_ATLAS" = "true" ]; then
+      echo -e "${RED}✗ This archive carries an oplog, and the target is a managed cluster.${NC}" >&2
+      echo -e "${RED}  Point-in-time recovery on Atlas is the cluster's own feature; replaying a${NC}" >&2
+      echo -e "${RED}  whole-server oplog through an application account is not how a restore${NC}" >&2
+      echo -e "${RED}  happens there. Unset the flag and restore the collections instead.${NC}" >&2
+      exit 1
+    fi
+    OPLOG_REPLAY_FLAG="--oplogReplay"
+    OPLOG_MSG="Active (whole-server oplog replayed; namespaces still limited to '$DB_NAME.*')"
+  else
+    OPLOG_MSG="Present but NOT replayed (whole-server archive; name OPLOG_WHOLE_SERVER_RESTORE=true on a self-hosted replica set)"
+  fi
 else
-  OPLOG_MSG="None (Legacy non-oplog archive; restoring collections only)"
+  OPLOG_MSG="None (single-database archive; restoring collections only)"
 fi
 
 echo -e "${BLUE}╔════════════════════════════════════════════════════╗${NC}"
@@ -195,7 +314,8 @@ echo -e "${BLUE}╚════════════════════�
 echo ""
 echo "Database backup: $BACKUP_FILE"
 echo "Target Database: $DB_NAME"
-echo "Target MongoDB:  $MONGO_URI"
+echo "Target MongoDB:  $TARGET_SHOWN"
+echo "Restore scope:   --nsInclude=$DB_NAME.* (nothing outside it is written or dropped)"
 echo "Oplog Replay:    $OPLOG_MSG"
 if [ -n "$MINIO_BACKUP_FILE" ]; then
   echo "MinIO backup:    $MINIO_BACKUP_FILE (will restore attachments/exports)"
@@ -207,7 +327,7 @@ echo ""
 # Confirmation
 if [ "$ASSUME_YES" != "true" ] && [ "$CONFIRM_RESTORE" != "yes" ]; then
   echo -e "${YELLOW}WARNING: This will drop and overwrite every collection in '$DB_NAME'${NC}"
-  echo -e "${YELLOW}         that the archive contains.${NC}"
+  echo -e "${YELLOW}         that the archive contains. No other database is touched.${NC}"
   if [ -n "$MINIO_BACKUP_FILE" ]; then
     echo -e "${YELLOW}         MinIO object storage data will also be overwritten.${NC}"
   fi
@@ -226,11 +346,12 @@ echo ""
 echo -e "${YELLOW}Starting database restore...${NC}"
 echo ""
 
-# Restore from archive
+# Restore from archive. `--drop` is only ever as wide as `--nsInclude`.
 if mongorestore \
-  --uri "$MONGO_URI" \
+  --uri "$AUTH_SERVER_URI" \
   --gzip \
   --drop \
+  --nsInclude="$DB_NAME.*" \
   $OPLOG_REPLAY_FLAG \
   --archive="$ARCHIVE"; then
 
@@ -313,27 +434,41 @@ fi
 echo "Collections restored: $COLL_COUNT"
 echo "Users restored:       $USER_COUNT"
 
-# Verify VaultSetting key custody
+# Verify VaultSetting key custody.
+#
+# What "custody" means changed on 2026-10-17 and this check had not followed it:
+# `recoveryKey` is the obsolete, unwrapped key-encryption-key column that both
+# setup branches now write as null, so a healthy modern row is exactly the row
+# that has NO `recoveryKey`. The archive is intact when every row carries the
+# phrase envelope (`recoveryKdfSalt` + `wrappedMasterKey`/`Iv`/`Tag`); a row that
+# still holds `recoveryKey` is the finding worth naming, because for that row a
+# database read is a vault read (`docs/SECURITY.md`, "Vault and Sync Trust Models").
 VAULT_CHECK=$(mongosh "$DB_URI" --quiet --eval "
 try {
   const vaults = db.VaultSetting.find().toArray();
-  let ok = true;
+  let modern = 0, legacy = 0, broken = 0;
   for (const v of vaults) {
-    if (!v.wrappedMasterKey || !v.recoveryKey) {
-      ok = false;
-      break;
-    }
+    const envelope = !!(v.recoveryKdfSalt && v.wrappedMasterKey && v.wrappedMasterIv && v.wrappedMasterTag);
+    if (envelope) modern++;
+    else if (v.recoveryKey) legacy++;
+    else broken++;
   }
-  print(ok ? 'OK' : 'INCOMPLETE');
+  print(JSON.stringify({ total: vaults.length, modern, legacy, broken }));
 } catch(e) {
   print('SKIP');
 }
 " 2>/dev/null || echo "SKIP")
 
-if [ "$VAULT_CHECK" = "OK" ]; then
-  echo -e "${GREEN}✓ Vault key custody verified (wrapped keys and recovery keys intact)${NC}"
-elif [ "$VAULT_CHECK" = "INCOMPLETE" ]; then
-  echo -e "${RED}✗ WARNING: One or more VaultSetting documents missing wrappedMasterKey or recoveryKey!${NC}"
+if [ "$VAULT_CHECK" != "SKIP" ]; then
+  echo "Vault key custody after restore: $VAULT_CHECK"
+  echo "$VAULT_CHECK" | grep -q '"broken":0' \
+    && echo -e "${GREEN}✓ Every restored VaultSetting row still holds complete recovery material${NC}" \
+    || echo -e "${RED}✗ WARNING: some VaultSetting rows have neither the phrase envelope nor a legacy recoveryKey${NC}"
+  if echo "$VAULT_CHECK" | grep -qE '"legacy":[1-9]'; then
+    echo -e "${YELLOW}! Rows above counted as 'legacy' still store the obsolete plaintext recoveryKey.${NC}"
+    echo -e "${YELLOW}  They are the incident-review priority, not a restore failure: re-run vault${NC}"
+    echo -e "${YELLOW}  setup or recovery with the four envelope fields to clear each one.${NC}"
+  fi
 fi
 
 # Verify & reconcile SyncCursor and Change log invariants
@@ -376,7 +511,15 @@ echo ""
 echo -e "${GREEN}Restore process completed successfully${NC}"
 echo ""
 echo "Next steps:"
-echo "1. Verify application connectivity"
-echo "2. Restart api and worker services so they refresh in-memory state: docker compose restart api worker"
-echo "3. Monitor application logs"
+echo "1. Verify application connectivity against the restored database."
+echo "2. Restart BOTH deployed services so they drop in-memory state — the API and"
+echo "   the queue worker are separate Railway services, so redeploy or restart each"
+echo "   one; restarting only the API leaves the worker holding queue state and Bull"
+echo "   schedule keys written against the pre-restore database."
+echo "     railway redeploy --service <api-service-name> --environment production"
+echo "     railway redeploy --service <worker-service-name> --environment production"
+echo "   (In the dashboard: Service → Settings → Restart. There is no compose stack"
+echo "   left to restart — docker-compose.prod.yml was deleted in 1c1cc7d.)"
+echo "3. Monitor application logs for both services; a worker that did not come back"
+echo "   means the Change collection stops being pruned."
 echo ""

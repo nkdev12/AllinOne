@@ -1,13 +1,23 @@
 #!/bin/bash
 
 # Allinone Backend - Database & Object Storage Backup Script
-# Creates compressed, transaction-consistent MongoDB backups with oplog
-# point-in-time snapshots and MinIO object storage backups.
+# Archives one application database by default (the shape that works against a
+# managed cluster), with an explicitly named whole-server `--oplog` mode for a
+# self-hosted replica set. Also archives MinIO object storage.
+#
+# The target comes from DATABASE_URL when one is set — that is the variable the
+# API and the worker actually use, and the only one a Railway deployment has.
+# It is never printed: only scheme, host, port and database are.
 #
 # Requires:
 #   - mongodump, mongosh (MongoDB Database Tools) on PATH
 #   - openssl when BACKUP_PASSPHRASE is set
 #   - tar (for MinIO object storage backup)
+#
+# Run it from a checkout or a fetched copy of these scripts, not from inside the
+# deployed image: `.dockerignore` keeps `scripts/` out of the build context
+# (apart from worker-preflight.js), precisely so operational tools that can reach
+# a production database do not ship with the process that serves traffic.
 
 set -e
 
@@ -43,7 +53,7 @@ BACKUP_FILE="$BACKUP_DIR/allinone-db-$BACKUP_DATE.archive.gz"
 MINIO_BACKUP_FILE="$BACKUP_DIR/allinone-minio-$BACKUP_DATE.tar.gz"
 MANIFEST_FILE="$BACKUP_DIR/allinone-manifest-$BACKUP_DATE.json"
 
-DB_NAME="${DB_NAME:-allinone_prod}"
+DB_NAME="${DB_NAME:-}"
 DB_HOST="${DB_HOST:-localhost}"
 DB_PORT="${DB_PORT:-27017}"
 
@@ -67,21 +77,95 @@ if [ -z "$CONTAINER_TOOL" ]; then
   fi
 fi
 
-# directConnection is required because both compose stacks run a single-member
-# replica set initiated as 127.0.0.1:27017; without it a client in another
-# container discovers that address and talks to itself.
-# MONGO_URI names the server only — leave the database out of its path.
-MONGO_URI="${MONGO_URI:-mongodb://$DB_HOST:$DB_PORT/?directConnection=true}"
+# ============================================================================
+# Target resolution.
+#
+# `DATABASE_URL` is the deployment's only answer to "which database?", so it is
+# this script's first one. Until 2026-10-19 it was not consulted at all: the
+# default was `mongodb://$DB_HOST:$DB_PORT/?directConnection=true`, a shape the
+# deleted docker-compose.prod.yml needed, and nothing in the Railway deployment
+# sets DB_HOST or DB_PORT. Against Atlas (the real target) the connectivity probe
+# below therefore failed and the backup exited 1 while looking configured.
+#
+# Precedence, first hit wins:
+#   MONGO_URI      an operator naming a server explicitly (scratch targets, DR test)
+#   DATABASE_URL   what the API and the worker actually connect with — Atlas in prod
+#   DB_HOST:DB_PORT + directConnection
+#                  the self-hosted single-node replica set on a laptop, unchanged
+#
+# `DATABASE_URL` carries the database in its path and the credentials in its
+# authority, so it is decomposed rather than handed around whole:
+#   SERVER_URI   host + query, no authority, no database. Kept for the derivation
+#               and for reading the shape of the target; not what the tools connect
+#               with, because mongodump/mongorestore must authenticate as the
+#               application account on a managed cluster.
+#   DB_URI       authority + host + database + query — every tool call gets this.
+#               mongosh ignores --db and would otherwise probe `test`.
+#   TARGET_SHOWN host, port and database with the authority removed — the only form
+#               this script prints. A production `DATABASE_URL` puts the Atlas
+#               password in the authority, and cron output is read by more people
+#               than the service is.
+# ============================================================================
+URI_INPUT="${MONGO_URI:-${DATABASE_URL:-mongodb://$DB_HOST:$DB_PORT/?directConnection=true}}"
 
-# mongosh ignores --db and falls back to `test`, so probes need the database in
-# the URI path.
-URI_BASE="${MONGO_URI%%\?*}"
+URI_BASE="${URI_INPUT%%\?*}"
 URI_QUERY=""
-[ "$URI_BASE" != "$MONGO_URI" ] && URI_QUERY="?${MONGO_URI#*\?}"
+if [ "$URI_BASE" != "$URI_INPUT" ]; then
+  URI_QUERY="?${URI_INPUT#*\?}"
+fi
 URI_SCHEME="${URI_BASE%%://*}"
-URI_AUTH="${URI_BASE#*://}"
-URI_AUTH="${URI_AUTH%%/*}"
-DB_URI="$URI_SCHEME://$URI_AUTH/$DB_NAME$URI_QUERY"
+URI_AUTHORITY="${URI_BASE#*://}"
+
+URI_CREDENTIALS=""
+URI_HOSTPART="$URI_AUTHORITY"
+case "$URI_AUTHORITY" in
+  *@*)
+    URI_CREDENTIALS="${URI_AUTHORITY%%@*}@"
+    URI_HOSTPART="${URI_AUTHORITY#*@}"
+    ;;
+esac
+
+URI_HOSTPORT="${URI_HOSTPART%%/*}"
+URI_DB_FROM_URL=""
+if [ "$URI_HOSTPORT" != "$URI_HOSTPART" ]; then
+  URI_DB_FROM_URL="${URI_HOSTPART#*/}"
+fi
+
+SERVER_URI="$URI_SCHEME://$URI_HOSTPORT/"
+if [ -n "$URI_QUERY" ]; then
+  SERVER_URI="$URI_SCHEME://$URI_HOSTPORT$URI_QUERY"
+fi
+
+# An explicit DB_NAME wins; otherwise take the database the URI names; otherwise
+# the pre-Atlas default, which is only a sensible guess next to a localhost mongod.
+if [ -z "$DB_NAME" ] && [ -n "$URI_DB_FROM_URL" ]; then
+  DB_NAME="$URI_DB_FROM_URL"
+fi
+if [ -z "$DB_NAME" ]; then
+  DB_NAME="allinone_prod"
+fi
+
+TARGET_SHOWN="$URI_SCHEME://$URI_HOSTPORT/$DB_NAME"
+
+# Refuse a target that is not an application database. `--db admin` on a shared
+# server is how a backup job turns into an incident, and an empty path means the
+# URI was written without one.
+case "$DB_NAME" in
+  ""|admin|local|config|test)
+    echo "Error: refusing to back up database '$DB_NAME' at $TARGET_SHOWN" >&2
+    echo "  The target must be a real application database. Set DB_NAME, or use a" >&2
+    echo "  DATABASE_URL whose path names one." >&2
+    exit 1
+    ;;
+esac
+
+DB_URI="$URI_SCHEME://$URI_CREDENTIALS$URI_HOSTPORT/$DB_NAME$URI_QUERY"
+
+# The authenticated URI with no database in its path, for the one job that must
+# not have one: the MongoDB tools take a URI's path component as a default --db,
+# and `mongodump --oplog` refuses to run with --db at all. Without this form the
+# whole-server snapshot mode would fail on its own flag.
+AUTH_SERVER_URI="$URI_SCHEME://$URI_CREDENTIALS$URI_HOSTPORT/${URI_QUERY}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -98,10 +182,11 @@ for TOOL in mongodump mongosh tar; do
 done
 
 echo -e "${BLUE}╔════════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║          Allinone Point-in-Time Backup Utility     ║${NC}"
+echo -e "${BLUE}║           Allinone Database Backup Utility          ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════════════════╝${NC}"
 echo "Database: $DB_NAME"
-echo "Target: $MONGO_URI"
+# Redacted on purpose: the authority of a production URI holds the Atlas password.
+echo "Target:   $TARGET_SHOWN"
 echo "Backup destination: $BACKUP_DIR"
 echo "Database backup file: $BACKUP_FILE"
 echo ""
@@ -109,48 +194,103 @@ echo ""
 # Pre-flight: verify target database connectivity and collections
 COLLECTION_COUNT=$(mongosh "$DB_URI" --quiet --eval "db.getCollectionNames().length" 2>/dev/null || echo "0")
 if [ "$COLLECTION_COUNT" = "0" ]; then
-  echo -e "${RED}✗ Database '$DB_NAME' has no collections - check DB_NAME / MONGO_URI${NC}"
+  echo -e "${RED}✗ Database '$DB_NAME' has no collections at $TARGET_SHOWN${NC}" >&2
+  echo -e "${RED}  Check DB_NAME, or the database in the path of DATABASE_URL.${NC}" >&2
   exit 1
 fi
 echo "Database collections in '$DB_NAME': $COLLECTION_COUNT"
 
-# Point-in-time snapshot check:
-# mongodump --oplog takes a transaction-consistent snapshot across all collections.
-# In MongoDB, --oplog requires a replica set (which both compose stacks and production run)
-# and only works on a full instance dump (omitting --db).
-IS_REPLSET=$(mongosh "$MONGO_URI" --quiet --eval "try { rs.status().ok } catch(e) { 0 }" 2>/dev/null || echo "0")
-USE_OPLOG=false
+# ============================================================================
+# Dump mode.
+#
+# Two shapes, and mongodump will not blend them: `--oplog` requires a replica set
+# and forbids `--db`, so an oplog snapshot is by construction a dump of every
+# database the server holds. The pre-2026-10-19 version of this script took that
+# path unconditionally whenever `rs.status()` answered 1 — which on a shared
+# server, or on an Atlas cluster whose account can read other databases, means the
+# archive quietly contains more than the application.
+#
+#   default                       one database, no oplog, restore needs no --drop
+#                                 of anything outside it. This is what Atlas wants:
+#                                 cross-collection point-in-time consistency there
+#                                 is the managed cluster's own recovery feature,
+#                                 not something an archive can carry.
+#   OPLOG_WHOLE_SERVER_BACKUP=true
+#                                 the old whole-server snapshot, self-hosted
+#                                 replica sets only, and the operator has to name
+#                                 it because the archive is server-scoped.
+#
+# `mongodb+srv` is read as "managed cluster": Atlas always runs a replica set, and
+# an application-scoped account is not allowed to call rs.status(), so the old
+# probe answered 0 on exactly the target this script now runs against.
+# ============================================================================
+IS_ATLAS=false
+[ "$URI_SCHEME" = "mongodb+srv" ] && IS_ATLAS=true
+# A seedlist (two or more hosts) or an explicit replicaSet= parameter says
+# "replica set" even when the connecting account is not allowed to ask: Atlas
+# allows a non-admin SRV-form URI too, and rs.status() is an admin command.
+IS_REPLICA_SEEDLIST=false
+case "$URI_HOSTPORT" in
+  *,*) IS_REPLICA_SEEDLIST=true ;;
+esac
+case "$URI_QUERY" in
+  *replicaSet=*) IS_REPLICA_SEEDLIST=true ;;
+esac
+IS_REPLSET=$(mongosh "$AUTH_SERVER_URI" --quiet --eval "try { rs.status().ok } catch(e) { 0 }" 2>/dev/null || echo "0")
 
-if [ "$IS_REPLSET" = "1" ]; then
-  USE_OPLOG=true
-  echo -e "${GREEN}✓ Replica set active: point-in-time transaction consistency (--oplog) enabled${NC}"
-else
-  if [ "$ALLOW_NON_TRANSACTIONAL_BACKUP" = "true" ]; then
-    echo -e "${YELLOW}! WARNING: MongoDB is not running as a replica set.${NC}"
-    echo -e "${YELLOW}  Taking multi-collection backup without --oplog (NOT point-in-time consistent!)${NC}"
-    USE_OPLOG=false
-  else
-    echo -e "${RED}✗ Error: MongoDB instance is not a replica set (rs.status().ok != 1).${NC}"
-    echo -e "${RED}  Point-in-time transaction consistency between Change log and SyncCursor${NC}"
-    echo -e "${RED}  strictly requires an oplog. To override in non-production, set ALLOW_NON_TRANSACTIONAL_BACKUP=true.${NC}"
+DUMP_MODE="database"
+if [ "${OPLOG_WHOLE_SERVER_BACKUP:-false}" = "true" ]; then
+  DUMP_MODE="oplog-whole-server"
+fi
+
+if [ "$DUMP_MODE" = "oplog-whole-server" ]; then
+  if [ "$IS_ATLAS" = "true" ]; then
+    echo -e "${RED}✗ OPLOG_WHOLE_SERVER_BACKUP is set against a managed (mongodb+srv) cluster.${NC}" >&2
+    echo -e "${RED}  Point-in-time recovery there is the Atlas cluster feature, not this flag:${NC}" >&2
+    echo -e "${RED}  an archive cannot carry the oplog of a cluster whose membership you do not${NC}" >&2
+    echo -e "${RED}  control, and dumping every database in it is not what a scheduled job should${NC}" >&2
+    echo -e "${RED}  do. Unset the flag and let the per-database dump be the portable copy.${NC}" >&2
     exit 1
   fi
+  if [ "$IS_REPLSET" != "1" ] && [ "$IS_REPLICA_SEEDLIST" != "true" ]; then
+    echo -e "${RED}✗ mongodump --oplog needs a replica set; $TARGET_SHOWN did not answer rs.status() and its URI names no replica set.${NC}" >&2
+    exit 1
+  fi
+  echo -e "${YELLOW}! Whole-server oplog snapshot: the archive will contain EVERY database on this${NC}"
+  echo -e "${YELLOW}  server, not just '$DB_NAME'. Restore stays scoped to one database unless the${NC}"
+  echo -e "${YELLOW}  operator names that flag too (see scripts/restore-database.sh).${NC}"
+elif [ "$IS_REPLSET" != "1" ] && [ "$IS_ATLAS" != "true" ] && [ "$IS_REPLICA_SEEDLIST" != "true" ]; then
+  if [ "$ALLOW_NON_TRANSACTIONAL_BACKUP" = "true" ]; then
+    echo -e "${YELLOW}! WARNING: MongoDB is not running as a replica set and the operator accepted it.${NC}"
+    echo -e "${YELLOW}  Per-collection dump without --oplog: NOT point-in-time consistent across collections.${NC}"
+  else
+    echo -e "${RED}✗ Error: MongoDB instance is not a replica set (rs.status().ok != 1).${NC}" >&2
+    echo -e "${RED}  Point-in-time transaction consistency between the Change log and SyncCursor${NC}" >&2
+    echo -e "${RED}  requires either a managed cluster (which has its own point-in-time recovery)${NC}" >&2
+    echo -e "${RED}  or a whole-server oplog snapshot: OPLOG_WHOLE_SERVER_BACKUP=true.${NC}" >&2
+    echo -e "${RED}  To override in non-production, set ALLOW_NON_TRANSACTIONAL_BACKUP=true.${NC}" >&2
+    exit 1
+  fi
+else
+  echo -e "${GREEN}✓ Per-database snapshot of '$DB_NAME'.${NC}"
+  echo -e "${GREEN}  Cross-collection point-in-time recovery is the managed cluster's feature${NC}"
+  echo -e "${GREEN}  (Atlas: Backup → point-in-time), not this archive's. On a self-hosted${NC}"
+  echo -e "${GREEN}  replica set, OPLOG_WHOLE_SERVER_BACKUP=true takes the server-scoped dump.${NC}"
 fi
 echo ""
 
 # Execute mongodump
-echo -e "${YELLOW}Creating MongoDB point-in-time backup...${NC}"
-if [ "$USE_OPLOG" = "true" ]; then
-  # Full dump with oplog to guarantee point-in-time transaction consistency
+if [ "$DUMP_MODE" = "oplog-whole-server" ]; then
+  echo -e "${YELLOW}Creating whole-server point-in-time backup (--oplog, no --db)...${NC}"
   mongodump \
-    --uri "$MONGO_URI" \
+    --uri "$AUTH_SERVER_URI" \
     --oplog \
     --gzip \
     --archive="$BACKUP_FILE"
 else
-  # Non-oplog fallback (standalone only if explicitly allowed)
+  echo -e "${YELLOW}Creating single-database backup ('$DB_NAME', no oplog)...${NC}"
   mongodump \
-    --uri "$MONGO_URI" \
+    --uri "$DB_URI" \
     --db "$DB_NAME" \
     --gzip \
     --archive="$BACKUP_FILE"
@@ -169,9 +309,18 @@ else
   exit 1
 fi
 
-if [ "$USE_OPLOG" = "true" ]; then
+if [ "$DUMP_MODE" = "oplog-whole-server" ]; then
   echo "Verifying oplog replay capability in archive..."
-  if mongorestore --dryRun --oplogReplay --gzip --archive="$BACKUP_FILE" >/dev/null 2>&1; then
+  # --uri is not decoration: mongorestore defaults to localhost:27017, and this
+  # dry run has to be answered by the server the dump came from. A dry run writes
+  # nothing, so pointing it back at the dump's own target is safe.
+  if mongorestore \
+    --uri "$AUTH_SERVER_URI" \
+    --dryRun \
+    --oplogReplay \
+    --nsInclude="$DB_NAME.*" \
+    --gzip \
+    --archive="$BACKUP_FILE" >/dev/null 2>&1; then
     echo -e "${GREEN}✓ Point-in-time oplog verification passed${NC}"
   else
     echo -e "${RED}✗ Backup archive missing valid oplog entries!${NC}"
@@ -331,13 +480,18 @@ if [ "$BACKUP_MINIO" = "true" ]; then
 fi
 
 # Write Manifest
+# `target` is the redacted form for the same reason the console output is: a
+# manifest is the file somebody emails to a colleague when a restore goes wrong.
 cat <<EOF > "$MANIFEST_FILE"
 {
   "timestamp": "$BACKUP_DATE",
   "database": {
     "name": "$DB_NAME",
     "file": "$(basename "$BACKUP_FILE")",
-    "oplogConsistent": $USE_OPLOG,
+    "target": "$TARGET_SHOWN",
+    "mode": "$DUMP_MODE",
+    "oplogConsistent": $([ "$DUMP_MODE" = "oplog-whole-server" ] && echo "true" || echo "false"),
+    "wholeServerArchive": $([ "$DUMP_MODE" = "oplog-whole-server" ] && echo "true" || echo "false"),
     "encrypted": $([ -n "$BACKUP_PASSPHRASE" ] && echo "true" || echo "false")
   },
   "minio": {

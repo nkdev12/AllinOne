@@ -12,6 +12,8 @@ import { UpdateEventDto } from "../dto/update-event.dto";
 import { QueryEventsDto } from "../dto/query-events.dto";
 import { CreateEventReminderDto } from "../dto/create-event-reminder.dto";
 import { appendChange } from "@/sync/change-cursor";
+import { ErrorCode } from "@/common/errors/error-code";
+import { notFound } from "@/common/errors/http-errors";
 import {
   AttendeeStatus,
   ChangeOperation,
@@ -307,6 +309,19 @@ export class EventsService {
     return updated;
   }
 
+  /**
+   * Records an RSVP against one attendee row of one event this account owns.
+   *
+   * `attendeeEmail` and `status` arrive from `RsvpDto`, so both are already
+   * shape-checked strings by the time this runs — the `where` below can only ever
+   * be an equality match on one email, never an operator object assembled from a
+   * request body. `getEventById()` above is what bounds this to the caller's own
+   * events.
+   *
+   * The failure is a fixed sentence with no submitted value in it. Echoing
+   * `attendeeEmail` made this response a reflection point for whatever a caller
+   * typed, and the value it reflected was on its way into a database query.
+   */
   async updateAttendeeRSVP(
     userId: string,
     eventId: string,
@@ -320,8 +335,10 @@ export class EventsService {
     });
 
     if (!attendee) {
-      throw new NotFoundException(
-        `Attendee with email '${attendeeEmail}' not found for event.`,
+      throw notFound(
+        ErrorCode.NOT_FOUND,
+        "No attendee of this event matches the submitted email.",
+        { field: "email" },
       );
     }
 

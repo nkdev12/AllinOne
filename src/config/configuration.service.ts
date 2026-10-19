@@ -1,6 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import * as crypto from "node:crypto";
+import * as Joi from "joi";
 
 /**
  * Shorter ADMIN_SECRET values are treated as unset. 32 matches the
@@ -54,6 +55,97 @@ export const ACCEPTED_NODE_ENV: string[] = [
 ];
 
 /**
+ * The environment keys both boot processes must declare identically, in one place,
+ * for the same reason `ACCEPTED_NODE_ENV` above exists: `ConfigurationService` reads
+ * each of them as a single setting across both processes, and the two
+ * `ConfigModule.forRoot` schemas — `src/app/app.module.ts` and
+ * `src/worker.module.ts` — are deliberately duplicated everywhere else.
+ *
+ * That duplication is where the P1 defect lived. `APP_ENV` carried
+ * `.default("development")` in *both* copies, and `@nestjs/config` feeds the
+ * validated object to `ConfigService` ahead of `process.env` *and* writes every key
+ * it contains back into `process.env` (`ConfigModule.assignVariablesToProcess`), so
+ * an operator who never named an environment arrived at `declaredAppEnv` as the
+ * string `development`. `isLocalDevelopment` turned true,
+ * `validateProductionSecrets()` and the `REDIS_URL` requirement were skipped, `isDevelopment`
+ * turned true and `auth.service.ts` started printing live email-verification OTPs
+ * to stdout — all from a value nobody wrote. Development has to be opted into, so
+ * no key in this list that selects a hardened path may carry a default: absence is
+ * the strict reading, and that is now stated once rather than twice.
+ *
+ * Only the keys whose *shape* decides a gate belong here. `APP_URL`, `APP_PORT`,
+ * logging, CORS, rate limits and the rest stay in whichever process declares them,
+ * because a worker that serves no HTTP has no business requiring `APP_URL`.
+ */
+export const ENV_GATING_SCHEMA_KEYS = {
+  // App — `.valid(...)` refuses `prod`, so a typo cannot reach the development
+  // branch either; the strict path is what an unnamed environment gets.
+  APP_ENV: Joi.string().valid("development", "staging", "production"),
+  // The only default in this list, and the one that was measured rather than
+  // assumed: `ConfigModule` assigns only the keys *absent* from `process.env`, and
+  // Joi applies a default only to an `undefined` input, so a real
+  // `NODE_ENV=test` from jest — or `production` from a container — passes through
+  // untouched. Unlike `APP_ENV` it can never grant the leniency
+  // `isTestEnvironment` reads, because the value it invents is `development`.
+  NODE_ENV: Joi.string()
+    .valid(...ACCEPTED_NODE_ENV)
+    .default("development"),
+  DATABASE_URL: Joi.string().required(),
+
+  // No `.default()` on purpose, and `src/worker.module.ts` used to be the only copy
+  // that said so. `ConfigurationService.declaredRedisUrl` is the "was `REDIS_URL`
+  // actually declared?" test behind refusing an unnamed Redis outside development,
+  // and a default here would answer that question with the default and switch the
+  // check off forever. The `redis://localhost:6379` fallback belongs in the
+  // `redisUrl` getter, which only consumers read.
+  REDIS_URL: Joi.string().allow("").optional(),
+
+  // The secrets `validateConfiguration()` requires in every environment, and the
+  // ones `validateProductionSecrets()` then holds to `secretDefect` outside
+  // development. `ADMIN_SECRET` and `JWT_MFA_SECRET` are gated a step earlier —
+  // `validateGuardedCredentials()` reads them in development too, because a guarded
+  // route is the only thing that ever consumes them. Presence is all a schema can
+  // test, which is precisely why presence-only was never enough for these.
+  JWT_ACCESS_SECRET: Joi.string().required(),
+  JWT_REFRESH_SECRET: Joi.string().required(),
+  // Optional: unset means MFA challenges are keyed from the already-gated
+  // `JWT_ACCESS_SECRET`, which is a supported configuration and not a hole. A value
+  // an operator *did* write is gated like the pair above, in every environment —
+  // `validateGuardedCredentials()` runs before the development branch.
+  JWT_MFA_SECRET: Joi.string().allow("").optional(),
+  // Optional, no default: unset or blank closes the `x-admin-secret` admit path, so
+  // a deployment that never provisions one simply has no admin API. A written value
+  // is gated like the JWT pair, in every environment including development, because
+  // `MetricsScrapeGuard` admits a `GET /metrics` on this header alone with no user
+  // identity behind it.
+  ADMIN_SECRET: Joi.string().allow("").optional(),
+  // Required in both processes (and in `requiredVars`), but `.env.example` ships
+  // `minioadmin` in both slots — the default credential a stock MinIO answers with,
+  // refused outside development.
+  OBJECT_STORAGE_ENDPOINT: Joi.string().required(),
+  OBJECT_STORAGE_BUCKET: Joi.string().required(),
+  OBJECT_STORAGE_ACCESS_KEY: Joi.string().required(),
+  OBJECT_STORAGE_SECRET_KEY: Joi.string().required(),
+  // Optional in both: `MailService.isConfigured` treats a blank one as "mail is off"
+  // and warns rather than failing, so only a written value is gated — and as a
+  // passphrase, not as key material, so a sixteen-character Gmail app password keeps
+  // working.
+  SMTP_PASSWORD: Joi.string().allow("").optional(),
+  // The floor is this file's own constant, so the schema and `secretDefect` cannot
+  // disagree about what "too short" means — the disagreement `SECRET_MIN_LENGTH`
+  // exists to prevent.
+  ENCRYPTION_KEY: Joi.string().min(SECRET_MIN_LENGTH).required(),
+  // The pepper key ring. `ENCRYPTION_KEY_PREVIOUS` exists only inside a rotation
+  // window, so blank has to validate as "no previous key".
+  ENCRYPTION_KEY_ID: Joi.string().allow("").optional(),
+  ENCRYPTION_KEY_PREVIOUS: Joi.string()
+    .min(SECRET_MIN_LENGTH)
+    .allow("")
+    .optional(),
+  ENCRYPTION_KEY_PREVIOUS_ID: Joi.string().allow("").optional(),
+} as const;
+
+/**
  * Secret values this repository *used* to ship as the `.env.example` template for
  * `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` and `ENCRYPTION_KEY`. The template now
  * carries the anchored `REPLACE_WITH__…__DO_NOT_SHIP` sentinel (`TEMPLATE_SENTINEL_*`
@@ -79,6 +171,34 @@ export const SHIPPED_TEMPLATE_SECRETS = [
   "your-super-secret-refresh-token-key-change-in-production",
   "your-super-secret-encryption-key-min-32-chars-change-prod",
 ] as const;
+
+/**
+ * The credential pair a stock MinIO deployment answers with, and the value
+ * `.env.example` ships for *both* `OBJECT_STORAGE_ACCESS_KEY` and
+ * `OBJECT_STORAGE_SECRET_KEY`. It gets its own list rather than joining
+ * `SHIPPED_TEMPLATE_SECRETS` because it is not a placeholder an operator is told
+ * to overwrite — it is a working default that keeps shipping inside object
+ * storage itself, which is why an attachment bucket on `minioadmin`/`minioadmin`
+ * is reachable by anyone who has read a README.
+ *
+ * Same rule as the template list: whole values, case-folded, never substrings.
+ */
+export const SHIPPED_DEFAULT_CREDENTIALS = ["minioadmin"] as const;
+
+const DEFAULT_CREDENTIALS_CASE_FOLDED = new Set<string>(
+  SHIPPED_DEFAULT_CREDENTIALS.map((value) => value.trim().toLowerCase()),
+);
+
+/**
+ * Whether a value is one of the working defaults an out-of-the-box stack answers
+ * with — whole value, ignoring case and padding.
+ */
+export function isShippedDefaultCredential(value: string): boolean {
+  const trimmed = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  return DEFAULT_CREDENTIALS_CASE_FOLDED.has(trimmed);
+}
 
 /**
  * Prefix and suffix of the "generate a value here" sentinel an operator is meant to
@@ -161,26 +281,97 @@ export function secretFingerprint(secret: string): string {
 }
 
 /**
- * Why a value cannot serve as a deployed key — too short to hold 32 bytes, still
- * the checked-in template, or too narrow an alphabet to be worth 32 bytes — or
- * `undefined` when it can. Pure so the gate and its tests read one rule.
+ * Floor for a *passphrase* — a credential a person or a provider issues as a
+ * password rather than as key material.
+ *
+ * Deliberately far below `SECRET_MIN_ENTROPY_BITS`, and the measurement that
+ * placed it is a Gmail app password: sixteen lowercase characters, eight distinct
+ * symbols over sixteen positions, about 48 bits. Holding `SMTP_PASSWORD` to the
+ * 128-bit key-material floor would refuse a mailbox that works, and protect
+ * nothing, because an SMTP password is guessed live against a server that can rate
+ * limit and lock the account, while `ENCRYPTION_KEY` is cracked offline out of a
+ * table dump nobody can rate limit. What this floor has to catch is the dictionary
+ * case — `password` (20 bits), `changeme` (22), `12345678` (0), `minioadmin` (20)
+ * — and every one of those lands under it.
  */
-export function secretDefect(value: string): string | undefined {
+export const PASSPHRASE_MIN_LENGTH = 8;
+export const PASSPHRASE_MIN_ENTROPY_BITS = 40;
+
+/**
+ * The three profiles `validateProductionSecrets()` holds a value against, one per
+ * kind of thing the value is. They differ only in how far the length and entropy
+ * floors sit from the shared denylist, which every profile applies.
+ */
+export type CredentialProfile = {
+  readonly minLength: number;
+  readonly minEntropyBits: number;
+};
+
+/** Key material: the 32-character / 128-bit rule the JWT pair has always had. */
+export const KEY_MATERIAL: CredentialProfile = {
+  minLength: SECRET_MIN_LENGTH,
+  minEntropyBits: SECRET_MIN_ENTROPY_BITS,
+};
+
+/** A password issued by a provider, gated as a password — see above. */
+export const PASSPHRASE: CredentialProfile = {
+  minLength: PASSPHRASE_MIN_LENGTH,
+  minEntropyBits: PASSPHRASE_MIN_ENTROPY_BITS,
+};
+
+/**
+ * An access key ID *names* a credential; it is not the credential. AWS's own are
+ * twenty characters and land around 78 bits, so a length or entropy floor here
+ * would refuse a correct deployment to protect an identifier that is sent in the
+ * clear alongside a signature. The only honest rule for it is the denylist: not
+ * the shipped default, not the unfilled sentinel. The secret half of the pair is
+ * what carries the weight and is gated as key material.
+ */
+export const CREDENTIAL_IDENTIFIER: CredentialProfile = {
+  minLength: 1,
+  minEntropyBits: 0,
+};
+
+/**
+ * Why a value cannot serve as a deployed credential — too short for what it is,
+ * still the checked-in template or stock default, or too narrow an alphabet to be
+ * worth its length — or `undefined` when it can. Pure so the gate and its tests
+ * read one rule, parameterised so the rule is the same one for every secret rather
+ * than a second copy that can drift.
+ *
+ * Never names the value: the message is logged and an operator reads it in a
+ * terminal.
+ */
+export function credentialDefect(
+  value: string,
+  profile: CredentialProfile,
+): string | undefined {
   const trimmed = String(value ?? "").trim();
-  if (trimmed.length < SECRET_MIN_LENGTH) {
-    return `must be at least ${SECRET_MIN_LENGTH} characters and is ${trimmed.length}`;
+  if (trimmed.length < profile.minLength) {
+    return `must be at least ${profile.minLength} characters and is ${trimmed.length}`;
   }
   if (isShippedTemplateSecret(trimmed)) {
     return "is still the value .env.example ships as a template";
   }
+  if (isShippedDefaultCredential(trimmed)) {
+    return "is the default credential a stock MinIO deployment answers with";
+  }
   const entropyBits = estimateSecretEntropyBits(trimmed);
-  if (entropyBits < SECRET_MIN_ENTROPY_BITS) {
+  if (entropyBits < profile.minEntropyBits) {
     return (
-      `is built from too few distinct characters to be a generated key ` +
-      `(about ${entropyBits} bits, floor ${SECRET_MIN_ENTROPY_BITS})`
+      `is built from too few distinct characters to be a generated credential ` +
+      `(about ${entropyBits} bits, floor ${profile.minEntropyBits})`
     );
   }
   return undefined;
+}
+
+/**
+ * The key-material profile of `credentialDefect`, kept under its own name because
+ * that is what every existing reader of this rule calls it.
+ */
+export function secretDefect(value: string): string | undefined {
+  return credentialDefect(value, KEY_MATERIAL);
 }
 
 /**
@@ -294,6 +485,15 @@ export class ConfigurationService {
       throw new Error(message);
     }
 
+    // `ADMIN_SECRET` and `JWT_MFA_SECRET` are checked *here*, outside the
+    // development-and-test exemption below, because they have no development use
+    // case to protect: the first is only ever presented to `MetricsScrapeGuard`'s
+    // machine path and to the operator-escalation branch of `AdminGuard`, the
+    // second only keys MFA challenges, and neither guard gets less anonymous for
+    // the process running it being a laptop. Omitting either stays working, which
+    // is what a fresh clone and a deployment that provisioned no admin path do.
+    this.validateGuardedCredentials();
+
     // `ENCRYPTION_KEY` is also the pepper `VaultSettingsService` HMACs every
     // stored master-key verifier with, so a template value here is not a weak
     // default — it is the key that makes a single database read enough to crack
@@ -331,6 +531,74 @@ export class ConfigurationService {
   }
 
   /**
+   * Refuse a guessable `ADMIN_SECRET` or `JWT_MFA_SECRET` wherever the value is
+   * written down, development included.
+   *
+   * The rest of the credential rules sit behind the development-and-test exemption
+   * because what they protect is a *deployed* secret: a laptop with the template
+   * JWT pair and a throwaway mongod is a supported state. These two are not that.
+   * A weak `ADMIN_SECRET` is a credential `MetricsScrapeGuard` compares before it
+   * answers an anonymous `GET /metrics` and `AdminGuard` compares before it
+   * escalates a caller to the operator branch — thirty-two copies of one character
+   * (`ADMIN_SECRET_MIN_LENGTH` satisfied, `estimateSecretEntropyBits` answering 0)
+   * is guessable in either place, and `development` does not make the machine
+   * caller less real. A weak `JWT_MFA_SECRET` is an MFA challenge an attacker can
+   * forge offline. Nothing about running locally changes that.
+   *
+   * Absent stays fine, and stays the documented way to have neither feature: unset
+   * or blank closes the admin header path, and unset MFA secret falls back to the
+   * HMAC of `JWT_ACCESS_SECRET` that `jwtMfaSecret` derives.
+   *
+   * A test run is exempt, on the same signal the rest of the gate uses: the suites
+   * build this service from credential fixtures and hand the guard a
+   * seven-character secret precisely to prove the guard rejects it
+   * (`src/admin/guards/admin.guard.spec.ts`). `NODE_ENV=test` is jest's own value
+   * and no deployment reaches it by omission; `APP_ENV` is not on the accepted
+   * list at all, so a deployment cannot spell itself a test run either.
+   */
+  private validateGuardedCredentials(): void {
+    // Not the strict branch's exemption-by-accident: this is the test runner's own
+    // value, and it is what lets the guard suites hand this service a
+    // seven-character secret to prove the guard rejects it.
+    if (this.isTestEnvironment) {
+      return;
+    }
+
+    // `declaredValue`, not the getters: `adminSecret` hides a short value as
+    // `undefined` and `jwtMfaSecret` substitutes a derived one, so neither answers
+    // the only question a boot gate has, which is "did an operator write this?".
+    const guarded: ReadonlyArray<{
+      variable: string;
+      value: string | undefined;
+      protects: string;
+    }> = [
+      {
+        variable: "ADMIN_SECRET",
+        value: this.declaredValue("ADMIN_SECRET"),
+        protects:
+          "the whole credential in front of an identity-free GET /metrics and of AdminGuard's operator branch",
+      },
+      {
+        variable: "JWT_MFA_SECRET",
+        value: this.declaredValue("JWT_MFA_SECRET"),
+        protects: "what an MFA challenge is signed with",
+      },
+    ];
+
+    for (const { variable, value, protects } of guarded) {
+      if (value === undefined) {
+        continue;
+      }
+      const defect = credentialDefect(value, KEY_MATERIAL);
+      if (defect) {
+        throw new Error(
+          `${variable} ${defect}. It is ${protects}, so a guessable one is not a development convenience. Generate it with \`openssl rand -base64 48\`, or leave the variable unset to switch that feature off.`,
+        );
+      }
+    }
+  }
+
+  /**
    * Refuse key material that is still the checked-in template, and refuse the
    * transports that were only ever closed by an operator's own hand.
    *
@@ -361,6 +629,53 @@ export class ConfigurationService {
       if (defect) {
         throw new Error(
           `${variable} ${defect}. Generate one with \`openssl rand -base64 48\` and keep it out of the repository.`,
+        );
+      }
+    }
+
+    // The credentials this gate did not read until now, each held to the profile
+    // of the kind of value it is. `ADMIN_SECRET` and `JWT_MFA_SECRET` are *not* in
+    // this list: `validateGuardedCredentials()` already refused them, in this
+    // environment and in development, before this branch was reached, and a second
+    // copy of a rule is only a second thing to keep in step. Three properties of
+    // what remains are deliberate:
+    //
+    // * An *absent* one is a feature switched off and must never abort the boot —
+    //   `SMTP_PASSWORD` unset leaves `MailService.isConfigured` false and mail
+    //   simply undelivered. A value that *is* present is held to the full rule.
+    // * `OBJECT_STORAGE_ACCESS_KEY` and `OBJECT_STORAGE_SECRET_KEY` are
+    //   `.required()` in both boot schemas and listed in `requiredVars` above, so
+    //   their presence is already enforced in every environment and this adds only
+    //   the quality of the present value. `.env.example` ships `minioadmin` in
+    //   both slots, which is the value this refuses.
+    // * The values are read through `declaredValue`, not the public getters: a
+    //   getter answers "what does a consumer use" (`smtpPassword` hands back `""`
+    //   for unset and for blank alike) and this needs "what did an operator write",
+    //   which is the only question a boot gate can act on.
+    const gatedCredentials: ReadonlyArray<
+      readonly [string, string | undefined, CredentialProfile]
+    > = [
+      [
+        "OBJECT_STORAGE_ACCESS_KEY",
+        this.declaredValue("OBJECT_STORAGE_ACCESS_KEY"),
+        CREDENTIAL_IDENTIFIER,
+      ],
+      [
+        "OBJECT_STORAGE_SECRET_KEY",
+        this.declaredValue("OBJECT_STORAGE_SECRET_KEY"),
+        KEY_MATERIAL,
+      ],
+      ["SMTP_PASSWORD", this.declaredValue("SMTP_PASSWORD"), PASSPHRASE],
+    ];
+
+    for (const [variable, value, profile] of gatedCredentials) {
+      if (value === undefined) {
+        continue;
+      }
+      const defect = credentialDefect(value, profile);
+      if (defect) {
+        throw new Error(
+          `${variable} ${defect}. Generate one with \`openssl rand -base64 48\`, or leave the variable unset to switch that feature off.`,
         );
       }
     }
@@ -445,6 +760,15 @@ export class ConfigurationService {
    * down. The values this returns are compared lowercased and trimmed, so
    * `Production` and `production` are the same environment here as they are in
    * the Joi schema.
+   *
+   * Both boot schemas used to carry `Joi.string().default("development")` for this
+   * key, which defeated the whole reading: `@nestjs/config` writes every schema
+   * default into the validated config *and* into `process.env`, so an unset
+   * `APP_ENV` arrived here as the string `development` and was indistinguishable
+   * from an operator who had opted in. The default is gone from
+   * `src/app/app.module.ts` and `src/worker.module.ts` for exactly that reason, the
+   * same reason `REDIS_URL` never had one — absence now reaches this getter as
+   * `undefined` and therefore as the strict branch.
    */
   private get declaredAppEnv(): string | undefined {
     const raw = this.configService.get<string>("APP_ENV");
@@ -524,6 +848,24 @@ export class ConfigurationService {
   // ========================================================================
 
   /**
+   * One variable exactly as the operator wrote it, or `undefined` when they wrote
+   * nothing or nothing but spaces.
+   *
+   * The gate needs "was this declared?" and every other reader of the same key
+   * answers a different question: `adminSecret` hides a value under its length
+   * floor, `jwtMfaSecret` substitutes a derived HMAC, `smtpPassword` hands back `""`
+   * for both spellings. Reading through those would make an opt-out and a
+   * misconfigured opt-in look identical, which is the distinction the boot gate is
+   * for. Trimming is not a judgement call here either — `ADMIN_SECRET= ` is an
+   * operator emptying a field, the same reading `lifetimeOr` gives the lifetimes.
+   */
+  private declaredValue(variable: string): string | undefined {
+    const raw = this.configService.get<string>(variable);
+    const trimmed = typeof raw === "string" ? raw.trim() : "";
+    return trimmed || undefined;
+  }
+
+  /**
    * `REDIS_URL` exactly as written, or `undefined` when nobody set it.
    *
    * `redisUrl` below cannot answer the question because it substitutes a local
@@ -531,9 +873,7 @@ export class ConfigurationService {
    * container.
    */
   private get declaredRedisUrl(): string | undefined {
-    const raw = this.configService.get<string>("REDIS_URL");
-    const trimmed = typeof raw === "string" ? raw.trim() : "";
-    return trimmed || undefined;
+    return this.declaredValue("REDIS_URL");
   }
 
   get redisUrl(): string {

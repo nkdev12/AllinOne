@@ -196,6 +196,48 @@ const STOP_WORDS = new Set([
   "yourselves",
 ]);
 
+/**
+ * The whole task as one sync document, keyed exactly like the REST path writes
+ * it. `TASK_FIELDS` in the sync validator treats every key as optional, so a
+ * partial payload passes validation and still lands wrong: a device applies an
+ * absent key as nothing, and this loop's rows would arrive everywhere as a task
+ * with no status, no dates and no tree position. Built from the row Prisma
+ * returned, not from the request, so defaults the schema filled in (`status`,
+ * `sortOrder`, `priority`) are echoed rather than invented.
+ *
+ * Duplicated from `taskChangePayload` in `src/tasks/services/tasks.service.ts`
+ * on purpose: that builder is module-private, and the task module is not this
+ * one's to change. If it ever gains a key, both lists need it.
+ */
+function taskChangeDocument(
+  task: any,
+  extractedFromNoteId: string,
+): Record<string, any> {
+  const asIso = (value: unknown): string | null =>
+    value instanceof Date
+      ? value.toISOString()
+      : ((value ?? null) as string | null);
+
+  return {
+    title: task.title ?? "",
+    description: task.description ?? null,
+    priority: task.priority ?? "P4_LOW",
+    status: task.status ?? "TODO",
+    dueDate: asIso(task.dueDate),
+    dueTime: task.dueTime ?? null,
+    recurrenceRule: task.recurrenceRule ?? null,
+    completedAt: asIso(task.completedAt),
+    sectionId: task.sectionId ?? null,
+    parentId: task.parentId ?? null,
+    projectId: task.projectId ?? null,
+    sortOrder: task.sortOrder ?? 0,
+    timeSpentSeconds: task.timeSpentSeconds ?? 0,
+    createdAt: asIso(task.createdAt),
+    version: task.version ?? 1,
+    extractedFromNoteId,
+  };
+}
+
 @Injectable()
 export class AiService {
   constructor(
@@ -436,11 +478,7 @@ export class AiService {
           entityId: task.id,
           operation: ChangeOperation.CREATE,
           version: 1,
-          payload: {
-            title: task.title,
-            priority: task.priority,
-            extractedFromNoteId: noteId,
-          },
+          payload: taskChangeDocument(task, noteId),
         });
 
         // Cursors only rise inside one transaction, so the last row written is

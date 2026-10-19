@@ -173,9 +173,11 @@ describe("Worker bootstrap (entry point)", () => {
   it("bootstraps WorkerModule headlessly and never starts an HTTP server", async () => {
     const queues = createFakeQueues();
     const context = {
-      get: jest.fn((token: string) =>
-        token === getQueueToken("maintenance") ? queues.maintenance : undefined,
-      ),
+      get: jest.fn((token: string) => {
+        if (token === getQueueToken("maintenance")) return queues.maintenance;
+        if (token === getQueueToken("finance")) return queues.finance;
+        return undefined;
+      }),
       close: jest.fn().mockResolvedValue(undefined),
       listen: jest.fn(),
     };
@@ -205,6 +207,22 @@ describe("Worker bootstrap (entry point)", () => {
       "cleanup-expired",
       {},
       expect.objectContaining({ repeat: { every: 60 * 60 * 1000 } }),
+    );
+
+    expect(queues.finance.add).toHaveBeenCalledWith(
+      "process-recurring",
+      {},
+      expect.objectContaining({ attempts: 3 }),
+    );
+    expect(queues.finance.add).toHaveBeenCalledWith(
+      "process-recurring",
+      {},
+      expect.objectContaining({ repeat: { every: 24 * 60 * 60 * 1000 } }),
+    );
+    expect(queues.finance.add).toHaveBeenCalledWith(
+      "check-budget-alerts",
+      {},
+      expect.objectContaining({ repeat: { every: 6 * 60 * 60 * 1000 } }),
     );
 
     // Graceful shutdown is wired to the process signals the containers send.

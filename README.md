@@ -3,7 +3,7 @@
 > Production-grade backend for Allinone — a cross-platform personal information management system with zero mandatory paid dependencies.
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org)
+[![Node.js](https://img.shields.io/badge/node-22.x-brightgreen.svg)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/typescript-%3E%3D5.3.0-blue.svg)](https://www.typescriptlang.org)
 
 ## Overview
@@ -33,26 +33,34 @@ Allinone is a **100% free, self-hosted** backend that combines:
 
 ### Technology Stack
 
-| Component | Technology | Self-Hosted |
+| Component | Technology | Where it runs |
 |-----------|-----------|------------|
-| **Backend** | Node.js + NestJS + TypeScript | ✅ |
-| **Database** | MongoDB 7.0 | ✅ |
-| **Cache & Queues** | Redis + BullMQ | ✅ |
-| **Object Storage** | MinIO (S3-compatible) | ✅ |
-| **Email** | SMTP (Gmail supported) | ✅ |
-| **Reverse Proxy** | Caddy with auto HTTPS | ✅ |
-| **Monitoring** | Prometheus + Grafana | ✅ |
-| **Logging** | Structured JSON logs | ✅ |
+| **Backend** | Node.js 22 + NestJS 11 + TypeScript | Railway service #1 (`npm run start:prod`) |
+| **Queue worker** | Same image, `npm run start:worker` | Railway service #2 (`railway.worker.json`) |
+| **Database** | MongoDB (Prisma 5 `mongodb` connector) | MongoDB Atlas (managed replica set) |
+| **Cache & Queues** | Redis + Bull (via `@nestjs/bull`) | Managed Redis (Upstash/Railway) |
+| **Object Storage** | MinIO (S3-compatible) | Self-hosted only; unset in the deployed stack |
+| **Email** | SMTP via nodemailer 10 | Any provider; sent from the worker |
+| **Reverse Proxy / TLS** | Railway edge (managed, auto HTTPS) | Replaces the deleted Caddy config |
+| **Monitoring** | `GET /metrics` (Prometheus format) | Exposed, **not scraped** — see docs/DEPLOYMENT.md Step 10 |
+| **Logging** | Structured JSON to stdout | Railway log drains / `railway logs` |
+| **Web client** | Flutter web build | Cloudflare Workers |
 
-**No required paid services** — Everything runs locally with Docker.
+**No required paid services** — the free tiers of Atlas, Redis and Railway are enough for a
+personal deployment. "Self-hosted" still works: `docker-compose.dev.yml` gives you local
+MongoDB + Redis (+ optionally MinIO, Prometheus, Grafana) and you point `DATABASE_URL` /
+`REDIS_URL` at it.
 
 ## Quick Start
 
 ### Prerequisites
 
-- Docker & Docker Compose
+- Node.js 22 (`.nvmrc` and `engines.node` both pin it; the Railway build reads the same pins —
+  Nixpacks' own default is Node **18**, so the pin is load-bearing, not decorative)
+- npm 10+
 - Git
-- Node.js 20+ (for local development)
+- A reachable MongoDB **replica set** (Atlas, or local `docker-compose.dev.yml`) and Redis
+- Docker is optional: only needed for the local stack in step 3
 - ~4GB RAM, 10GB disk space
 
 ### 1. Clone and Setup
@@ -104,22 +112,32 @@ The trap is in what you edit afterwards, not in the copy:
   (`src/common/throttler/redis-throttler.storage.ts:116-132`). Start the services in step 3
   before you expect a limit that survives a restart or a second replica.
 
-### 3. Start Services with Docker
+### 3. Start the Dev Dependencies with Docker
 
 ```bash
-# Development environment with all services
-docker compose -f docker-compose.dev.yml up -d
+# MongoDB + Redis (the two the API refuses to boot without)
+docker compose -f docker-compose.dev.yml up -d mongodb redis
+
+# optional metrics backends, dev only
+docker compose -f docker-compose.dev.yml up -d prometheus grafana
 ```
 
-Services running:
+This file starts **dependencies only**. The API and the worker are `npm` processes on your
+host, started in steps 4-5 — compose builds neither of them any more.
 
-- **API** → http://localhost:3000
-- **API Docs** → http://localhost:3000/api
-- **MongoDB** → localhost:27017
+What ends up listening:
+
+- **MongoDB** → localhost:27017 (single-node replica set `rs0`, so transactions work)
 - **Redis** → localhost:6379
-- **MinIO** → http://localhost:9000 (username/password: `minioadmin`)
-- **Prometheus** → http://localhost:9090
+- **MinIO** → http://localhost:9000 (username/password: `minioadmin`) — start it explicitly
+  with `docker compose -f docker-compose.dev.yml up -d minio`
+- **Mailpit** → http://localhost:8025 (catch-all SMTP on 1025) — `up -d mailpit`
+- **Prometheus** → http://localhost:9090 (dev only; scrapes the host API through
+  `host.docker.internal:3000`)
 - **Grafana** → http://localhost:3001 (admin/admin)
+
+Docker is not installed on every dev machine, and it is not required: point `DATABASE_URL`
+at an Atlas free cluster and `REDIS_URL` at a managed Redis and skip this step entirely.
 
 ### 4. Install Dependencies & Run Migrations
 
@@ -172,19 +190,25 @@ allinone-backend/
 │   └── seed.ts              # Test data seeding
 │
 ├── infrastructure/
-│   ├── prometheus/          # Metrics configuration
-│   ├── grafana/             # Dashboard provisioning
-│   └── caddy/               # Reverse proxy configuration
+│   ├── prometheus/          # DEV-ONLY scrape config (prometheus.dev.yml)
+│   └── grafana/             # Dashboard provisioning, mounted by the dev stack only
 │
 ├── test/                    # Integration & E2E tests
-├── scripts/                 # Utility scripts
+├── scripts/                 # Backup/restore + worker preflight (see below)
 ├── docs/                    # Documentation
-├── docker-compose.dev.yml   # Development environment ✅
-├── docker-compose.prod.yml  # Production environment ✅
-├── Dockerfile               # API container ✅
-├── Dockerfile.worker        # Worker container ✅
+├── docker-compose.dev.yml   # Local dependencies ✅ (never the deployment)
+├── .dockerignore            # Scope of `railway up` / any container build
+├── .nvmrc                   # Node 22 — read by Nixpacks and by CI
+├── railway.json             # Service #1: the API
+├── railway.worker.json      # Service #2: the queue worker (template; Railway does
+│                            #   not auto-read this second filename)
+├── Procfile                 # web:/worker: record of the same two commands
 └── README.md               # This file
 ```
+
+There is **no** `Dockerfile`, `Dockerfile.worker`, `docker-compose.prod.yml`,
+`infrastructure/caddy/Caddyfile` or `prometheus.prod.yml` — commit `1c1cc7d` deleted them when
+the deploy moved to Railway. `docs/DEPLOYMENT.md` describes what replaced each of them.
 
 ✅ = Implemented in Stage 1
 
@@ -209,11 +233,15 @@ straight from `process.env` (`src/common/guards/custom-throttler.guard.ts:12-18`
 nothing validates it and `.env.example` does not mention it — the documented switch is
 `RATE_LIMIT_ENABLED=false` (`.env.example:188`).
 
-Conversely, the names `docker-compose.prod.yml` interpolates (`MONGO_KEYFILE`,
-`MONGO_ROOT_*`, `MONGO_APP_*`, `MINIO_ROOT_*`, `REDIS_PASSWORD`, `GRAFANA_ADMIN_*`,
-`DOMAIN`, `DB_NAME`, `APP_URL`, the JWT/encryption secrets) are deploy inputs, not
-`ConfigurationService` getters; they are absent from `.env.example` and step through the
-compose `:?` gate instead. [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) Step 2 lists them.
+Conversely, the names `scripts/backup-database.sh` and `scripts/restore-database.sh` read
+(`DATABASE_URL`/`MONGO_URI`, `DB_NAME`, `BACKUP_DIR`, `BACKUP_ENV_FILE`, `BACKUP_PASSPHRASE`,
+`RETENTION_DAYS`, and the opt-in flags `OPLOG_WHOLE_SERVER_BACKUP` /
+`OPLOG_WHOLE_SERVER_RESTORE`) are **operator inputs**, not `ConfigurationService` getters, so
+most of them are absent from `.env.example`. The documented ones are `DB_NAME` and
+`BACKUP_ENV_FILE`. `docker-compose.prod.yml`, which used to interpolate a dozen `${VAR:?…}`
+deploy secrets, no longer exists: that gate is now Railway's service variables plus the
+boot-time refusals in `src/config/configuration.service.ts`.
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) Step 2 lists what a deployed service must set.
 
 **Critical variables:**
 - `DATABASE_URL` — MongoDB connection; a deployed boot needs `?replicaSet=rs0`, because the driver will not use transactions without the set name
@@ -248,121 +276,155 @@ npm run test:watch           # Watch mode
 npm run test:cov             # Coverage report
 npm run test:e2e             # End-to-end tests
 
-# Docker
-docker compose -f docker-compose.dev.yml up -d       # Start dev stack
-docker compose -f docker-compose.dev.yml down        # Stop dev stack
-docker compose -f docker-compose.dev.yml logs -f api # View API logs
+# The two deployed processes, run locally
+npm run build                 # tsc -> dist/main.js + dist/worker.js
+npm run start:prod            # API
+npm run preflight:worker      # the Redis/dist gate start:worker runs first
+npm run start:worker          # preflight && worker
 
-# Build & Deploy
-npm run build                 # Production build
-docker build -t allinone-api:latest .    # Build API image
+# Docker (local dependencies only — never the deployment)
+docker compose -f docker-compose.dev.yml up -d mongodb redis
+docker compose -f docker-compose.dev.yml down
+docker compose -f docker-compose.dev.yml logs -f mongodb
+
+# Audits
+npm run audit                 # everything, high and above
+npm run audit:prod            # --omit=dev: what actually ships. CI blocks on this.
 ```
+
+`docker build` is gone with the Dockerfiles; Railway/Nixpacks builds from the repository and
+`.dockerignore` scopes what a `railway up` CLI upload includes.
 
 ## Production Deployment
 
 ### Architecture
 
 ```
-                    Internet
-                       │
-                       ▼
-                 Caddy/Nginx (HTTPS)
-                       │
-          ┌────────────┼────────────┐
-          ▼            ▼            ▼
-      API Instances  Workers   Monitoring
-          │            │            │
-          └──────────┬──┴────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │ MongoDB (Primary DB)    │
-        └─────────────────────────┘
-                     │
-        ┌─────────────┴──────────────┐
-        ▼                           ▼
-      Redis               MinIO (S3 Storage)
-      Queues              Attachments/Exports
+                        Internet
+                           |
+        +------------------+------------------+
+        v                                     v
+ Cloudflare Workers                     Railway edge
+ Flutter web client                     TLS + the ONE
+                                        public domain
+                                            |
+                                            v
+                            Railway service #1  API
+                            npm run start:prod
+                            /health  /metrics  /api
+                                  |          |
+              +-------------------+          |
+              v                              |
+   Railway service #2   worker ---------------+
+   npm run start:worker
+   Bull: mail, notification, export,
+   maintenance (hourly cleanup-expired
+   prunes plaintext Change.payload)
+              |
+              +--------------> Managed Redis
+                               (Bull queues, rate-limit counters)
+                                            |
+                                            v
+                                   MongoDB Atlas
+                                   managed replica set
 ```
 
-### Deploy with Docker Compose
+Both services build this same repository with the **same** `DATABASE_URL` and `REDIS_URL`, and
+**only the API is given a domain** — the worker binds no port, so attaching a public domain to
+it would 503 and, worse, publish a second entry point to the same database. There is no Caddy,
+no Nginx and no in-container supervisor: Railway starts exactly one process per service and
+restarts it on non-zero exit (`restartPolicyType: ON_FAILURE` in `railway.json` and
+`railway.worker.json`).
+
+
+### Deploy to Railway
+
+There is no `docker-compose.prod.yml`, no `Dockerfile` and no image registry step. Railway
+builds from the repository with Nixpacks and reads exactly one config file, `railway.json`,
+which starts the API:
 
 ```bash
-# Copy production compose file
-cp docker-compose.prod.yml docker-compose.yml
+npm i -g @railway/cli && railway login
+railway init                     # or railway link an existing project
+railway up                       # builds + deploys service #1 (the API)
 
-# Create .env.prod with your configuration
-cp .env.example .env.prod
+railway variables set DATABASE_URL=... REDIS_URL=...        # never printed back here
+railway variables set JWT_ACCESS_SECRET=... JWT_REFRESH_SECRET=... ENCRYPTION_KEY=...
+railway variables set APP_ENV=production APP_URL=https://<api-domain>
 
-# Edit with your values
-nano .env.prod
-
-# Compose interpolates only from its own environment and from a file named `.env`
-# next to the compose file — `.env.prod` is nothing special to it, so either name the
-# file `.env`, use `--env-file`, or export the values first.
-# See docs/DEPLOYMENT.md Step 6 for the exact commands.
-
-# Variables this stack will not render without (`${VAR:?…}` in
-# docker-compose.prod.yml — the deploy fails at `docker compose config` rather than
-# starting a service with an empty credential):
-# APP_URL=<the public origin the app issues cookies and CORS for>
-# DOMAIN=<the hostname Caddy terminates TLS for>
-# JWT_ACCESS_SECRET=<generate: openssl rand -base64 48>
-# JWT_REFRESH_SECRET=<generate separately; must differ from the access secret>
-# ENCRYPTION_KEY=<generate: openssl rand -base64 48 — also the vault verifier pepper>
-# MONGO_KEYFILE=<host path to the replica-set keyFile>
-# MONGO_ROOT_USERNAME / MONGO_ROOT_PASSWORD
-# MONGO_APP_USERNAME / MONGO_APP_PASSWORD
-# REDIS_PASSWORD=<strong-password>
-# MINIO_ROOT_USER / MINIO_ROOT_PASSWORD
-# GRAFANA_ADMIN_PASSWORD=<strong-password>
-# Optional, with defaults: DB_NAME (=allinone_prod), GRAFANA_ADMIN_USER (=admin),
-# and ENCRYPTION_KEY_ID / ENCRYPTION_KEY_PREVIOUS / ENCRYPTION_KEY_PREVIOUS_ID, which
-# are blank in the steady state and only filled during a rotation window.
-# DATABASE_URL and REDIS_URL are built for `api` and `worker` by the compose file from
-# the credentials above — including `?replicaSet=rs0&authSource=admin`, which the driver
-# needs for transactions — so setting them here changes nothing inside the stack.
-
-# The web app must live under the same registrable domain as this API, or the
-# `SameSite=strict` refresh cookie never arrives (docs/DEPLOYMENT.md, Step 2).
-
-# Start production stack
-docker compose up -d
-
-# Apply the schema — docs/DEPLOYMENT.md Step 6: no database port is published any more,
-# so a host-side `npm run db:push` no longer has a path to the replica set.
-
-# Verify health (there is no global API prefix: `/api` is Swagger, the health route is
-# `/health` — src/main.ts:164, src/health/health.controller.ts:11)
-curl https://your-domain.com/health
+railway domain                   # ONE service only: the API
+railway redeploy
 ```
+
+Then create service #2 (the worker) from `railway.worker.json` — Railway does not auto-read a
+second JSON file, so this is a manual one-time step documented in
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Without it nothing consumes the Bull queues and the
+hourly `cleanup-expired` job never prunes `Change.payload`, which holds plaintext user content.
+
+Two things a deployed boot refuses (from `src/config/configuration.service.ts`, not from
+compose): template-valued `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET` / `ENCRYPTION_KEY` outside
+`APP_ENV=development`, and a missing `REDIS_URL`. Generate secrets with
+`openssl rand -base64 48`, access and refresh different from each other. `ENCRYPTION_KEY` is
+also the vault verifier pepper — rotating it is a two-variable operation with
+`ENCRYPTION_KEY_PREVIOUS` (`docs/SECURITY.md`).
+
+**The web client must share one registrable domain with the API.** The refresh cookie is
+`SameSite=Strict`; while the client is on `*.workers.dev` and the API on
+`*.up.railway.app`, the browser never sends it, so **a web session ends at the 15-minute
+access-token expiry**. `docs/DEPLOYMENT.md` Step 3 has the cutover (custom Cloudflare domain +
+a Railway domain under the same registrable domain, then delete the two `railway.app`
+`connect-src` entries from the Flutter repo's `web/_headers`).
+
+### Schema population is a manual gate
+
+`prisma generate` runs on install (`postinstall`) and only writes a client. **Nothing in the
+build or the deploy pushes `prisma/schema.prisma` to Atlas** — no `db:push`, no
+`migrate deploy`, and Prisma Migrate cannot use the `mongodb` provider anyway. A new stack
+boots against an unpopulated database and fails on the first query. Run it by hand before
+serving traffic:
+
+```bash
+npm run db:push          # uses DATABASE_URL from your shell, not from Railway
+```
+
+Railway's `deploy.preDeployCommand` (a key `railway.json` already supports) is the honest place
+to automate this, but it is **not** configured here: it would need `DATABASE_URL` at build time
+and would run on every replica. See docs/DEPLOYMENT.md Step 6.
 
 ### Backup & Recovery
 
 ```bash
-# Backup database (mongodump archive, timestamped)
+# mongodump of ONE database, target taken from DATABASE_URL, credentials never echoed
 ./scripts/backup-database.sh
 
-# Backup MinIO data
-docker compose exec minio mc mirror /data ./backups/minio
-
-# Restore database (asks for confirmation, then verifies collection counts)
+# restore that archive into that same database (confirms, then verifies counts)
 ./scripts/restore-database.sh /opt/allinone-backup/allinone-db-<YYYYMMDD_HHMMSS>.archive.gz
 
-# See docs/disaster-recovery.md for complete procedures
+# the whole drill, against a scratch database on a local replica set
+npm run test:dr
 ```
+
+Both scripts print `Target: mongodb://host:27017/allinone_prod` — **no credentials** — and
+refuse empty/`admin`/`local`/`config` database names. On Atlas the archive is a per-database
+dump; point-in-time recovery is an Atlas cluster feature, not something an archive can
+reproduce, so `--oplog`/`--oplogReplay` are reserved behind
+`OPLOG_WHOLE_SERVER_BACKUP=true` / `OPLOG_WHOLE_SERVER_RESTORE=true` on a self-hosted replica
+set. Full plan: [docs/DISASTER_RECOVERY.md](docs/DISASTER_RECOVERY.md).
 
 ### Monitoring
 
-- **Prometheus** — scrapes `api:3000/metrics` on the compose network with the
-  `ADMIN_SECRET` bearer in `/run/secrets/metrics_scrape_secret`. The service publishes no
-  port (`docker-compose.prod.yml:382-412`), so read it through a Caddy reverse proxy or
-  `docker exec` — not `http://localhost:9090`.
-- **Grafana** — production serves it under `https://$DOMAIN/grafana`
-  (`docker-compose.prod.yml:436`) with the `GRAFANA_ADMIN_PASSWORD` you set, development
-  publishes `http://localhost:3001` with `admin`/`admin`.
-- **The API's own series** — `GET /metrics` on the API origin, behind `MetricsScrapeGuard`,
-  so an anonymous curl is a `401` (docs/DEPLOYMENT.md Step 10 has both credentials).
-- **Logs** — stdout only: `docker compose -f docker-compose.prod.yml logs -f api`
+- **There is no production Prometheus.** `prometheus.prod.yml` and the compose scraper were
+  deleted with the stack; `infrastructure/prometheus/prometheus.dev.yml` and
+  `infrastructure/grafana/**` are dev-only and are started by `docker-compose.dev.yml`.
+- **The API's own series** — `GET /metrics` on the Railway origin, behind `MetricsScrapeGuard`.
+  It accepts the secret as `Authorization: Bearer <ADMIN_SECRET>` or `x-admin-secret`. Since
+  the Railway origin is public, `/metrics` is **internet-reachable and currently scraped by
+  nobody**; Railway path restriction cannot be expressed from repo config. Decision and
+  options: docs/DEPLOYMENT.md Step 10.
+- **Logs** — stdout only: `railway logs --service <api>` and `--service <worker>`;
+  `railway.json`'s `restartPolicyType: ON_FAILURE` is what brings a crashed worker back, and
+  the worker's own `npm run start:worker` preflight is what stops it silently spinning against
+  a missing Redis.
 
 ## API Documentation
 
@@ -475,7 +537,8 @@ Contributions welcome! See [CONTRIBUTING.md](docs/CONTRIBUTING.md)
 - [x] NestJS modular architecture
 - [x] Database schema & Prisma ORM setup
 - [x] Open-API / Swagger documentation
-- [x] Docker & Docker Compose setup
+- [x] Docker & Docker Compose setup — dev stack only; the production stack moved to Railway
+      (`1c1cc7d`), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 
 ### Stage 2 — Authentication & Devices (Completed)
 - [x] Email/password authentication with Argon2id

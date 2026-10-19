@@ -13,7 +13,8 @@
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main.js",
-    "start:worker": "node dist/worker.js",
+    "start:worker": "node scripts/worker-preflight.js && node dist/worker.js",
+    "preflight:worker": "node scripts/worker-preflight.js",
     "postinstall": "prisma generate",
     "lint": "eslint \"{src,test}/**/*.ts\" --fix",
     "test": "jest",
@@ -36,7 +37,12 @@
     "docker:up": "docker compose -f docker-compose.dev.yml up -d",
     "docker:down": "docker compose -f docker-compose.dev.yml down",
     "docker:logs": "docker compose -f docker-compose.dev.yml logs -f",
-    "audit": "npm audit --audit-level=high"
+    "audit": "npm audit --audit-level=high",
+    "audit:prod": "npm audit --omit=dev --audit-level=high"
+  },
+  "engines": {
+    "node": "22.x",
+    "npm": ">=10"
   },
   "dependencies": {
     "@nestjs/bull": "^11.0.5",
@@ -60,7 +66,7 @@
     "ioredis": "^5.0",
     "joi": "^17.13.8",
     "jsonwebtoken": "^9.0",
-    "nodemailer": "^7.0.13",
+    "nodemailer": "^10.1.7",
     "otplib": "^13.5.0",
     "passport": "^0.7",
     "passport-jwt": "^4.0",
@@ -77,7 +83,6 @@
     "@types/express": "^4.17",
     "@types/jest": "^29.5",
     "@types/node": "^20.10",
-    "@types/nodemailer": "^8.0.2",
     "@types/passport-jwt": "^3.0",
     "@types/qrcode": "^1.5.6",
     "@typescript-eslint/eslint-plugin": "^6.13",
@@ -94,7 +99,8 @@
     "ts-loader": "^9.5",
     "ts-node": "^10.9",
     "tsconfig-paths": "^4.2",
-    "typescript": "^5.3"
+    "typescript": "^5.3",
+    "yaml": "^2.9.1"
   },
   "overrides": {
     "@typescript-eslint/typescript-estree": {

@@ -17,6 +17,11 @@ import { AuditAction } from "@prisma/client";
 import { AuditLogService } from "@/common/audit/audit-log.service";
 import { ErrorCode } from "@/common/errors/error-code";
 import { RefreshTokenGraceStore } from "./refresh-token-grace.store";
+import {
+  RECOVERY_CODE_KEYSPACE_BITS,
+  recoveryCodePepper,
+  sealRecoveryCode,
+} from "./recovery-code-seal";
 import * as argon2 from "argon2";
 import * as crypto from "crypto";
 import { generateSecret, generateURI, verify } from "otplib";
@@ -343,6 +348,183 @@ describe("AuthService", () => {
       jest.restoreAllMocks();
     });
 
+    const hashOf = (code: string) =>
+      crypto.createHash("sha256").update(code).digest("hex");
+
+    /** Every command the service sent to the raw collection, in the order it sent it. */
+    const sentCommands = (): any[] =>
+      (prismaService.$runCommandRaw.mock.calls as any[][]).map(
+        ([command]: any[]) => command,
+      );
+
+    /**
+     * Codes that are not the one under test, sized to any budget.
+     *
+     * The count comes from the service rather than from a literal here, because a
+     * test that hard-codes "five" stops describing the budget the day the budget
+     * moves, and this is the assertion that has to keep being true of whatever the
+     * number turns out to be.
+     */
+    const wrongGuesses = (count: number): string[] =>
+      Array.from({ length: count }, (_, index) =>
+        `${index + 1}`.padStart(6, "0"),
+      );
+
+    /**
+     * A stand-in for the `email_verification_otps` document that behaves like the
+     * raw collection it replaces.
+     *
+     * The previous stub — `$runCommandRaw` answering with one canned `{ value }` no
+     * matter what was sent — could not tell a conditional delete that matched from a
+     * `findAndModify` that ran the budget down, which is exactly the difference an
+     * attempt counter lives on. This store evaluates the filters the service builds
+     * and applies the operators it sends, so a code stops verifying for the reason
+     * the row says it should.
+     */
+    function useEmailOtpRow(initial: {
+      code: string;
+      expiresAt?: Date;
+      attempts?: number;
+    }) {
+      const seeded: Record<string, unknown> = {
+        _id: "otp-doc-1",
+        userId: mockUser.id,
+        codeHash: hashOf(initial.code),
+        expiresAt: initial.expiresAt ?? new Date(Date.now() + 60 * 60 * 1000),
+      };
+      // A document minted before the counter existed carries no `attempts` field at
+      // all, and that absence is the state an in-flight code is really in.
+      if (initial.attempts !== undefined) seeded.attempts = initial.attempts;
+
+      const docs: Record<string, any>[] = [{ ...seeded }];
+
+      const matches = (
+        doc: Record<string, any>,
+        query: Record<string, any>,
+      ): boolean =>
+        Object.entries(query).every(([field, condition]): boolean => {
+          if (field === "$or") {
+            return (condition as Record<string, any>[]).some(
+              (sub: Record<string, any>) => matches(doc, sub),
+            );
+          }
+
+          if (condition instanceof Date || typeof condition !== "object") {
+            return doc[field] === condition;
+          }
+
+          return Object.entries(condition as Record<string, unknown>).every(
+            ([operator, value]): boolean => {
+              switch (operator) {
+                case "$gt":
+                  return (
+                    doc[field] instanceof Date && doc[field] > (value as Date)
+                  );
+                case "$gte":
+                  return (
+                    doc[field] instanceof Date && doc[field] >= (value as Date)
+                  );
+                case "$lt":
+                  return (doc[field] ?? Number.NaN) < (value as number);
+                case "$lte":
+                  return (
+                    doc[field] instanceof Date && doc[field] <= (value as Date)
+                  );
+                case "$exists":
+                  return (doc[field] !== undefined) === Boolean(value);
+                default:
+                  throw new Error(`unsupported operator ${operator}`);
+              }
+            },
+          );
+        });
+
+      const project = (
+        doc: Record<string, any>,
+        fields?: Record<string, number>,
+      ): Record<string, any> => {
+        if (!fields) return { ...doc };
+        return {
+          _id: doc._id,
+          ...Object.fromEntries(
+            Object.keys(fields).map((key) => [key, doc[key]]),
+          ),
+        };
+      };
+
+      prismaService.$runCommandRaw.mockImplementation(async (command: any) => {
+        if (command.findAndModify) {
+          const index = docs.findIndex((doc) => matches(doc, command.query));
+          if (index === -1) return { value: null, ok: 1 };
+
+          const doc = docs[index];
+          if (command.remove) {
+            docs.splice(index, 1);
+            return { value: project(doc, command.fields), ok: 1 };
+          }
+
+          const before = { ...doc };
+          const after = { ...doc };
+          for (const [operator, value] of Object.entries(
+            command.update ?? {},
+          )) {
+            if (operator !== "$inc") {
+              throw new Error(
+                `a budget must be incremented, not written: ${operator}`,
+              );
+            }
+            for (const [field, amount] of Object.entries(
+              value as Record<string, number>,
+            )) {
+              after[field] = (after[field] ?? 0) + amount;
+            }
+          }
+          docs[index] = after;
+
+          return {
+            value: project(command.new ? after : before, command.fields),
+            ok: 1,
+          };
+        }
+
+        if (command.delete) {
+          let removed = 0;
+          for (const spec of command.deletes) {
+            for (let index = docs.length - 1; index >= 0; index -= 1) {
+              if (!matches(docs[index], spec.q)) continue;
+              docs.splice(index, 1);
+              removed += 1;
+              if (spec.limit === 1) break;
+            }
+          }
+          return { n: removed, ok: 1 };
+        }
+
+        if (command.update) {
+          for (const spec of command.updates) {
+            const index = docs.findIndex((doc) => matches(doc, spec.q));
+            const set = (spec.u.$set ?? {}) as Record<string, unknown>;
+            if (index === -1) {
+              if (!spec.upsert) continue;
+              docs.push({
+                _id: `otp-doc-${docs.length + 1}`,
+                ...spec.q,
+                ...(spec.u.$setOnInsert ?? {}),
+                ...set,
+              });
+              continue;
+            }
+            Object.assign(docs[index], set);
+          }
+          return { n: 1, ok: 1 };
+        }
+
+        throw new Error("unexpected $runCommandRaw shape");
+      });
+
+      return { docs, find: () => docs[0] };
+    }
+
     it("stores only a hashed OTP in MongoDB", async () => {
       usersService.findByEmail.mockResolvedValue(mockUser);
       jest.spyOn(Math, "random").mockReturnValue(0);
@@ -366,6 +548,53 @@ describe("AuthService", () => {
       );
     });
 
+    /**
+     * The reset half of the budget: a code that was never guessed at carries no
+     * `attempts`, and re-minting must not inherit the count the previous code was
+     * killed by — otherwise a support call that re-sends a code hands the caller a
+     * code that is already dead.
+     */
+    it("issues a fresh code with a spent budget of its own", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser);
+
+      await service.requestEmailVerification(mockUser.email);
+
+      const mint = prismaService.$runCommandRaw.mock.calls[0][0];
+      expect(mint.updates[0].u.$set).toEqual(
+        expect.objectContaining({
+          attempts: 0,
+          // Written beside the counter as a record of the budget this code was
+          // minted with. The bound the filter uses is the constant, so a document
+          // that claimed a bigger number would buy its reader nothing.
+          maxAttempts: AuthService.EMAIL_OTP_MAX_ATTEMPTS,
+        }),
+      );
+    });
+
+    /**
+     * The hour is untouched by the counter, and both halves of it matter: a code a
+     * person is reading out of an email has to still be live when they type it, and
+     * an expired one must not be answerable at all. The budget is what bounds the
+     * live half — it is not a reason to shorten the window people rely on.
+     */
+    it("keeps the code live for its full hour", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser);
+      const issuedAt = Date.now();
+
+      await service.requestEmailVerification(mockUser.email);
+
+      const mint = sentCommands().find(
+        (command: any) => command.update && !command.findAndModify,
+      ) as any;
+      const expiresAt = mint.updates[0].u.$set.expiresAt as Date;
+      expect(expiresAt.getTime() - issuedAt).toBeGreaterThanOrEqual(
+        60 * 60 * 1000,
+      );
+      expect(expiresAt.getTime() - issuedAt).toBeLessThan(
+        60 * 60 * 1000 + 5000,
+      );
+    });
+
     it("accepts a valid MongoDB OTP once and removes it atomically", async () => {
       usersService.findByEmail.mockResolvedValue(mockUser);
       prismaService.$runCommandRaw.mockResolvedValueOnce({
@@ -382,6 +611,268 @@ describe("AuthService", () => {
           remove: true,
         }),
       );
+    });
+
+    it("spends the code and writes `emailVerifiedAt` exactly once", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser);
+      const row = useEmailOtpRow({ code: "123456" });
+
+      await expect(
+        service.confirmEmailVerification(undefined, mockUser.email, "123456"),
+      ).resolves.toEqual({
+        message: "Email address successfully verified",
+      });
+
+      // The row is gone, so the replay is refused instead of writing the timestamp a
+      // second time — which is the whole reason the spend is a conditional delete.
+      expect(row.docs).toHaveLength(0);
+      await expect(
+        service.confirmEmailVerification(undefined, mockUser.email, "123456"),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: ErrorCode.OTP_INVALID }),
+      });
+      expect(prismaService.user.update).toHaveBeenCalledTimes(1);
+    });
+
+    it("verifies a code whose row predates the attempt counter", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser);
+      const row = useEmailOtpRow({ code: "123456" });
+
+      await expect(
+        service.confirmEmailVerification(undefined, mockUser.email, "123456"),
+      ).resolves.toEqual({
+        message: "Email address successfully verified",
+      });
+      expect(row.docs).toHaveLength(0);
+    });
+
+    it("burns one guess per wrong code, as an increment rather than a computed write", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser);
+      const row = useEmailOtpRow({ code: "123456" });
+
+      await expect(
+        service.confirmEmailVerification(undefined, mockUser.email, "111111"),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: ErrorCode.OTP_INVALID }),
+      });
+
+      expect(row.docs[0].attempts).toBe(1);
+      const burn = sentCommands().find(
+        (command: any) => command.findAndModify && command.update,
+      ) as any;
+      // Writing `attempts: 1` this request computed for itself would be the
+      // lost-increment bug again; the count has to come from inside MongoDB.
+      expect(burn.update).toEqual({ $inc: { attempts: 1 } });
+
+      await expect(
+        service.confirmEmailVerification(undefined, mockUser.email, "222222"),
+      ).rejects.toThrow();
+      await expect(
+        service.confirmEmailVerification(undefined, mockUser.email, "333333"),
+      ).rejects.toThrow();
+      await expect(
+        service.confirmEmailVerification(undefined, mockUser.email, "444444"),
+      ).rejects.toThrow();
+
+      // Four of the six spent, and the budget is the only thing standing between the
+      // fifth guess and the row's disappearance.
+      expect(row.docs[0].attempts).toBe(4);
+
+      // The owner still gets through: the bound counts guesses, not mistakes.
+      await expect(
+        service.confirmEmailVerification(undefined, mockUser.email, "123456"),
+      ).resolves.toEqual({
+        message: "Email address successfully verified",
+      });
+    });
+
+    /**
+     * Two guesses in flight at once, which is the case a counter built out of a read
+     * and a write cannot survive: both requests read `attempts: 0`, both write `1`,
+     * and the attacker has spent two guesses against a row that still says it has
+     * all of them. This is the exact race that made the vault's failed-unlock
+     * counter record `1` per concurrent guess, so the cooldown it was guarding never
+     * armed.
+     */
+    it("charges two concurrent wrong guesses two guesses, not one", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser);
+      const row = useEmailOtpRow({ code: "123456", attempts: 0 });
+
+      const refusals = await Promise.all([
+        service
+          .confirmEmailVerification(undefined, mockUser.email, "111111")
+          .catch((error: unknown) => error as HttpException),
+        service
+          .confirmEmailVerification(undefined, mockUser.email, "222222")
+          .catch((error: unknown) => error as HttpException),
+      ]);
+
+      expect(row.docs[0].attempts).toBe(2);
+      for (const refusal of refusals) {
+        expect(refusal).toBeInstanceOf(BadRequestException);
+        expect((refusal as HttpException).getResponse()).toEqual({
+          code: ErrorCode.OTP_INVALID,
+          message: "Invalid or expired OTP",
+        });
+      }
+
+      // Both halves of the race were charged. One request reading the budget and
+      // writing a value it computed for itself would pass the count assertion above
+      // on a lucky interleave, so the shape of the write is asserted too: nothing
+      // in this flow may set `attempts`, only increment it.
+      const burns = sentCommands().filter(
+        (command: any) => command.findAndModify && command.update,
+      );
+      expect(burns).toHaveLength(2);
+      for (const burn of burns) {
+        expect(burn.update).toEqual({ $inc: { attempts: 1 } });
+      }
+      expect(prismaService.user.update).not.toHaveBeenCalled();
+    });
+
+    it("removes the row on the last failed guess and refuses the right code after it", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser);
+      const row = useEmailOtpRow({ code: "123456" });
+      const budget = AuthService.EMAIL_OTP_MAX_ATTEMPTS;
+
+      for (const guess of wrongGuesses(budget - 1)) {
+        await expect(
+          service.confirmEmailVerification(undefined, mockUser.email, guess),
+        ).rejects.toThrow();
+      }
+      expect(row.docs[0].attempts).toBe(budget - 1);
+      // Still inside the hour with one guess left, so the owner's code is live up
+      // to this point — the budget is what ends it, not the clock.
+      expect(row.docs).toHaveLength(1);
+
+      await expect(
+        service.confirmEmailVerification(
+          undefined,
+          mockUser.email,
+          wrongGuesses(budget).at(-1) as string,
+        ),
+      ).rejects.toThrow();
+      // The budget, not the clock: the row is gone with the better part of its hour
+      // still to run, so there is nothing left to guess against.
+      expect(row.docs).toHaveLength(0);
+
+      await expect(
+        service.confirmEmailVerification(undefined, mockUser.email, "123456"),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: ErrorCode.OTP_INVALID }),
+      });
+      expect(prismaService.user.update).not.toHaveBeenCalled();
+    });
+
+    /**
+     * The re-mint, and the plaintext it handed out.
+     *
+     * Read back out of the development log line rather than pinned on
+     * `crypto.randomInt`: TypeScript copies this file's `import * as crypto` behind
+     * non-configurable getters, so the spy cannot be installed at all — and pinning
+     * the spec's copy would not have reached the service's copy either. The `APP_ENV`
+     * -gated debug line is where the code is deliberately visible, and a test of a
+     * re-minted budget needs the plaintext to show the budget is one its owner can
+     * actually spend.
+     */
+    async function remintAndReadCode(): Promise<string> {
+      configService.isDevelopment = true;
+      const logged: string[] = [];
+      jest
+        .spyOn(Logger.prototype, "debug")
+        .mockImplementation((message: unknown) => {
+          logged.push(String(message));
+        });
+
+      await service.requestEmailVerification(mockUser.email);
+
+      const issued = logged
+        .join("\n")
+        .match(/CODE FOR [^\s]+: (\d{6})/)?.[1] as string;
+      expect(issued).toEqual(expect.any(String));
+      return issued;
+    }
+
+    /**
+     * The reset end of the budget, driven through the row rather than through the
+     * command: a re-send that inherited the count the previous code was killed by
+     * would hand its owner a code that is already dead, with a generic refusal as the
+     * only thing they can be told.
+     */
+    it("re-mints over a burned row with a full budget and a new code", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser);
+      const row = useEmailOtpRow({ code: "123456", attempts: 0 });
+
+      await expect(
+        service.confirmEmailVerification(undefined, mockUser.email, "111111"),
+      ).rejects.toThrow();
+      await expect(
+        service.confirmEmailVerification(undefined, mockUser.email, "222222"),
+      ).rejects.toThrow();
+      expect(row.docs[0].attempts).toBe(2);
+
+      const replacement = await remintAndReadCode();
+
+      expect(row.docs).toHaveLength(1);
+      expect(row.docs[0].attempts).toBe(0);
+      expect(row.docs[0].codeHash).toBe(hashOf(replacement));
+      // The budget travels with the code it was minted for: the two guesses above
+      // were spent against `123456`, and charging them to this one is what would make
+      // a re-send a way to kill a code before its owner has typed a digit.
+
+      await expect(
+        service.confirmEmailVerification(
+          undefined,
+          mockUser.email,
+          replacement,
+        ),
+      ).resolves.toEqual({ message: "Email address successfully verified" });
+      expect(row.docs).toHaveLength(0);
+      // The code it replaced is gone with the row it was overwritten on.
+      expect(prismaService.user.update).toHaveBeenCalledTimes(1);
+    });
+
+    it("prunes an expired row instead of leaving it answerable", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser);
+      const row = useEmailOtpRow({
+        code: "123456",
+        expiresAt: new Date(Date.now() - 1000),
+      });
+
+      await expect(
+        service.confirmEmailVerification(undefined, mockUser.email, "123456"),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: ErrorCode.OTP_INVALID }),
+      });
+      expect(row.docs).toHaveLength(0);
+    });
+
+    /**
+     * The endpoint is unauthenticated, so a different code for "wrong", "spent",
+     * "expired" and "no such account" is a way to ask which of the four is true.
+     */
+    it("refuses every failure the same way", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser);
+      useEmailOtpRow({
+        code: "123456",
+        expiresAt: new Date(Date.now() - 1000),
+      });
+      const expired = await service
+        .confirmEmailVerification(undefined, mockUser.email, "123456")
+        .catch((error: unknown) => error as HttpException);
+
+      usersService.findByEmail.mockResolvedValue(null);
+      const unknownAccount = await service
+        .confirmEmailVerification(undefined, "nobody@example.com", "123456")
+        .catch((error: unknown) => error as HttpException);
+
+      for (const thrown of [expired, unknownAccount]) {
+        expect(thrown).toBeInstanceOf(BadRequestException);
+        expect((thrown as HttpException).getResponse()).toEqual({
+          code: ErrorCode.OTP_INVALID,
+          message: "Invalid or expired OTP",
+        });
+      }
     });
   });
 
@@ -923,6 +1414,22 @@ describe("AuthService", () => {
     const hashOf = (code: string) =>
       crypto.createHash("sha256").update(code).digest("hex");
 
+    /**
+     * The pepper id, derived here from the configured key rather than imported from
+     * `secretFingerprint`: this suite is describing what the stored string has to
+     * look like to anybody holding the table, and a helper living in the file another
+     * agent is mid-edit on is not the contract to test against.
+     */
+    const pepperIdOf = (secret: string) =>
+      `k${crypto.createHash("sha256").update(secret).digest("hex").slice(0, 10)}`;
+
+    /**
+     * The entry a legacy digest is rewritten as when the code it describes is
+     * redeemed — the sealed form of the code, under the key this process holds.
+     */
+    const sealedFrom = (code: string) =>
+      sealRecoveryCode(code, recoveryCodePepper(configService.encryptionKey));
+
     function useMFASettingRow(initial: {
       recoveryCodes: string[];
       backupCodesUsed: string[] | null;
@@ -981,7 +1488,7 @@ describe("AuthService", () => {
       // The attempt that lost the race never wrote, so the spent code is not back
       // in the list and the winner's bookkeeping stands.
       expect(JSON.parse(row.recoveryCodes)).toEqual([hashOf(codeB)]);
-      expect(JSON.parse(row.backupCodesUsed)).toEqual([hashOf(codeA)]);
+      expect(JSON.parse(row.backupCodesUsed)).toEqual([sealedFrom(codeA)]);
     });
 
     it("spends one of two concurrent codes rather than resurrecting either", async () => {
@@ -1028,7 +1535,7 @@ describe("AuthService", () => {
 
       await expect(redeem(codeA)).resolves.toBe(true);
 
-      expect(JSON.parse(row.backupCodesUsed)).toEqual([hashOf(codeA)]);
+      expect(JSON.parse(row.backupCodesUsed)).toEqual([sealedFrom(codeA)]);
       expect(JSON.parse(row.recoveryCodes)).toEqual([]);
       // The `null` this request read is part of the filter it wrote with, so the
       // first spend is guarded like every later one.
@@ -1061,6 +1568,241 @@ describe("AuthService", () => {
       // Nothing else in the old callback touched `tx`; the conditional write is
       // what makes the spend atomic, so the transaction was dead weight.
       expect(prismaService.$transaction).not.toHaveBeenCalled();
+    });
+
+    /**
+     * Every account enrolled under the bare-`sha256` scheme, so the digests in those
+     * rows are what their owners still hold on paper. Refusing them would be a way
+     * for a security fix to lock people out of their own second factor.
+     *
+     * A redeemed code is also the only moment its plaintext exists, which makes this
+     * the one place a legacy entry can be converted — and it has to be converted,
+     * because the used-code list would otherwise keep a bare digest of a 32-bit code
+     * for as long as the account exists, a second offline-crackable set inside the
+     * very document this change set out to make worthless.
+     */
+    it("still redeems a legacy unsalted digest, once, and rewrites it in the new form", async () => {
+      const row = useMFASettingRow({
+        recoveryCodes: [hashOf(codeA), hashOf(codeB)],
+        backupCodesUsed: [],
+      });
+
+      await expect(redeem(codeA)).resolves.toBe(true);
+
+      // Exactly one entry moves. The sibling is a digest of a code nobody has typed,
+      // so there is nothing to seal it from; the row drains a code at a time, and
+      // `disableMfa` clears both arrays outright.
+      expect(JSON.parse(row.recoveryCodes)).toEqual([hashOf(codeB)]);
+      expect(JSON.parse(row.backupCodesUsed)).toEqual([sealedFrom(codeA)]);
+      // Nothing the legacy digest was is left anywhere in the document.
+      expect(JSON.stringify(row)).not.toContain(hashOf(codeA));
+
+      // Redeemed once and only once: the entry is out of the live list, so the paper
+      // copy cannot be presented again and the legacy fallback cannot spend it twice.
+      await expect(redeem(codeA)).resolves.toBe(false);
+      expect(JSON.parse(row.recoveryCodes)).toEqual([hashOf(codeB)]);
+    });
+
+    it("converts each legacy digest as its own code is redeemed, and only then", async () => {
+      const row = useMFASettingRow({
+        recoveryCodes: [hashOf(codeA), hashOf(codeB)],
+        backupCodesUsed: [],
+      });
+
+      await expect(redeem(codeB)).resolves.toBe(true);
+      expect(JSON.parse(row.recoveryCodes)).toEqual([hashOf(codeA)]);
+      expect(JSON.parse(row.backupCodesUsed)).toEqual([sealedFrom(codeB)]);
+
+      await expect(redeem(codeA)).resolves.toBe(true);
+      expect(JSON.parse(row.recoveryCodes)).toEqual([]);
+      expect(JSON.parse(row.backupCodesUsed)).toEqual([
+        sealedFrom(codeB),
+        sealedFrom(codeA),
+      ]);
+      // The row is now free of bare `sha256` digests without a migration script and
+      // without ever holding a plaintext it was not given.
+      for (const entry of [
+        ...JSON.parse(row.recoveryCodes),
+        ...JSON.parse(row.backupCodesUsed),
+      ]) {
+        expect(entry).not.toMatch(/^[0-9a-f]{64}$/);
+      }
+    });
+
+    it("redeems a legacy digest on a deployment whose pepper is missing", async () => {
+      const row = useMFASettingRow({
+        recoveryCodes: [hashOf(codeA)],
+        backupCodesUsed: [],
+      });
+      delete configService.encryptionKey;
+
+      // The row needs no key to be recognised, so an unset `ENCRYPTION_KEY` is
+      // reported as our outage and the code still spends — rather than arriving to
+      // the user as a wrong code that counts toward the lockout.
+      await expect(redeem(codeA)).resolves.toBe(true);
+      // Nothing to upgrade it with, so the used entry is recorded as it was read: a
+      // weaker row, which is a smaller problem than a refused second factor.
+      expect(JSON.parse(row.backupCodesUsed)).toEqual([hashOf(codeA)]);
+    });
+
+    /**
+     * Enrolment is the only place a code exists as text, so this is also the test
+     * that says what the row holds.
+     */
+    async function enrol(): Promise<{
+      raw: string[];
+      sealed: string[];
+      pepperId: string;
+    }> {
+      prismaService.mFASetting.findUnique.mockResolvedValue({
+        ...mockMfaSetting,
+        recoveryCodes: null,
+      });
+
+      const { recoveryCodes } = await service.enableMfa(mockUser.id, {
+        totpCode: "123456",
+      });
+      const written = prismaService.mFASetting.update.mock.calls.at(-1)?.[0]
+        ?.data as { recoveryCodes: string };
+      const sealed = JSON.parse(written.recoveryCodes) as string[];
+
+      return {
+        raw: recoveryCodes,
+        sealed,
+        pepperId: sealed[0]?.split(":")[1] ?? "",
+      };
+    }
+
+    it("stores a keyed digest, never the code and never a bare hash of it", async () => {
+      const { raw, sealed } = await enrol();
+
+      expect(sealed).toHaveLength(raw.length);
+      for (const [index, entry] of sealed.entries()) {
+        expect(entry.startsWith("hmac-sha256:")).toBe(true);
+        // A bare `sha256` of the code is what made a leaked row a puzzle anyone
+        // could work through offline; the stored string must not be one.
+        expect(entry).not.toBe(hashOf(raw[index]));
+        expect(entry).not.toMatch(/^[0-9a-f]{64}$/);
+        expect(entry).not.toContain(raw[index].replace(/-/g, ""));
+      }
+    });
+
+    /**
+     * The key inside that digest is `ENCRYPTION_KEY`, and this re-derives it from the
+     * configured value rather than calling the seal helper, because the helper would
+     * agree with any key it was handed. A stored string is only as strong as the
+     * secret nobody holding the table can reach: an implementation that HMACed with a
+     * literal, or with nothing at all, would still produce a well-shaped prefix here
+     * and would still leave a leaked row an offline crack.
+     */
+    it("seals with ENCRYPTION_KEY, which is what keeps a leaked row uncrackable", async () => {
+      const key = configService.encryptionKey as string;
+      const { raw, sealed, pepperId } = await enrol();
+
+      expect(pepperId).toBe(pepperIdOf(key));
+
+      for (const [index, code] of raw.entries()) {
+        const normalised = code.toUpperCase().replace(/-/g, "");
+        const withTheKey = crypto
+          .createHmac("sha256", key)
+          .update(normalised)
+          .digest("base64");
+        expect(sealed[index]).toBe(`hmac-sha256:${pepperId}:${withTheKey}`);
+
+        // Nothing derivable from the code on its own is what the row holds. That is
+        // the whole of the difference between leaking the table and leaking the table
+        // together with the environment: the first one buys a digest nobody can test a
+        // candidate against, which is what the bare `sha256` rows used to not be.
+        expect(sealed[index]).not.toBe(hashOf(normalised));
+        expect(sealed[index]).not.toBe(hashOf(code));
+      }
+    });
+
+    it("issues codes whose alphabet and length carry at least 96 bits", async () => {
+      const { raw } = await enrol();
+
+      expect(new Set(raw).size).toBe(raw.length);
+      for (const code of raw) {
+        const body = code.replace(/-/g, "");
+        // Hex, upper-cased: no `I`, `L`, `O` or `U` to misread off a screen.
+        expect(body).toMatch(/^[0-9A-F]+$/);
+        expect(code.split("-").every((group) => group.length === 4)).toBe(true);
+        // The assertion is the keyspace, not a character count: four bits per
+        // character, which a weaker alphabet could not claim at any length.
+        expect(body.length * 4).toBeGreaterThanOrEqual(
+          RECOVERY_CODE_KEYSPACE_BITS,
+        );
+        expect(RECOVERY_CODE_KEYSPACE_BITS).toBeGreaterThanOrEqual(96);
+      }
+    });
+
+    it("redeems a sealed code once, and not on a second presentation", async () => {
+      const { raw, sealed } = await enrol();
+      const row = useMFASettingRow({
+        recoveryCodes: sealed,
+        backupCodesUsed: [],
+      });
+
+      await expect(redeem(raw[0])).resolves.toBe(true);
+      await expect(redeem(raw[0])).resolves.toBe(false);
+
+      expect(JSON.parse(row.recoveryCodes)).not.toContain(sealed[0]);
+      expect(JSON.parse(row.backupCodesUsed)).toEqual([sealed[0]]);
+      expect(JSON.parse(row.recoveryCodes)).toHaveLength(sealed.length - 1);
+    });
+
+    it("redeems a sealed code however the holder typed it", async () => {
+      const { raw, sealed } = await enrol();
+      useMFASettingRow({ recoveryCodes: sealed, backupCodesUsed: [] });
+
+      const typedAsFreeText = ` ${raw[0].toLowerCase().replace(/-/g, " ")} `;
+      await expect(redeem(typedAsFreeText)).resolves.toBe(true);
+    });
+
+    it("does not let a legacy code redeem a sealed row it was not minted for", async () => {
+      const { sealed } = await enrol();
+      useMFASettingRow({ recoveryCodes: sealed, backupCodesUsed: [] });
+
+      await expect(redeem(codeA)).resolves.toBe(false);
+      expect(prismaService.mFASetting.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("redeems a code sealed under the retired pepper while the rotation window is open", async () => {
+      const retired = "unit-test-retired-pepper-key-0123456789abcdef";
+      const { raw } = await enrol();
+      configService.encryptionKeyPrevious = retired;
+
+      // The entry says which pepper made it, which is what lets the ring serve both
+      // generations instead of a rotation bricking every code minted before it.
+      const sealedUnderRetiredKey = sealRecoveryCode(
+        raw[0],
+        recoveryCodePepper(retired),
+      );
+      const row = useMFASettingRow({
+        recoveryCodes: [sealedUnderRetiredKey],
+        backupCodesUsed: [],
+      });
+
+      await expect(redeem(raw[0])).resolves.toBe(true);
+      expect(JSON.parse(row.backupCodesUsed)).toEqual([sealedUnderRetiredKey]);
+    });
+
+    it("refuses a code sealed under a pepper this process was not given", async () => {
+      const strandedKey = "unit-test-dropped-pepper-key-0123456789abcdef";
+      const { raw } = await enrol();
+      const sealedUnderDroppedKey = sealRecoveryCode(
+        raw[0],
+        recoveryCodePepper(strandedKey),
+      );
+      useMFASettingRow({
+        recoveryCodes: [sealedUnderDroppedKey],
+        backupCodesUsed: [],
+      });
+
+      await expect(redeem(raw[0])).resolves.toBe(false);
+      // Refused, not spent: nothing was written, so restoring the retired key puts
+      // the code back in play rather than burning it on our misconfiguration.
+      expect(prismaService.mFASetting.updateMany).not.toHaveBeenCalled();
     });
   });
 
@@ -1506,7 +2248,15 @@ describe("AuthService", () => {
       expect(prismaService.mFASetting.update).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { userId: "user-uuid-123" },
-          data: expect.objectContaining({ totpEnabled: false }),
+          // Both code arrays go to `null` and not to `[]`: disabling MFA is the one
+          // moment every digest in the row — legacy ones included — leaves the
+          // database, which is why the upgrade-on-use path above never had to be a
+          // migration.
+          data: expect.objectContaining({
+            totpEnabled: false,
+            recoveryCodes: null,
+            backupCodesUsed: null,
+          }),
         }),
       );
     });

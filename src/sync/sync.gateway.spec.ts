@@ -1,32 +1,62 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { Logger } from "@nestjs/common";
-import { SyncGateway } from "./sync.gateway";
+import { SESSION_REVALIDATION_INTERVAL_MS, SyncGateway } from "./sync.gateway";
 import { JwtService } from "@nestjs/jwt";
 import { ConfigurationService } from "@/config/configuration.service";
-import { UsersService } from "@/users/users.service";
+import { UsersService, type SocketAccessState } from "@/users/users.service";
 
 describe("SyncGateway", () => {
   let gateway: SyncGateway;
   let jwtService: any;
   let configService: any;
-  let usersService: { getUserById: jest.Mock; isSessionLive: jest.Mock };
+  let usersService: {
+    getUserById: jest.Mock;
+    isSessionLive: jest.Mock;
+    getSocketAccessStates: jest.Mock;
+  };
   let mockClient: any;
   let mockOtherClient: any;
   let broadcastEmit: jest.Mock;
   let mockServer: any;
 
+  const USER_ID = "user-uuid-123";
+  const SESSION_ID = "session-1";
+
   const ACTIVE_USER = {
-    id: "user-uuid-123",
+    id: USER_ID,
     email: "someone@example.com",
     status: "ACTIVE",
     deletedAt: null,
   };
 
+  /** What `getSocketAccessStates()` answers for an account that is all fine. */
+  const liveState = (overrides: Partial<SocketAccessState> = {}) => ({
+    accountReadable: true,
+    liveSessionIds: [SESSION_ID],
+    revokedDeviceIds: [],
+    ...overrides,
+  });
+
+  /** A socket already inside a room, which is what the sweep iterates. */
+  const connectedSocket = (
+    id: string,
+    data: { userId: string; sessionId?: string; deviceId?: string },
+  ) => ({
+    id,
+    data,
+    join: jest.fn(),
+    leave: jest.fn(),
+    disconnect: jest.fn(),
+    emit: jest.fn(),
+    handshake: { auth: {}, headers: {}, query: {} },
+  });
+
   beforeEach(async () => {
     jwtService = {
       verifyAsync: jest.fn().mockResolvedValue({
-        sub: "user-uuid-123",
+        sub: USER_ID,
         deviceId: "device-uuid-456",
+        sessionId: SESSION_ID,
         type: "access",
       }),
     };
@@ -40,6 +70,12 @@ describe("SyncGateway", () => {
     usersService = {
       getUserById: jest.fn().mockResolvedValue(ACTIVE_USER),
       isSessionLive: jest.fn().mockResolvedValue(true),
+      getSocketAccessStates: jest
+        .fn()
+        .mockImplementation(
+          async (userIds: readonly string[]) =>
+            new Map(userIds.map((userId) => [userId, liveState()])),
+        ),
     };
 
     mockClient = {
@@ -51,6 +87,7 @@ describe("SyncGateway", () => {
       },
       data: {},
       join: jest.fn(),
+      leave: jest.fn(),
       disconnect: jest.fn(),
       emit: jest.fn(),
     };
@@ -60,8 +97,9 @@ describe("SyncGateway", () => {
     mockOtherClient = {
       id: "socket-2",
       handshake: { auth: {}, headers: {}, query: {} },
-      data: { userId: "user-uuid-123", deviceId: "device-uuid-777" },
+      data: { userId: USER_ID, deviceId: "device-uuid-777" },
       join: jest.fn(),
+      leave: jest.fn(),
       disconnect: jest.fn(),
       emit: jest.fn(),
     };
@@ -72,10 +110,7 @@ describe("SyncGateway", () => {
       sockets: {
         adapter: {
           rooms: new Map([
-            [
-              "user:user-uuid-123",
-              new Set([mockClient.id, mockOtherClient.id]),
-            ],
+            [`user:${USER_ID}`, new Set([mockClient.id, mockOtherClient.id])],
           ]),
         },
         sockets: new Map([
@@ -109,11 +144,14 @@ describe("SyncGateway", () => {
       expect(jwtService.verifyAsync).toHaveBeenCalledWith("valid-token", {
         secret: "access-secret",
       });
+      // `sessionId` belongs on the socket: the sweep that evicts a revoked session
+      // can only ask the question if the handshake recorded which session it let in.
       expect(mockClient.data).toEqual({
-        userId: "user-uuid-123",
+        userId: USER_ID,
         deviceId: "device-uuid-456",
+        sessionId: SESSION_ID,
       });
-      expect(mockClient.join).toHaveBeenCalledWith("user:user-uuid-123");
+      expect(mockClient.join).toHaveBeenCalledWith(`user:${USER_ID}`);
       expect(mockClient.disconnect).not.toHaveBeenCalled();
     });
 
@@ -127,7 +165,7 @@ describe("SyncGateway", () => {
         "valid-header-token",
         { secret: "access-secret" },
       );
-      expect(mockClient.join).toHaveBeenCalledWith("user:user-uuid-123");
+      expect(mockClient.join).toHaveBeenCalledWith(`user:${USER_ID}`);
     });
 
     it("should authenticate client when token is in query string", async () => {
@@ -140,7 +178,7 @@ describe("SyncGateway", () => {
       expect(jwtService.verifyAsync).toHaveBeenCalledWith("valid-query-token", {
         secret: "access-secret",
       });
-      expect(mockClient.join).toHaveBeenCalledWith("user:user-uuid-123");
+      expect(mockClient.join).toHaveBeenCalledWith(`user:${USER_ID}`);
     });
 
     it("should emit error event and disconnect client if access token is missing", async () => {
@@ -216,25 +254,26 @@ describe("SyncGateway", () => {
   describe("what the handshake asks beyond the signature", () => {
     it("keeps a live session connected", async () => {
       jwtService.verifyAsync.mockResolvedValue({
-        sub: "user-uuid-123",
-        sessionId: "session-1",
+        sub: USER_ID,
+        sessionId: SESSION_ID,
         type: "access",
       });
 
       await gateway.handleConnection(mockClient);
 
-      expect(usersService.getUserById).toHaveBeenCalledWith("user-uuid-123");
+      expect(usersService.getUserById).toHaveBeenCalledWith(USER_ID);
       expect(usersService.isSessionLive).toHaveBeenCalledWith(
-        "user-uuid-123",
-        "session-1",
+        USER_ID,
+        SESSION_ID,
       );
-      expect(mockClient.join).toHaveBeenCalledWith("user:user-uuid-123");
+      expect(mockClient.join).toHaveBeenCalledWith(`user:${USER_ID}`);
       expect(mockClient.disconnect).not.toHaveBeenCalled();
     });
 
     it("disconnects a token with purpose (e.g. MFA_CHALLENGE)", async () => {
       jwtService.verifyAsync.mockResolvedValue({
-        sub: "user-uuid-123",
+        sub: USER_ID,
+        sessionId: SESSION_ID,
         type: "access",
         purpose: "MFA_CHALLENGE",
       });
@@ -247,7 +286,7 @@ describe("SyncGateway", () => {
 
     it("disconnects a token whose type is not access", async () => {
       jwtService.verifyAsync.mockResolvedValue({
-        sub: "user-uuid-123",
+        sub: USER_ID,
         type: "mfa_challenge",
       });
 
@@ -259,7 +298,7 @@ describe("SyncGateway", () => {
 
     it("disconnects a revoked session", async () => {
       jwtService.verifyAsync.mockResolvedValue({
-        sub: "user-uuid-123",
+        sub: USER_ID,
         sessionId: "session-gone",
         type: "access",
       });
@@ -301,39 +340,47 @@ describe("SyncGateway", () => {
       expect(mockClient.join).not.toHaveBeenCalled();
     });
 
-    it("still admits a token that names no session", async () => {
-      // Tokens minted before sessions were stamped, and the paths that use them,
-      // are `JwtStrategy`'s documented pass-through. A handshake that asked the
-      // liveness question of a token with no answer would lock out devices that
-      // did nothing wrong.
+    it("refuses a token that names no session instead of skipping the question", async () => {
+      // This used to be a documented pass — the comment claimed `JwtStrategy`
+      // allowed it — and the claim was stale: `validate()` requires the claim now,
+      // because a token nothing can point at is a token nothing can revoke.
+      // Admitting it here would leave the gateway the one door still open to an
+      // account whose owner cannot revoke what holds it open.
       jwtService.verifyAsync.mockResolvedValue({
-        sub: "user-uuid-123",
+        sub: USER_ID,
         deviceId: "device-uuid-456",
         type: "access",
       });
 
       await gateway.handleConnection(mockClient);
 
-      expect(usersService.getUserById).toHaveBeenCalled();
+      expect(usersService.getUserById).not.toHaveBeenCalled();
       expect(usersService.isSessionLive).not.toHaveBeenCalled();
-      expect(mockClient.join).toHaveBeenCalledWith("user:user-uuid-123");
-      expect(mockClient.disconnect).not.toHaveBeenCalled();
+      expect(mockClient.join).not.toHaveBeenCalled();
+      expect(mockClient.disconnect).toHaveBeenCalledWith(true);
+      expect(mockClient.emit).toHaveBeenCalledWith(
+        "error",
+        expect.objectContaining({
+          subCode: "SESSION_REJECTED",
+          message: "Unauthorized: Token names no session",
+        }),
+      );
     });
 
-    it("reads the session claim from whichever name carries it", async () => {
+    it("refuses a session claim that is not a session id", async () => {
+      // The claim's name is not a negotiation any more, so a differently shaped
+      // one is a token this gateway cannot revalidate rather than a hint to guess.
       jwtService.verifyAsync.mockResolvedValue({
-        sub: "user-uuid-123",
-        sid: "session-2",
+        sub: USER_ID,
+        sid: SESSION_ID,
         type: "access",
       });
 
       await gateway.handleConnection(mockClient);
 
-      expect(usersService.isSessionLive).toHaveBeenCalledWith(
-        "user-uuid-123",
-        "session-2",
-      );
-      expect(mockClient.disconnect).not.toHaveBeenCalled();
+      expect(usersService.isSessionLive).not.toHaveBeenCalled();
+      expect(mockClient.join).not.toHaveBeenCalled();
+      expect(mockClient.disconnect).toHaveBeenCalledWith(true);
     });
 
     it("refuses the socket rather than skipping a revalidation it could not run", async () => {
@@ -370,7 +417,7 @@ describe("SyncGateway", () => {
         .spyOn(Logger.prototype, "warn")
         .mockImplementation(() => undefined);
       jwtService.verifyAsync.mockResolvedValue({
-        sub: "user-uuid-123",
+        sub: USER_ID,
         sessionId: "session-gone",
         type: "access",
       });
@@ -385,6 +432,284 @@ describe("SyncGateway", () => {
     });
   });
 
+  /**
+   * The handshake answers once; a revocation lands later. Nothing in this repo
+   * called `disconnectSockets()` or `socketsLeave()`, so `AuthService` logout,
+   * `UsersService.revokeUserSession` and `DevicesService.revokeDevice` all left a
+   * socket in `user:<id>` receiving `sync:invalidation` — which names the account
+   * and how much data is waiting for it — until the access token expired by
+   * itself. `revalidateConnectedSockets()` is what closes that window.
+   */
+  describe("revalidateConnectedSockets", () => {
+    let revoked: any;
+    let survivor: any;
+
+    beforeEach(() => {
+      revoked = connectedSocket("socket-revoked", {
+        userId: USER_ID,
+        sessionId: "session-revoked",
+        deviceId: "device-uuid-456",
+      });
+      survivor = connectedSocket("socket-live", {
+        userId: USER_ID,
+        sessionId: SESSION_ID,
+        deviceId: "device-uuid-777",
+      });
+      mockServer.sockets.sockets = new Map([
+        [revoked.id, revoked],
+        [survivor.id, survivor],
+      ]);
+    });
+
+    it("disconnects a socket whose session was revoked after the handshake, and leaves the live one alone", async () => {
+      usersService.getSocketAccessStates.mockResolvedValue(
+        new Map([[USER_ID, liveState({ liveSessionIds: [SESSION_ID] })]]),
+      );
+
+      await expect(gateway.revalidateConnectedSockets()).resolves.toBe(1);
+
+      expect(revoked.leave).toHaveBeenCalledWith(`user:${USER_ID}`);
+      expect(revoked.disconnect).toHaveBeenCalledWith(true);
+      expect(revoked.emit).toHaveBeenCalledWith(
+        "error",
+        expect.objectContaining({
+          code: "UNAUTHORIZED",
+          subCode: "SESSION_REVOKED",
+        }),
+      );
+
+      expect(survivor.disconnect).not.toHaveBeenCalled();
+      expect(survivor.leave).not.toHaveBeenCalled();
+    });
+
+    it("evicts by device id, so revoking one device does not drop the account's other sessions", async () => {
+      usersService.getSocketAccessStates.mockResolvedValue(
+        new Map([
+          [
+            USER_ID,
+            liveState({
+              liveSessionIds: [SESSION_ID, "session-revoked"],
+              revokedDeviceIds: ["device-uuid-456"],
+            }),
+          ],
+        ]),
+      );
+
+      await gateway.revalidateConnectedSockets();
+
+      expect(revoked.disconnect).toHaveBeenCalledWith(true);
+      expect(survivor.disconnect).not.toHaveBeenCalled();
+    });
+
+    it("evicts a socket whose account stopped being readable", async () => {
+      usersService.getSocketAccessStates.mockResolvedValue(
+        new Map([
+          [
+            USER_ID,
+            liveState({
+              accountReadable: false,
+              liveSessionIds: [SESSION_ID, "session-revoked"],
+            }),
+          ],
+        ]),
+      );
+
+      await expect(gateway.revalidateConnectedSockets()).resolves.toBe(2);
+      expect(revoked.disconnect).toHaveBeenCalledWith(true);
+      expect(survivor.disconnect).toHaveBeenCalledWith(true);
+    });
+
+    it("evicts a socket that carries no session to check", async () => {
+      const orphan = connectedSocket("socket-no-session", { userId: USER_ID });
+      mockServer.sockets.sockets = new Map([[orphan.id, orphan]]);
+
+      await expect(gateway.revalidateConnectedSockets()).resolves.toBe(1);
+      expect(orphan.disconnect).toHaveBeenCalledWith(true);
+    });
+
+    it("asks once per distinct account rather than once per socket", async () => {
+      const third = connectedSocket("socket-third", {
+        userId: USER_ID,
+        sessionId: SESSION_ID,
+      });
+      mockServer.sockets.sockets = new Map([
+        [revoked.id, revoked],
+        [survivor.id, survivor],
+        [third.id, third],
+      ]);
+
+      await gateway.revalidateConnectedSockets();
+
+      expect(usersService.getSocketAccessStates).toHaveBeenCalledTimes(1);
+      expect(usersService.getSocketAccessStates).toHaveBeenCalledWith([
+        USER_ID,
+      ]);
+    });
+
+    it("splits many accounts into bounded batches", async () => {
+      const sockets = new Map<string, any>();
+      for (let index = 0; index < 250; index += 1) {
+        const userId = `user-${index}`;
+        const socket = connectedSocket(`socket-${index}`, {
+          userId,
+          sessionId: SESSION_ID,
+        });
+        sockets.set(socket.id, socket);
+      }
+      mockServer.sockets.sockets = sockets;
+
+      await gateway.revalidateConnectedSockets();
+
+      const batches = usersService.getSocketAccessStates.mock.calls.map(
+        ([ids]) => ids.length,
+      );
+      expect(batches).toEqual([200, 50]);
+    });
+
+    it("keeps every socket when the state lookup cannot be answered", async () => {
+      // Fail-open on purpose: a database blip is not a revocation, and treating it
+      // as one would drop every device in the deployment at once. The handshake
+      // fails closed because it has no connection to protect.
+      const errored = jest
+        .spyOn(Logger.prototype, "error")
+        .mockImplementation(() => undefined);
+      usersService.getSocketAccessStates.mockRejectedValue(
+        new Error("db down"),
+      );
+
+      await expect(gateway.revalidateConnectedSockets()).resolves.toBe(0);
+
+      expect(revoked.disconnect).not.toHaveBeenCalled();
+      expect(survivor.disconnect).not.toHaveBeenCalled();
+      expect(errored).toHaveBeenCalled();
+      errored.mockRestore();
+    });
+
+    it("does not stack sweeps", async () => {
+      let release: (value: Map<string, SocketAccessState>) => void = () => {};
+      usersService.getSocketAccessStates.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+      );
+
+      const first = gateway.revalidateConnectedSockets();
+      await expect(gateway.revalidateConnectedSockets()).resolves.toBe(0);
+      expect(usersService.getSocketAccessStates).toHaveBeenCalledTimes(1);
+
+      release(new Map([[USER_ID, liveState()]]));
+      await expect(first).resolves.toBe(1);
+    });
+
+    it("ignores sockets that never authenticated", async () => {
+      const anonymous = connectedSocket("socket-anon", { userId: "" });
+      mockServer.sockets.sockets = new Map([[anonymous.id, anonymous]]);
+
+      await expect(gateway.revalidateConnectedSockets()).resolves.toBe(0);
+      expect(usersService.getSocketAccessStates).not.toHaveBeenCalled();
+      expect(anonymous.disconnect).not.toHaveBeenCalled();
+    });
+
+    it("says so once, rather than silently keeping sockets, when no state lookup exists", async () => {
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          SyncGateway,
+          { provide: JwtService, useValue: jwtService },
+          { provide: ConfigurationService, useValue: configService },
+        ],
+      }).compile();
+
+      const withoutUsers = module.get<SyncGateway>(SyncGateway);
+      withoutUsers.server = mockServer;
+      const warned = jest
+        .spyOn(Logger.prototype, "warn")
+        .mockImplementation(() => undefined);
+
+      await expect(withoutUsers.revalidateConnectedSockets()).resolves.toBe(0);
+      expect(warned).toHaveBeenCalled();
+      expect(revoked.disconnect).not.toHaveBeenCalled();
+      warned.mockRestore();
+    });
+
+    it("is a no-op before the server is bound", async () => {
+      gateway.server = undefined as any;
+
+      await expect(gateway.revalidateConnectedSockets()).resolves.toBe(0);
+      expect(usersService.getSocketAccessStates).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("the sweep's timer", () => {
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it("arms on the documented interval, runs the sweep, and is cleared on destroy", async () => {
+      // Cleared first so the assertions below are about this call, whatever the
+      // module lifecycle already did with the real timers.
+      gateway.onModuleDestroy();
+
+      const timer = { unref: jest.fn() };
+      const armed = jest
+        .spyOn(globalThis, "setInterval")
+        .mockReturnValue(timer as any);
+      const cleared = jest
+        .spyOn(globalThis, "clearInterval")
+        .mockImplementation(() => undefined);
+      const sweep = jest
+        .spyOn(gateway, "revalidateConnectedSockets")
+        .mockResolvedValue(0);
+
+      gateway.onModuleInit();
+
+      expect(armed).toHaveBeenCalledWith(
+        expect.any(Function),
+        SESSION_REVALIDATION_INTERVAL_MS,
+      );
+      // An `unref()`ed handle means a gateway that is the only thing holding the
+      // process open — a test run, the queue worker — is not the reason it is.
+      expect(timer.unref).toHaveBeenCalled();
+
+      (armed.mock.calls[0][0] as () => void)();
+      expect(sweep).toHaveBeenCalled();
+
+      // A second init must not stack a second sweep on the same instance.
+      gateway.onModuleInit();
+      expect(armed).toHaveBeenCalledTimes(1);
+
+      gateway.onModuleDestroy();
+      expect(cleared).toHaveBeenCalledWith(timer);
+    });
+
+    it("survives a sweep that throws, so one bad minute is not a dead timer", async () => {
+      gateway.onModuleDestroy();
+
+      const timer = { unref: jest.fn() };
+      const armed = jest
+        .spyOn(globalThis, "setInterval")
+        .mockReturnValue(timer as any);
+      jest
+        .spyOn(gateway, "revalidateConnectedSockets")
+        .mockRejectedValue(new Error("unexpected"));
+      const errored = jest
+        .spyOn(Logger.prototype, "error")
+        .mockImplementation(() => undefined);
+
+      gateway.onModuleInit();
+      (armed.mock.calls[0][0] as () => void)();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Caught and logged rather than thrown: the interval keeps running, and the
+      // failure that would otherwise be a silent gap in revalidation is in the log.
+      expect(errored).toHaveBeenCalledWith(
+        expect.stringContaining("Socket revalidation threw"),
+      );
+      expect(timer.unref).toHaveBeenCalled();
+    });
+  });
+
   describe("handleDisconnect", () => {
     it("should handle client disconnect cleanly", () => {
       expect(() => gateway.handleDisconnect(mockClient)).not.toThrow();
@@ -393,13 +718,13 @@ describe("SyncGateway", () => {
 
   describe("notifySyncInvalidation", () => {
     it("sends one invalidation to the account room, payload and all", () => {
-      gateway.notifySyncInvalidation("user-uuid-123", "device-uuid-456", "105");
+      gateway.notifySyncInvalidation(USER_ID, "device-uuid-456", "105");
 
-      expect(mockServer.to).toHaveBeenCalledWith("user:user-uuid-123");
+      expect(mockServer.to).toHaveBeenCalledWith(`user:${USER_ID}`);
       expect(broadcastEmit).toHaveBeenCalledWith(
         "sync:invalidation",
         expect.objectContaining({
-          userId: "user-uuid-123",
+          userId: USER_ID,
           originDeviceId: "device-uuid-456",
           highestCursor: "105",
         }),
@@ -411,7 +736,7 @@ describe("SyncGateway", () => {
       // included, so no socket may also be emitted to directly. A device that
       // hears the event twice pulls twice, and nothing on the client can tell
       // the second one from a change it has not seen yet.
-      gateway.notifySyncInvalidation("user-uuid-123", "device-uuid-456", "105");
+      gateway.notifySyncInvalidation(USER_ID, "device-uuid-456", "105");
 
       expect(broadcastEmit).toHaveBeenCalledTimes(1);
       expect(mockClient.emit).not.toHaveBeenCalled();
@@ -437,7 +762,7 @@ describe("SyncGateway", () => {
       gateway.server = undefined as any;
 
       expect(() =>
-        gateway.notifySyncInvalidation("user-uuid-123", "device-uuid-456", "7"),
+        gateway.notifySyncInvalidation(USER_ID, "device-uuid-456", "7"),
       ).not.toThrow();
       expect(broadcastEmit).not.toHaveBeenCalled();
     });

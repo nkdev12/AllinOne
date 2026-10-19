@@ -39,6 +39,14 @@ import {
 import { Platform, AuditAction, OtpPurpose } from "@prisma/client";
 import { Session } from "@prisma/client";
 import { RefreshTokenGraceStore } from "./refresh-token-grace.store";
+import {
+  RecoveryCodeMatch,
+  RecoveryCodePepper,
+  generateRecoveryCode,
+  matchRecoveryCode,
+  recoveryCodePepper,
+  sealRecoveryCode,
+} from "./recovery-code-seal";
 
 /**
  * Static dummy Argon2id hash used to mitigate timing side-channel attacks on login
@@ -51,6 +59,48 @@ const DUMMY_PASSWORD_HASH =
 export class AuthService implements OnModuleDestroy {
   private readonly logger = new Logger(AuthService.name);
   private readonly RESET_OTP_TTL_MINUTES = 15;
+
+  /** The raw collection the email-verification codes live in — see `spendEmailVerificationOtp`. */
+  private static readonly EMAIL_OTP_COLLECTION = "email_verification_otps";
+
+  /**
+   * An email-verification code lives an hour, which is what makes it convenient to
+   * type and what made it guessable: a wrong code used to leave the row exactly as
+   * it found it, so the only brake was the per-IP throttler — and that throttler
+   * fails open whenever Redis is unreachable. The hour now carries a guess budget
+   * with it rather than outliving one.
+   */
+  private static readonly EMAIL_OTP_TTL_MINUTES = 60;
+
+  /**
+   * Six guesses per code, spent one at a time against the row itself.
+   *
+   * The budget is this flow's own number rather than `OtpService.MAX_ATTEMPTS`, and
+   * not for a reason anyone should have to rediscover: the codes `OtpService`
+   * governs live fifteen minutes and belong to flows that say what went wrong, while
+   * this one lives an hour and answers every refusal with the same generic sentence
+   * so the route stays un-enumerable. A budget set for a fifteen-minute code and
+   * applied here is a code that dies on the fifth fumble of a person reading six
+   * digits off another app's window, and the only remedy they can see is to ask
+   * support why their address will not verify.
+   *
+   * What the size of the number buys is arithmetic, and it is not the interesting
+   * part: six guesses out of the 900,000 values `randomInt(100000, 1000000)` issues
+   * is a 1-in-150,000 chance of a lucky hit per code, where the design this replaces
+   * handed the same code to roughly three hundred guesses an hour — bounded only by
+   * `@Throttle(5/60s)`, which is the component that fails open when Redis is down.
+   *
+   * Public so the specs count the budget out instead of repeating a literal that a
+   * change here would silently invalidate.
+   */
+  static readonly EMAIL_OTP_MAX_ATTEMPTS = 6;
+
+  /**
+   * Codes handed out per MFA enrolment. Ten is the number a user can realistically
+   * print and file, and it is unchanged: the defect this fixes was never the count,
+   * it was that each of the ten was worth 32 bits and was stored unsalted.
+   */
+  private static readonly RECOVERY_CODE_COUNT = 10;
 
   /**
    * Grace period window (30 seconds) during which a recently rotated refresh
@@ -730,15 +780,35 @@ export class AuthService implements OnModuleDestroy {
     if (user && !user.emailVerifiedAt) {
       const otp = crypto.randomInt(100000, 1000000).toString();
       const codeHash = crypto.createHash("sha256").update(otp).digest("hex");
-      const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+      const expiresAt = new Date(
+        Date.now() + AuthService.EMAIL_OTP_TTL_MINUTES * 60 * 1000,
+      );
 
       await this.prisma.$runCommandRaw({
-        update: "email_verification_otps",
+        update: AuthService.EMAIL_OTP_COLLECTION,
         updates: [
           {
             q: { userId: user.id },
             u: {
-              $set: { codeHash, expiresAt },
+              // The counter is reset here rather than left to carry over, the same
+              // way `OtpService.issue` resets it: a re-mint hands out a brand-new
+              // code, and guesses spent against the code that came before it would
+              // otherwise be taken out of this one's budget before its owner had
+              // typed a digit.
+              //
+              // `maxAttempts` travels with it as a record of the budget this code was
+              // minted with — the way a `VaultSetting` stores the KDF parameters it
+              // was created under, which the server never reads to configure
+              // anything. It is deliberately not the bound: `spendEmailVerificationOtp`
+              // compares against the constant, so a document that claimed a larger
+              // budget would be a field a write bug could use to talk its way out of
+              // the counter.
+              $set: {
+                codeHash,
+                expiresAt,
+                attempts: 0,
+                maxAttempts: AuthService.EMAIL_OTP_MAX_ATTEMPTS,
+              },
               $setOnInsert: { userId: user.id, createdAt: new Date() },
             },
             upsert: true,
@@ -758,11 +828,11 @@ export class AuthService implements OnModuleDestroy {
       // never which code, which is the question an attacker asks.
       if (this.configService.isDevelopment) {
         this.logger.debug(
-          `OTP CODE FOR ${user.email}: ${otp} (expires in 60 minutes)`,
+          `OTP CODE FOR ${user.email}: ${otp} (expires in ${AuthService.EMAIL_OTP_TTL_MINUTES} minutes)`,
         );
       } else {
         this.logger.debug(
-          `Verification OTP issued for ${user.email} (expires in 60 minutes)`,
+          `Verification OTP issued for ${user.email} (expires in ${AuthService.EMAIL_OTP_TTL_MINUTES} minutes)`,
         );
       }
 
@@ -790,30 +860,31 @@ export class AuthService implements OnModuleDestroy {
     email?: string,
     otp?: string,
   ): Promise<{ message: string }> {
-    try {
-      let userId: string;
+    if (email && otp) {
+      const user = await this.usersService.findByEmail(email);
+      // One answer for "no such account", "wrong code", "spent code" and "expired
+      // code". This route is unauthenticated, and the failure it reports is a
+      // statement about an address the caller typed, so the shape of a refusal is
+      // the enumeration this endpoint would otherwise hand out.
+      if (!user) {
+        throw badRequest(ErrorCode.OTP_INVALID, "Invalid or expired OTP");
+      }
 
-      if (email && otp) {
-        // OTP verification from MongoDB
-        const user = await this.usersService.findByEmail(email);
-        if (!user) throw new BadRequestException("User not found");
-        const codeHash = crypto.createHash("sha256").update(otp).digest("hex");
-        const result = (await this.prisma.$runCommandRaw({
-          findAndModify: "email_verification_otps",
-          query: {
-            userId: user.id,
-            codeHash,
-            expiresAt: { $gt: new Date() },
-          },
-          remove: true,
-        })) as { value?: { _id: any } | null };
-        const storedOtp = result.value;
-        if (!storedOtp) {
-          throw badRequest(ErrorCode.OTP_INVALID, "Invalid or expired OTP");
-        }
-        userId = user.id;
-      } else if (token) {
-        // Token verification
+      if (!(await this.spendEmailVerificationOtp(user.id, otp))) {
+        throw badRequest(ErrorCode.OTP_INVALID, "Invalid or expired OTP");
+      }
+
+      // Deliberately not wrapped in a `catch` that re-raises it as a bad
+      // credential: the code is already spent by the line above, so a write that
+      // fails here is a server fault that has to surface as one. Answering
+      // "invalid or expired" would send the user back to a code that no longer
+      // exists and hide the account that never got marked verified.
+      return this.setEmailVerified(user.id);
+    }
+
+    if (token) {
+      let userId: string;
+      try {
         const payload = this.jwtService.verify(token, {
           secret: this.configService.jwtAccessSecret,
         });
@@ -825,31 +896,148 @@ export class AuthService implements OnModuleDestroy {
           );
         }
         userId = payload.sub;
-      } else {
+      } catch (error) {
+        this.logger.error("Failed to confirm email verification", error);
         throw badRequest(
-          ErrorCode.VALIDATION_ERROR,
-          "Must provide either a token or email and OTP",
+          ErrorCode.TOKEN_INVALID,
+          "Invalid or expired email verification token",
         );
       }
 
-      await this.prisma.user.update({
-        where: { id: userId },
-        data: { emailVerifiedAt: new Date() },
-      });
-
-      await this.prisma.authentication.updateMany({
-        where: { userId: userId, type: "EMAIL_PASSWORD" },
-        data: { emailVerified: true },
-      });
-
-      return { message: "Email address successfully verified" };
-    } catch (error) {
-      this.logger.error("Failed to confirm email verification", error);
-      throw badRequest(
-        ErrorCode.TOKEN_INVALID,
-        "Invalid or expired email verification token",
-      );
+      return this.setEmailVerified(userId);
     }
+
+    throw badRequest(
+      ErrorCode.VALIDATION_ERROR,
+      "Must provide either a token or email and OTP",
+    );
+  }
+
+  /**
+   * Spends an email-verification code, and costs the sender one of the
+   * `EMAIL_OTP_MAX_ATTEMPTS` guesses whether the code was right or not.
+   *
+   * This flow does not ride on `OtpService`, which is otherwise the right answer
+   * for a bounded single-use code, because the model behind it cannot express
+   * "email verification for this user": `OtpToken.purpose` is the `OtpPurpose` enum
+   * and its only members are `PASSWORD_RESET` and `VAULT_RECOVERY`, so an
+   * `EMAIL_VERIFICATION` purpose is a schema edit and a `db push` — and borrowing
+   * `PASSWORD_RESET` instead would put two flows on the one row the composite
+   * `userId`/`purpose` key allows, making a verification code a password reset code
+   * and the other way round. The raw collection this flow already writes has the
+   * same three fields `OtpService` leans on (`userId`, `codeHash`, `expiresAt`) and
+   * now carries the counter as a fourth, so the bound is that service's shape — a
+   * count held on the row and decremented inside the write — with this flow's window
+   * deciding the number.
+   *
+   * Two commands, each atomic by itself, and neither one a read of the budget
+   * followed by a write computed from it:
+   *
+   * 1. the claim — a conditional delete whose filter is the code itself, so a wrong
+   *    guess matches nothing and only the request whose `findAndModify` hands back a
+   *    document can say "verified";
+   * 2. the burn — an `$inc` that runs when, and only when, the claim matched nothing.
+   *
+   * The order of those two is the part worth stating, because it is the whole of the
+   * fix: burning first and claiming second would charge a guess to the request that
+   * succeeds, and — once the last allowed burn deletes the row — would delete it
+   * before the correct code inside the same request ever got compared. Claiming first
+   * keeps the happy path to one write and keeps "budget spent" the only way a code
+   * dies before its hour is up.
+   *
+   * The claim's filter carries every bound at once, which is what makes a spent row,
+   * an expired row and an exhausted row answer the same `null` as a wrong code. The
+   * `attempts` bound is in it even though the last burn deletes the row, because a
+   * delete that failed is exactly the state in which a code that is still correct has
+   * no guesses left to spend.
+   */
+  private async spendEmailVerificationOtp(
+    userId: string,
+    otp: string,
+  ): Promise<boolean> {
+    const codeHash = crypto
+      .createHash("sha256")
+      .update(otp.trim())
+      .digest("hex");
+
+    /**
+     * A row minted before this counter existed carries no `attempts` field at all,
+     * and MongoDB's comparison operators never match a document that is missing the
+     * field they compare — so `$lt` alone would refuse every code issued in the hour
+     * before this deploy. `attempts` absent therefore reads as "no guesses spent",
+     * which is what it is.
+     */
+    const budgetIntact = {
+      $or: [
+        { attempts: { $lt: AuthService.EMAIL_OTP_MAX_ATTEMPTS } },
+        { attempts: { $exists: false } },
+      ],
+    };
+
+    const claimed = (await this.prisma.$runCommandRaw({
+      findAndModify: AuthService.EMAIL_OTP_COLLECTION,
+      query: {
+        userId,
+        codeHash,
+        expiresAt: { $gt: new Date() },
+        ...budgetIntact,
+      },
+      remove: true,
+    })) as { value?: { _id?: unknown } | null };
+
+    if (claimed?.value) return true;
+
+    const burned = (await this.prisma.$runCommandRaw({
+      findAndModify: AuthService.EMAIL_OTP_COLLECTION,
+      query: { userId, expiresAt: { $gt: new Date() }, ...budgetIntact },
+      update: { $inc: { attempts: 1 } },
+      new: true,
+      fields: { attempts: 1 },
+    })) as { value?: { attempts?: number } | null };
+
+    if (!burned?.value) {
+      // Nothing live to burn. An expired row still sitting there is deleted rather
+      // than left answerable, the way `OtpService.consume` deletes one it reads as
+      // out of its window: a row a later request can probe is a budget a later
+      // request gets.
+      await this.prisma.$runCommandRaw({
+        delete: AuthService.EMAIL_OTP_COLLECTION,
+        deletes: [{ q: { userId, expiresAt: { $lte: new Date() } }, limit: 0 }],
+      });
+      return false;
+    }
+
+    if ((burned.value.attempts ?? 0) >= AuthService.EMAIL_OTP_MAX_ATTEMPTS) {
+      // A `delete` with `limit: 0`, not a second `findAndModify`, because the raw
+      // upsert that mints these codes has no unique index behind it to make it
+      // exclusive: two concurrent requests for one account can leave two live
+      // documents, and exhausting the budget has to take all of them with it rather
+      // than leaving a second row with a budget of its own.
+      await this.prisma.$runCommandRaw({
+        delete: AuthService.EMAIL_OTP_COLLECTION,
+        deletes: [{ q: { userId }, limit: 0 }],
+      });
+    }
+
+    return false;
+  }
+
+  /**
+   * Records the verification a caller has just proven. Reached once per code, since
+   * the spend above is what gates it and a replay of the same code never gets here.
+   */
+  private async setEmailVerified(userId: string): Promise<{ message: string }> {
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { emailVerifiedAt: new Date() },
+    });
+
+    await this.prisma.authentication.updateMany({
+      where: { userId, type: "EMAIL_PASSWORD" },
+      data: { emailVerified: true },
+    });
+
+    return { message: "Email address successfully verified" };
   }
 
   async forgotPassword(email: string): Promise<{ message: string }> {
@@ -1171,23 +1359,30 @@ export class AuthService implements OnModuleDestroy {
     }
 
     const rawRecoveryCodes: string[] = [];
-    const hashedRecoveryCodes: string[] = [];
+    const sealedRecoveryCodes: string[] = [];
 
-    for (let i = 0; i < 10; i++) {
-      const part1 = crypto.randomBytes(2).toString("hex").toUpperCase();
-      const part2 = crypto.randomBytes(2).toString("hex").toUpperCase();
-      const code = `${part1}-${part2}`;
+    // The pepper is resolved before anything is minted, and a missing
+    // `ENCRYPTION_KEY` is allowed to fail this request: sealing the new codes bare
+    // would write rows weaker than the ones they replace, quietly, on the one call
+    // whose whole job is to make the second factor stronger.
+    const pepper = this.currentRecoveryCodePepper();
+
+    // 96 bits apiece (`generateRecoveryCode`), which is the point of this loop: the
+    // codes a leaked row used to describe were 32 bits each and digested with no
+    // key, so ten of them were seconds of offline work and the five-guess lockout on
+    // the login path was only ever limiting the online half of the attack. Storing
+    // the keyed digest is what makes that lockout the actual budget.
+    for (let i = 0; i < AuthService.RECOVERY_CODE_COUNT; i++) {
+      const code = generateRecoveryCode();
       rawRecoveryCodes.push(code);
-
-      const hash = crypto.createHash("sha256").update(code).digest("hex");
-      hashedRecoveryCodes.push(hash);
+      sealedRecoveryCodes.push(sealRecoveryCode(code, pepper));
     }
 
     await this.prisma.mFASetting.update({
       where: { userId },
       data: {
         totpEnabled: true,
-        recoveryCodes: JSON.stringify(hashedRecoveryCodes),
+        recoveryCodes: JSON.stringify(sealedRecoveryCodes),
         backupCodesUsed: JSON.stringify([]),
         lastVerifiedAt: new Date(),
       },
@@ -1203,15 +1398,73 @@ export class AuthService implements OnModuleDestroy {
     };
   }
 
+  /**
+   * The pepper new recovery codes are sealed under, and the name they are stamped
+   * with. Separate from the vault's copy of this idea only because
+   * `VaultSettingsService`'s helpers are module-private; the getters it reads are
+   * the same four, so one `ENCRYPTION_KEY` rotation moves both.
+   */
+  private currentRecoveryCodePepper(): RecoveryCodePepper {
+    return recoveryCodePepper(
+      this.configService.encryptionKey,
+      this.configService.encryptionKeyId,
+    );
+  }
+
+  /**
+   * The peppers a stored code may have been sealed under, current first — the same
+   * dual-key window `getTotpEncryptionKeyRing` and the vault walk.
+   *
+   * A recovery code is a digest, so a rotation cannot convert a row offline and
+   * cannot convert the live entries online either: spending a code deletes it, and
+   * the plaintext of the entries beside it is never in hand to re-seal them — only
+   * the one entry a redemption actually touches can be converted, which is what
+   * `spentRecoveryCodeEntry` does for the spent marker. The ring is therefore the
+   * whole of the mitigation for the live list, and `ENCRYPTION_KEY_PREVIOUS`
+   * has to stay set until every account has re-enabled MFA at least once — which is
+   * what a stamped entry makes possible to check, rather than discovering it by
+   * failing to match.
+   */
+  private getRecoveryCodePepperRing(): RecoveryCodePepper[] {
+    const current = this.currentRecoveryCodePepper();
+    const previous = this.configService.encryptionKeyPrevious;
+    if (!previous) {
+      return [current];
+    }
+
+    return [
+      current,
+      recoveryCodePepper(previous, this.configService.encryptionKeyPreviousId),
+    ];
+  }
+
+  /**
+   * `getRecoveryCodePepperRing` with the deployment fault separated from the
+   * answer.
+   *
+   * An unset `ENCRYPTION_KEY` throws from the configuration getter, and on this
+   * path throwing would report our outage as "wrong recovery code" — then count
+   * itself into the five failures that lock the account. A row of legacy digests
+   * needs no pepper at all and still opens, so the empty ring is what an unkeyed
+   * deployment redeems against; the error is logged, because it is exactly the kind
+   * of failure that is invisible otherwise.
+   */
+  private recoveryCodePepperRingOrEmpty(userId: string): RecoveryCodePepper[] {
+    try {
+      return this.getRecoveryCodePepperRing();
+    } catch (err) {
+      this.logger.error(
+        `[AuthService] Recovery codes sealed under a pepper cannot be checked for user ${userId}: ENCRYPTION_KEY is not configured. Legacy unsealed codes still redeem; set the key.`,
+        err,
+      );
+      return [];
+    }
+  }
+
   private async redeemRecoveryCode(
     userId: string,
     rawCode: string,
   ): Promise<boolean> {
-    const codeHash = crypto
-      .createHash("sha256")
-      .update(rawCode.trim())
-      .digest("hex");
-
     const mfaSetting = await this.prisma.mFASetting.findUnique({
       where: { userId },
     });
@@ -1225,17 +1478,34 @@ export class AuthService implements OnModuleDestroy {
       ? JSON.parse(mfaSetting.backupCodesUsed)
       : [];
 
-    if (usedCodes.includes(codeHash)) {
+    const match = matchRecoveryCode(
+      recoveryCodes,
+      rawCode,
+      this.recoveryCodePepperRingOrEmpty(userId),
+    );
+
+    if (match.strandedPepperIds.length > 0) {
+      this.logger.error(
+        `[AuthService] Recovery codes for user ${userId} are sealed under pepper(s) ${match.strandedPepperIds.join(", ")} which this process does not hold. Set ENCRYPTION_KEY_PREVIOUS (and ENCRYPTION_KEY_PREVIOUS_ID) to the retired key, or the owner must re-enable MFA to get new codes.`,
+      );
+    }
+
+    // Nothing matched, or the code that matches is one this account has already
+    // spent. The used list holds the digests, not the codes, because the codes are
+    // never stored.
+    if (match.index === -1) {
       return false;
     }
 
-    const codeIndex = recoveryCodes.indexOf(codeHash);
-    if (codeIndex === -1) {
+    const spentCode = recoveryCodes[match.index];
+    if (usedCodes.includes(spentCode)) {
       return false;
     }
 
-    recoveryCodes.splice(codeIndex, 1);
-    usedCodes.push(codeHash);
+    recoveryCodes.splice(match.index, 1);
+    usedCodes.push(
+      this.spentRecoveryCodeEntry(match, rawCode, spentCode, userId),
+    );
 
     // Spend the code with a compare-and-swap rather than by writing back an array
     // this request built from its own snapshot. A Mongo transaction does not lock
@@ -1268,6 +1538,57 @@ export class AuthService implements OnModuleDestroy {
     // this write: the attempt is refused, and the code is not marked spent by a
     // write that did not happen.
     return spent.count === 1;
+  }
+
+  /**
+   * The digest the spent list records for a redeemed code, which is the same
+   * digest the row held — unless the row held it in the pre-pepper form.
+   *
+   * A spent code leaves the live list and reappears only here, so this is the one
+   * place an old entry can be converted: redemption is the only moment the
+   * plaintext exists to re-digest under the pepper, and the compare-and-swap above
+   * is the only statement that can carry both halves of the change. Upgrading it
+   * matters because a bare `sha256` of a legacy code is a 32-bit puzzle whoever
+   * reads the row can work through offline, and a row whose owner has been using
+   * their codes for a year holds up to ten of them in this field alone — the fix
+   * would leave a second crackable set in the very document it set out to make
+   * worthless.
+   *
+   * Exactly one entry moves per redemption, because the entries beside it are
+   * digests of codes nobody has typed: there is nothing to seal them from. That is
+   * why the fallback comparison stays in `matchRecoveryCode` rather than becoming
+   * a migration — the row drains one entry at a time, and `disableMfa` clears both
+   * arrays outright, so the last legacy digest is gone the moment its owner
+   * re-enrols.
+   *
+   * An entry already sealed is written back untouched, including one sealed under
+   * a pepper in the rotation window rather than the current one: the spent list is
+   * a record of what was presented, and re-stamping it under a different key would
+   * make it claim to have been made by a key that never made it.
+   */
+  private spentRecoveryCodeEntry(
+    match: RecoveryCodeMatch,
+    rawCode: string,
+    spentEntry: string,
+    userId: string,
+  ): string {
+    if (!match.viaLegacyDigest) {
+      return spentEntry;
+    }
+
+    try {
+      return sealRecoveryCode(rawCode, this.currentRecoveryCodePepper());
+    } catch (err) {
+      // No `ENCRYPTION_KEY`, so no pepper to move it to. Spending the code anyway
+      // is the lesser harm — the alternative is refusing a second factor the row
+      // still opens with, on an outage that is ours. The entry stays a bare digest,
+      // which is a weaker row rather than a broken login.
+      this.logger.error(
+        `[AuthService] The spent recovery code for user ${userId} could not be re-recorded under a pepper because ENCRYPTION_KEY is not configured; its legacy digest stays in the used-code list. Set the key — every later redemption upgrades the entry it touches.`,
+        err,
+      );
+      return spentEntry;
+    }
   }
 
   async disableMfa(

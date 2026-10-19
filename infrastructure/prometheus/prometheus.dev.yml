@@ -2,33 +2,55 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# ============================================================================
+# DEV ONLY. There is no production Prometheus.
+#
+# `infrastructure/prometheus/prometheus.prod.yml` and the Caddy that fronted it
+# were deleted in 1c1cc7d when the deployment moved to Railway, and nothing
+# replaced them: the metrics endpoint is now served by the API itself on the
+# public `*.up.railway.app` origin, and no hosted or self-hosted scraper points
+# at it. So this file is a laptop artifact — start it with
+# `docker compose -f docker-compose.dev.yml up -d prometheus grafana` and expect
+# it to be the only thing that ever reads the numbers. Whether Railway's own
+# ingress can be told to restrict a path like `/metrics` to internal traffic is
+# not something this repository can express: `railway.json` has no route, header
+# or path configuration in it, and domains are attached in the dashboard. See
+# docs/DEPLOYMENT.md "Step 9: Monitoring & Logging" for what is actually true
+# today instead of what a deleted file used to promise.
+# ============================================================================
+
 scrape_configs:
   - job_name: 'allinone-api'
+    # `localhost:3000` inside this container is Prometheus talking to itself. The
+    # API is not a service in docker-compose.dev.yml (it runs on the host with
+    # `npm run start:dev`), so the target is the host gateway — the compose file
+    # supplies `host.docker.internal:host-gateway` in extra_hosts for Linux;
+    # Docker Desktop and Podman Desktop already map it.
+    #
+    # If you run the API somewhere else, change the target; do not add a second
+    # job that duplicates the metrics path.
     static_configs:
-      - targets: ['localhost:3000']
+      - targets: ['host.docker.internal:3000']
     metrics_path: '/metrics'
-    # `/metrics` is guarded in every environment, not just production: the guard
-    # answers an anonymous scrape with 401, so this job has never returned metrics.
-    # The fix is the bearer credential block below, identical to the live one in
-    # prometheus.prod.yml, pointed at the same in-container path.
+    # `/metrics` is guarded in every environment, so an anonymous scrape has never
+    # returned metrics here either: `MetricsScrapeGuard`
+    # (src/common/metrics/metrics-scrape.guard.ts) answers 401 unless the request
+    # presents `ADMIN_SECRET` — as `Authorization: Bearer <secret>`, the shape the
+    # block below emits, or as `x-admin-secret: <secret>`, which needs an
+    # `http_headers` stanza instead.
     #
-    # It stays commented out here on purpose. That file holds ADMIN_SECRET, and a
-    # dev compose is the one everybody clones — mounting a path nobody has, or worse
-    # committing a placeholder secret to make the mount succeed, trades a dead
-    # dashboard for a leaked credential. So an operator who wants dev metrics
-    # supplies the host file themselves (same contents as production: ADMIN_SECRET
-    # verbatim, mode 600, never committed), bind-mounts it onto
-    # /run/secrets/metrics_scrape_secret in docker-compose.dev.yml's `prometheus`
-    # service, and uncomments this stanza.
+    # It stays commented out because the file it would mount holds ADMIN_SECRET and
+    # a dev compose is the one everybody clones; committing a placeholder to make
+    # the mount succeed trades a dead dashboard for a leaked credential. To see
+    # dev metrics: put your own ADMIN_SECRET value verbatim in a file, chmod 600,
+    # bind-mount it onto /run/secrets/metrics_scrape_secret in the `prometheus`
+    # service of docker-compose.dev.yml, and uncomment these three lines.
     #
-    # Until then the failure is expected and stated rather than silent: the API job
-    # returns 401 and `up{job="allinone-api"} == 0`. Note the target is a second,
-    # unrelated reason this job has never worked — `localhost:3000` inside this
-    # container is Prometheus talking to itself on the bridge network, not the API,
-    # so a laptop that runs the API on the host has to either point this at
-    # `host.docker.internal:3000` (with `extra_hosts` on Linux) or run the API as a
-    # service on `allinone-dev`. Fixing that is a dev-workflow decision, not
-    # something to invent here.
+    # Until then the failure is stated rather than silent: the job returns 401 and
+    # `up{job="allinone-api"} == 0`. Note that as of 2026-10-19 `ADMIN_SECRET` is
+    # not declared in this project's local environment at all, and a declared-but-
+    # weak value now fails the boot outright, so there is currently no working
+    # scrape credential to mount.
     # authorization:
     #   type: Bearer
     #   credentials_file: /run/secrets/metrics_scrape_secret
