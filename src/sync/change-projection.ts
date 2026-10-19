@@ -1949,17 +1949,19 @@ async function financeGroupMemberIds(
     if (member && typeof member.id === "string") ids.add(member.id);
   }
 
-  const grants = await tx.resourceShare?.findMany({
-    where: {
-      resourceType: "EXPENSE_GROUP",
-      resourceId: groupId,
-      deletedAt: null,
-    },
-    select: { sharedWithUserId: true },
-  });
-  if (grants === undefined) return undefined;
-  for (const grant of grants as Array<{ sharedWithUserId: string }>) {
-    ids.add(grant.sharedWithUserId);
+  if (tx.resourceShare) {
+    const grants = await tx.resourceShare.findMany({
+      where: {
+        resourceType: "EXPENSE_GROUP",
+        resourceId: groupId,
+        deletedAt: null,
+      },
+      select: { sharedWithUserId: true },
+    });
+    if (grants === undefined) return undefined;
+    for (const grant of grants as Array<{ sharedWithUserId: string }>) {
+      ids.add(grant.sharedWithUserId);
+    }
   }
   return ids;
 }

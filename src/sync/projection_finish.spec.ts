@@ -84,6 +84,7 @@ function fake(over: Record<string, any> = {}): Record<string, any> {
     financeGroup: delegates(groupId, {
       findUnique: jest.fn().mockResolvedValue({
         ownerId: userId,
+        members: [{ id: peerId }],
         currency: "INR",
         deletedAt: null,
       }),
