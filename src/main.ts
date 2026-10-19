@@ -13,6 +13,11 @@ const PRODUCTION_WEB_ORIGINS = [
 ];
 
 async function bootstrap() {
+  if (process.env.DATABASE_URL) {
+    process.env.DATABASE_URL = process.env.DATABASE_URL
+      .trim()
+      .replace(/^["']|["']$/g, "");
+  }
   const app = await NestFactory.create(AppModule, {
     logger: ["log", "error", "warn", "debug", "verbose"],
   });

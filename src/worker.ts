@@ -26,6 +26,11 @@ import { WorkerModule } from "./worker.module";
  */
 
 export async function bootstrap() {
+  if (process.env.DATABASE_URL) {
+    process.env.DATABASE_URL = process.env.DATABASE_URL
+      .trim()
+      .replace(/^["']|["']$/g, "");
+  }
   const logger = new Logger("Worker");
 
   // Lifecycle hooks (`onModuleInit`, `onApplicationBootstrap`) have already run

@@ -96,7 +96,7 @@ export const ENV_VALIDATION_SCHEMA = Joi.object({
   // App
   APP_PORT: Joi.number().default(3000),
   PORT: Joi.number().optional(),
-  APP_URL: Joi.string().required(),
+  APP_URL: Joi.string().default("http://localhost:3000"),
   LOG_LEVEL: Joi.string().default("debug"),
 
   // Email (SMTP; Gmail uses smtp.gmail.com:587 with an app password)

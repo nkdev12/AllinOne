@@ -1,21 +1,10 @@
 {
   "$schema": "https://railway.com/railway.schema.json",
-  "_comment": [
-    "Second Railway service: the Bull queue worker. Railway only auto-reads",
-    "railway.json (or railway.toml) from the repo root, so this file is a checked-in",
-    "template rather than something the CLI picks up: create a second service in the",
-    "project from this same repository and paste these two values into its settings",
-    "(Build: Nixpacks, Start Command: npm run start:worker). See",
-    "docs/DEPLOYMENT.md 'Two-service topology' for why this process has to exist at",
-    "all: it owns the mail, notification, export and maintenance queues, and the",
-    "hourly cleanup-expired job is the only thing that prunes the Change collection,",
-    "whose payload column holds plaintext user content."
-  ],
   "build": {
-    "builder": "NIXPACKS"
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "Dockerfile.worker"
   },
   "deploy": {
-    "startCommand": "npm run start:worker",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }

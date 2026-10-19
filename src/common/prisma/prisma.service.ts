@@ -29,7 +29,12 @@ export class PrismaService
   private readonly nullableFieldsByModel = new Map<string, Set<string>>();
 
   constructor() {
-    super();
+    const rawUrl = process.env.DATABASE_URL?.trim();
+    const cleanedUrl = rawUrl?.replace(/^["']|["']$/g, "");
+    if (cleanedUrl) {
+      process.env.DATABASE_URL = cleanedUrl;
+    }
+    super(cleanedUrl ? { datasources: { db: { url: cleanedUrl } } } : undefined);
     for (const model of Prisma.dmmf.datamodel.models) {
       const fields = new Set(
         model.fields
