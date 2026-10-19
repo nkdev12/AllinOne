@@ -877,7 +877,11 @@ export class ConfigurationService {
   }
 
   get redisUrl(): string {
-    return this.declaredRedisUrl ?? "redis://localhost:6379";
+    const url = this.declaredRedisUrl ?? "redis://localhost:6379";
+    if (url.startsWith("redis://") && url.includes(".upstash.io")) {
+      return url.replace(/^redis:\/\//, "rediss://");
+    }
+    return url;
   }
 
   get smtpHost(): string {

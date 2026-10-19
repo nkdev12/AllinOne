@@ -44,6 +44,7 @@ async function bootstrap() {
         },
       },
       crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" },
+      crossOriginResourcePolicy: { policy: "cross-origin" },
     }),
   );
   const corsOriginConfig = configService.get<string>("CORS_ORIGIN", "");
@@ -94,8 +95,13 @@ async function bootstrap() {
       // Local Flutter web builds can choose a port dynamically only when an
       // operator explicitly opts in; a development environment label is not
       // sufficient to widen a deployed API.
+      const allowLocalhost =
+        configService.get<boolean>("ALLOW_LOCALHOST_CORS", false) ||
+        process.env.ALLOW_LOCALHOST_CORS === "true" ||
+        environment === "development";
+
       if (
-        configService.get<boolean>("ALLOW_LOCALHOST_CORS", false) &&
+        allowLocalhost &&
         /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
       ) {
         return callback(null, true);

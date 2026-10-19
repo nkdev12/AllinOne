@@ -133,7 +133,7 @@ export function shouldAttemptRedisClustering(config: WebSocketConfigReader): {
   enabled: boolean;
   redisUrl?: string;
 } {
-  const redisUrl = config.get<string>("REDIS_URL")?.trim();
+  let redisUrl = config.get<string>("REDIS_URL")?.trim();
   const rawSwitch = config.get<string | boolean>(WS_REDIS_ADAPTER_KEY);
 
   if (rawSwitch !== undefined && !asBoolean(rawSwitch, true)) {
@@ -141,6 +141,9 @@ export function shouldAttemptRedisClustering(config: WebSocketConfigReader): {
   }
   if (!redisUrl) {
     return { enabled: false };
+  }
+  if (redisUrl.startsWith("redis://") && redisUrl.includes(".upstash.io")) {
+    redisUrl = redisUrl.replace(/^redis:\/\//, "rediss://");
   }
   return { enabled: true, redisUrl };
 }

@@ -48,9 +48,17 @@ export class RedisThrottlerStorage
       this.redis = redisClient;
     } else {
       this.redis = new Redis(this.configService.redisUrl, {
-        maxRetriesPerRequest: 3,
+        maxRetriesPerRequest: 1,
+        connectTimeout: 3000,
+        commandTimeout: 3000,
         enableReadyCheck: false,
         lazyConnect: true,
+        retryStrategy: (times) => {
+          if (times > 3) {
+            return null;
+          }
+          return Math.min(times * 200, 1000);
+        },
       });
     }
 
