@@ -239,6 +239,7 @@ export class SyncIoAdapter extends RedisIoAdapter {
 
     const allowed = new Set([
       ...origins,
+      "https://allmynote.nkdev12.workers.dev",
       "https://allmynote-frontend.nkdev12.workers.dev",
     ]);
 
