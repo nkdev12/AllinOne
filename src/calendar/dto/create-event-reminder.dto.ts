@@ -1,6 +1,6 @@
 import { ApiPropertyOptional } from "@nestjs/swagger";
 import { ReminderChannel } from "@prisma/client";
-import { IsEnum, IsInt, IsOptional, Min } from "class-validator";
+import { IsEnum, IsInt, IsOptional, Max, Min } from "class-validator";
 
 export class CreateEventReminderDto {
   @ApiPropertyOptional({
@@ -10,6 +10,7 @@ export class CreateEventReminderDto {
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(525600)
   minutesBefore?: number;
 
   @ApiPropertyOptional({

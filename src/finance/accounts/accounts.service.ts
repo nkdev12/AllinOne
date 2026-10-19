@@ -18,9 +18,8 @@ import { ChangeOperation, FinanceAccountType } from "@prisma/client";
  * Normalising at the single write boundary keeps the readers as cheap exact
  * upper-case matches instead of making every one of them case-proof.
  */
-export function normaliseCurrency(currency?: string | null): string {
-  return (currency ?? "INR").trim().toUpperCase();
-}
+import { normaliseCurrency } from "../finance.helpers";
+export { normaliseCurrency };
 
 /**
  * Minor units arrive as JSON numbers, and `BigInt()` throws a `RangeError` on

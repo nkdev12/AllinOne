@@ -1,5 +1,5 @@
 import { ApiPropertyOptional } from "@nestjs/swagger";
-import { IsOptional, IsString } from "class-validator";
+import { IsOptional, IsString, MaxLength } from "class-validator";
 
 export class UpdateDeviceDto {
   @ApiPropertyOptional({
@@ -8,11 +8,13 @@ export class UpdateDeviceDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   name?: string;
 
   @ApiPropertyOptional({ example: "1.0.1", description: "Updated app version" })
   @IsOptional()
   @IsString()
+  @MaxLength(32)
   appVersion?: string;
 
   @ApiPropertyOptional({
@@ -21,5 +23,6 @@ export class UpdateDeviceDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(4096)
   publicKey?: string;
 }

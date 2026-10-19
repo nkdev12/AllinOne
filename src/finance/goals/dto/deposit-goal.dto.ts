@@ -1,4 +1,4 @@
-import { IsInt, IsPositive } from "class-validator";
+import { IsInt, IsPositive, Max } from "class-validator";
 
 export class DepositGoalDto {
   /**
@@ -7,5 +7,6 @@ export class DepositGoalDto {
    */
   @IsInt()
   @IsPositive()
+  @Max(Number.MAX_SAFE_INTEGER)
   amountMinor!: number;
 }

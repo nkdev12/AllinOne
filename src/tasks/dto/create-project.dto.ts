@@ -1,10 +1,19 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { IsInt, IsNotEmpty, IsOptional, IsString, Min } from "class-validator";
+import {
+  IsInt,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Max,
+  MaxLength,
+  Min,
+} from "class-validator";
 
 export class CreateProjectDto {
   @ApiProperty({ example: "Product Launch", description: "Project name" })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(120)
   name!: string;
 
   @ApiPropertyOptional({
@@ -13,6 +22,7 @@ export class CreateProjectDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(2000)
   description?: string;
 
   @ApiPropertyOptional({
@@ -21,6 +31,7 @@ export class CreateProjectDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(32)
   color?: string;
 
   @ApiPropertyOptional({
@@ -29,6 +40,7 @@ export class CreateProjectDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(64)
   icon?: string;
 
   @ApiPropertyOptional({
@@ -38,5 +50,6 @@ export class CreateProjectDto {
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(1000000)
   sortOrder?: number;
 }

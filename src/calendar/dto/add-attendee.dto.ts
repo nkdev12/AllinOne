@@ -7,6 +7,7 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  MaxLength,
 } from "class-validator";
 
 export class AddAttendeeDto {
@@ -16,6 +17,7 @@ export class AddAttendeeDto {
   })
   @IsEmail()
   @IsNotEmpty()
+  @MaxLength(254)
   email!: string;
 
   @ApiPropertyOptional({
@@ -24,6 +26,7 @@ export class AddAttendeeDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(120)
   displayName?: string;
 
   @ApiPropertyOptional({

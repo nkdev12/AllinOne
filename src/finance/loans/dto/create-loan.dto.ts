@@ -6,6 +6,7 @@ import {
   IsOptional,
   IsPositive,
   IsString,
+  Max,
   MaxLength,
   Min,
 } from "class-validator";
@@ -29,6 +30,7 @@ export class CreateLoanDto {
   /** Minor units (paise) originally lent or borrowed. */
   @IsInt()
   @IsPositive()
+  @Max(Number.MAX_SAFE_INTEGER)
   principalAmountMinor!: number;
 
   /**
@@ -40,6 +42,7 @@ export class CreateLoanDto {
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(Number.MAX_SAFE_INTEGER)
   remainingAmountMinor?: number;
 
   /**

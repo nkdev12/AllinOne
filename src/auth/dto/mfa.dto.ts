@@ -1,5 +1,12 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { IsNotEmpty, IsOptional, IsString, Length } from "class-validator";
+import {
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Length,
+  Matches,
+  MaxLength,
+} from "class-validator";
 
 export class EnableMfaDto {
   @ApiProperty({
@@ -9,6 +16,7 @@ export class EnableMfaDto {
   @IsString()
   @IsNotEmpty()
   @Length(6, 6, { message: "TOTP code must be 6 digits" })
+  @Matches(/^\d{6}$/, { message: "TOTP code must be 6 digits" })
   totpCode!: string;
 }
 
@@ -16,11 +24,13 @@ export class VerifyMfaLoginDto {
   @ApiProperty({ description: "Temporary 2FA token returned during login" })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(2048)
   mfaToken!: string;
 
   @ApiPropertyOptional({ example: "123456", description: "6-digit TOTP code" })
   @IsOptional()
   @IsString()
+  @Matches(/^\d{6}$/, { message: "TOTP code must be 6 digits" })
   totpCode?: string;
 
   @ApiPropertyOptional({
@@ -30,6 +40,9 @@ export class VerifyMfaLoginDto {
   })
   @IsOptional()
   @IsString()
+  @Matches(/^[A-F0-9]{4}(?:-[A-F0-9]{4}){5}$/i, {
+    message: "Recovery code has an invalid format",
+  })
   recoveryCode?: string;
 }
 
@@ -37,12 +50,14 @@ export class DisableMfaDto {
   @ApiProperty({ description: "User account password" })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(256)
   password!: string;
 
   @ApiPropertyOptional({ example: "123456", description: "6-digit TOTP code" })
   @IsOptional()
   @IsString()
   @Length(6, 6, { message: "TOTP code must be 6 digits" })
+  @Matches(/^\d{6}$/, { message: "TOTP code must be 6 digits" })
   totpCode?: string;
 
   @ApiPropertyOptional({
@@ -52,6 +67,9 @@ export class DisableMfaDto {
   })
   @IsOptional()
   @IsString()
+  @Matches(/^[A-F0-9]{4}(?:-[A-F0-9]{4}){5}$/i, {
+    message: "Recovery code has an invalid format",
+  })
   recoveryCode?: string;
 }
 

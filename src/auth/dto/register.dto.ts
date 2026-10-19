@@ -4,6 +4,7 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  MaxLength,
   MinLength,
 } from "class-validator";
 
@@ -14,6 +15,7 @@ export class RegisterDto {
   })
   @IsEmail({}, { message: "Invalid email address" })
   @IsNotEmpty()
+  @MaxLength(254)
   email!: string;
 
   @ApiProperty({
@@ -23,6 +25,7 @@ export class RegisterDto {
   @IsString()
   @IsNotEmpty()
   @MinLength(8, { message: "Password must be at least 8 characters long" })
+  @MaxLength(256, { message: "Password must be at most 256 characters long" })
   password!: string;
 
   @ApiPropertyOptional({
@@ -31,15 +34,18 @@ export class RegisterDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(120)
   displayName?: string;
 
   @ApiPropertyOptional({ example: "en-US", description: "Preferred locale" })
   @IsOptional()
   @IsString()
+  @MaxLength(10)
   locale?: string;
 
   @ApiPropertyOptional({ example: "UTC", description: "User timezone" })
   @IsOptional()
   @IsString()
+  @MaxLength(50)
   timezone?: string;
 }

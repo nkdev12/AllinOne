@@ -4,6 +4,8 @@ import {
   IsNotEmpty,
   IsString,
   Length,
+  Matches,
+  MaxLength,
   MinLength,
 } from "class-validator";
 
@@ -14,6 +16,7 @@ export class ForgotPasswordDto {
   })
   @IsEmail({}, { message: "Invalid email address" })
   @IsNotEmpty()
+  @MaxLength(254)
   email!: string;
 }
 
@@ -24,6 +27,7 @@ export class ResetPasswordDto {
   })
   @IsEmail({}, { message: "Invalid email address" })
   @IsNotEmpty()
+  @MaxLength(254)
   email!: string;
 
   @ApiProperty({
@@ -32,6 +36,7 @@ export class ResetPasswordDto {
   })
   @IsString()
   @Length(6, 6, { message: "Reset code must be 6 digits" })
+  @Matches(/^\d{6}$/, { message: "Reset code must be 6 digits" })
   otp!: string;
 
   @ApiProperty({
@@ -41,5 +46,6 @@ export class ResetPasswordDto {
   @IsString()
   @IsNotEmpty()
   @MinLength(8, { message: "Password must be at least 8 characters long" })
+  @MaxLength(256, { message: "Password must be at most 256 characters long" })
   newPassword!: string;
 }

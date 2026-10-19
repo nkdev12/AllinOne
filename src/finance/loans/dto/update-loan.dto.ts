@@ -6,6 +6,7 @@ import {
   IsOptional,
   IsPositive,
   IsString,
+  Max,
   MaxLength,
   Min,
 } from "class-validator";
@@ -29,12 +30,14 @@ export class UpdateLoanDto {
   @IsOptional()
   @IsInt()
   @IsPositive()
+  @Max(Number.MAX_SAFE_INTEGER)
   principalAmountMinor?: number;
 
   /** Kept in step with the principal by the service, never above it. */
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(Number.MAX_SAFE_INTEGER)
   remainingAmountMinor?: number;
 
   @IsOptional()

@@ -5,6 +5,8 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Max,
+  MaxLength,
   Min,
 } from "class-validator";
 
@@ -19,11 +21,13 @@ export class CreateSectionDto {
   @ApiProperty({ example: "In Progress", description: "Section column title" })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(120)
   name!: string;
 
   @ApiPropertyOptional({ example: 0, description: "Column sort position" })
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(1000000)
   sortOrder?: number;
 }

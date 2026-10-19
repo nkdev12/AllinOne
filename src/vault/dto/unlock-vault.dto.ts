@@ -1,5 +1,12 @@
 import { ApiProperty } from "@nestjs/swagger";
-import { IsNotEmpty, IsString, IsOptional, Equals } from "class-validator";
+import {
+  IsBase64,
+  IsNotEmpty,
+  IsString,
+  IsOptional,
+  Equals,
+  Length,
+} from "class-validator";
 
 export class UnlockVaultDto {
   @ApiProperty({
@@ -9,6 +16,8 @@ export class UnlockVaultDto {
   })
   @IsString()
   @IsNotEmpty()
+  @IsBase64()
+  @Length(44, 44)
   masterKeyHash!: string;
 
   @IsOptional()

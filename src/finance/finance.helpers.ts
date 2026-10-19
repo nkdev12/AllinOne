@@ -9,6 +9,24 @@ import { BadRequestException } from "@nestjs/common";
  * `AccountsService.toMinorUnits` is a deliberately different helper — it accepts
  * `undefined`/`null` as zero and carries its own message — and stays where it is.
  */
+/**
+ * Normalise currency string to standard 3-letter upper case code (defaults to 'INR').
+ */
+export function normaliseCurrency(currency?: string | null): string {
+  return (currency ?? "INR").trim().toUpperCase();
+}
+
+/**
+ * Normalise currency string to standard upper case code, returning undefined if empty or not provided.
+ */
+export function normaliseCurrencyCode(
+  value?: string | null,
+): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? undefined : trimmed.toUpperCase();
+}
+
 export function toMinorUnits(value: number, field: string): bigint {
   if (!Number.isSafeInteger(value)) {
     throw new BadRequestException(`${field} must be a safe integer.`);

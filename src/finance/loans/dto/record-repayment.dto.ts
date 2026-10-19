@@ -1,4 +1,4 @@
-import { IsInt, IsPositive } from "class-validator";
+import { IsInt, IsPositive, Max } from "class-validator";
 
 export class RecordRepaymentDto {
   /**
@@ -8,5 +8,6 @@ export class RecordRepaymentDto {
    */
   @IsInt()
   @IsPositive()
+  @Max(Number.MAX_SAFE_INTEGER)
   amountMinor!: number;
 }

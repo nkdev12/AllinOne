@@ -1,4 +1,11 @@
-import { IsNotEmpty, IsString, IsOptional, IsArray } from "class-validator";
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  MaxLength,
+} from "class-validator";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 
 export class RegisterOptionsDto {
@@ -8,6 +15,7 @@ export class RegisterOptionsDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   deviceName?: string;
 }
 
@@ -18,6 +26,7 @@ export class RegisterVerifyDto {
   })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(2048)
   id!: string;
 
   @ApiProperty({
@@ -26,6 +35,7 @@ export class RegisterVerifyDto {
   })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(50000)
   clientDataJSON!: string;
 
   @ApiProperty({
@@ -34,15 +44,20 @@ export class RegisterVerifyDto {
   })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(100000)
   attestationObject!: string;
 
   @ApiPropertyOptional({ example: ["internal", "hybrid"] })
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(10)
+  @IsString({ each: true })
+  @MaxLength(32, { each: true })
   transports?: string[];
 
   @ApiPropertyOptional({ example: "MacBook Pro TouchID" })
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   deviceName?: string;
 }

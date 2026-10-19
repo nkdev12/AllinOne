@@ -1,5 +1,11 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { IsEnum, IsNotEmpty, IsOptional, IsString } from "class-validator";
+import {
+  IsEnum,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  MaxLength,
+} from "class-validator";
 import { Platform } from "@prisma/client";
 
 export class CreateDeviceDto {
@@ -9,6 +15,7 @@ export class CreateDeviceDto {
   })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(100)
   name!: string;
 
   @ApiProperty({
@@ -25,11 +32,13 @@ export class CreateDeviceDto {
   })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(32)
   appVersion!: string;
 
   @ApiPropertyOptional({ example: "Fedora 39", description: "OS version" })
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   osVersion?: string;
 
   @ApiPropertyOptional({
@@ -38,5 +47,6 @@ export class CreateDeviceDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(4096)
   publicKey?: string;
 }

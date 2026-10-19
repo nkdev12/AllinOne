@@ -5,6 +5,8 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Max,
+  MaxLength,
   Min,
 } from "class-validator";
 
@@ -15,6 +17,7 @@ export class CreateFolderDto {
   })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(120)
   name!: string;
 
   @ApiPropertyOptional({
@@ -31,6 +34,7 @@ export class CreateFolderDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(32)
   color?: string;
 
   @ApiPropertyOptional({
@@ -39,6 +43,7 @@ export class CreateFolderDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(64)
   icon?: string;
 
   @ApiPropertyOptional({
@@ -48,5 +53,6 @@ export class CreateFolderDto {
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(1000000)
   sortOrder?: number;
 }

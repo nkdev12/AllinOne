@@ -8,7 +8,7 @@ export class UpdateUserProfileDto {
   })
   @IsOptional()
   @IsString()
-  @MaxLength(255)
+  @MaxLength(120)
   displayName?: string;
 
   @ApiPropertyOptional({
@@ -17,6 +17,7 @@ export class UpdateUserProfileDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(2048)
   avatar?: string;
 
   @ApiPropertyOptional({ example: "en-US", description: "Preferred locale" })

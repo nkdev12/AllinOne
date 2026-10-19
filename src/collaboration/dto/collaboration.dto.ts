@@ -7,6 +7,7 @@ import {
   IsInt,
   Min,
   Max,
+  MaxLength,
 } from "class-validator";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { Type } from "class-transformer";
@@ -28,6 +29,7 @@ export class CreateShareDto {
   })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(100)
   resourceId!: string;
 
   @ApiProperty({
@@ -36,6 +38,7 @@ export class CreateShareDto {
   })
   @IsEmail()
   @IsNotEmpty()
+  @MaxLength(254)
   email!: string;
 
   @ApiProperty({
@@ -73,6 +76,7 @@ export class QuerySharedResourcesDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(10000)
   page?: number = 1;
 
   @ApiPropertyOptional({ default: 20, minimum: 1, maximum: 100 })

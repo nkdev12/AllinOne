@@ -6,6 +6,7 @@ import {
   IsOptional,
   IsPositive,
   IsUUID,
+  Max,
 } from "class-validator";
 import { FinanceBudgetPeriod } from "@prisma/client";
 
@@ -17,6 +18,7 @@ export class CreateBudgetDto {
   /** Minor units (paise), never a float amount. */
   @IsInt()
   @IsPositive()
+  @Max(Number.MAX_SAFE_INTEGER)
   amountMinor!: number;
 
   @IsOptional()

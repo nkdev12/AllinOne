@@ -5,6 +5,8 @@ import {
   IsString,
   IsOptional,
   IsArray,
+  IsDateString,
+  MaxLength,
   ValidateNested,
 } from "class-validator";
 import { Type } from "class-transformer";
@@ -26,6 +28,7 @@ export class ExtractTasksDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(50000)
   text?: string;
 
   @ApiPropertyOptional({
@@ -34,6 +37,7 @@ export class ExtractTasksDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   noteId?: string;
 }
 
@@ -44,6 +48,7 @@ export class SuggestTagsDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(50000)
   text?: string;
 
   @ApiPropertyOptional({
@@ -51,6 +56,7 @@ export class SuggestTagsDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   noteId?: string;
 }
 
@@ -58,11 +64,13 @@ class ExtractedTaskItemDto {
   @ApiProperty({ example: "Review database backup retention" })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(200)
   title!: string;
 
   @ApiPropertyOptional({ example: "Follow up with devops team" })
   @IsOptional()
   @IsString()
+  @MaxLength(5000)
   description?: string;
 
   @ApiPropertyOptional({ enum: ["LOW", "MEDIUM", "HIGH"], default: "MEDIUM" })
@@ -72,7 +80,7 @@ class ExtractedTaskItemDto {
 
   @ApiPropertyOptional({ example: "2026-10-01T00:00:00.000Z" })
   @IsOptional()
-  @IsString()
+  @IsDateString()
   dueDate?: string;
 }
 

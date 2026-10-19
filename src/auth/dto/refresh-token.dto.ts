@@ -1,5 +1,5 @@
 import { ApiPropertyOptional } from "@nestjs/swagger";
-import { IsOptional, IsString } from "class-validator";
+import { IsOptional, IsString, MaxLength } from "class-validator";
 
 /**
  * Proves a refresh request came from this app rather than from somebody else's
@@ -20,5 +20,6 @@ export class RefreshTokenDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(8192)
   refreshToken?: string;
 }

@@ -1,17 +1,20 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import {
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
   IsNotEmpty,
   IsOptional,
   IsString,
   IsUUID,
+  MaxLength,
 } from "class-validator";
 
 export class CreateNoteDto {
   @ApiProperty({ example: "Sprint Planning Notes", description: "Note title" })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(200)
   title!: string;
 
   @ApiPropertyOptional({
@@ -20,6 +23,7 @@ export class CreateNoteDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(100000)
   content?: string;
 
   @ApiPropertyOptional({
@@ -36,6 +40,7 @@ export class CreateNoteDto {
   })
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(50)
   @IsUUID("4", { each: true })
   tagIds?: string[];
 
@@ -49,6 +54,8 @@ export class CreateNoteDto {
   })
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(50)
+  @MaxLength(60, { each: true })
   @IsString({ each: true })
   tags?: string[];
 
@@ -58,6 +65,7 @@ export class CreateNoteDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(32)
   color?: string;
 
   @ApiPropertyOptional({
@@ -71,6 +79,7 @@ export class CreateNoteDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(64)
   noteType?: string;
 
   @ApiPropertyOptional({
@@ -85,6 +94,7 @@ export class CreateNoteDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(100000)
   structured?: string;
 
   @ApiPropertyOptional({

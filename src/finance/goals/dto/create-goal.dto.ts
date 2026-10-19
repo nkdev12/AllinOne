@@ -6,6 +6,7 @@ import {
   IsPositive,
   IsString,
   MaxLength,
+  Max,
   Min,
 } from "class-validator";
 
@@ -18,6 +19,7 @@ export class CreateGoalDto {
   /** Minor units (paise). */
   @IsInt()
   @IsPositive()
+  @Max(Number.MAX_SAFE_INTEGER)
   targetAmountMinor!: number;
 
   /**
@@ -27,6 +29,7 @@ export class CreateGoalDto {
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(Number.MAX_SAFE_INTEGER)
   currentAmountMinor?: number;
 
   /**

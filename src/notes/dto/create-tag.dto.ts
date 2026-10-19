@@ -1,10 +1,11 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { IsNotEmpty, IsOptional, IsString } from "class-validator";
+import { IsNotEmpty, IsOptional, IsString, MaxLength } from "class-validator";
 
 export class CreateTagDto {
   @ApiProperty({ example: "work", description: "Unique tag name per user" })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(60)
   name!: string;
 
   @ApiPropertyOptional({
@@ -13,5 +14,6 @@ export class CreateTagDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(32)
   color?: string;
 }

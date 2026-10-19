@@ -10,6 +10,9 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  ArrayMaxSize,
+  Max,
+  MaxLength,
   Matches,
   Min,
 } from "class-validator";
@@ -21,6 +24,7 @@ export class CreateTaskDto {
   })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(200)
   title!: string;
 
   @ApiPropertyOptional({
@@ -29,6 +33,7 @@ export class CreateTaskDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(5000)
   description?: string;
 
   @ApiPropertyOptional({
@@ -98,6 +103,7 @@ export class CreateTaskDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(500)
   recurrenceRule?: string;
 
   @ApiPropertyOptional({
@@ -106,6 +112,7 @@ export class CreateTaskDto {
   })
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(50)
   @IsUUID("4", { each: true })
   tagIds?: string[];
 
@@ -116,5 +123,6 @@ export class CreateTaskDto {
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(1000000)
   sortOrder?: number;
 }

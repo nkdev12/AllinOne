@@ -1,4 +1,11 @@
-import { IsEmail, IsNotEmpty, IsString, IsOptional } from "class-validator";
+import {
+  IsEmail,
+  IsNotEmpty,
+  IsString,
+  IsOptional,
+  Matches,
+  MaxLength,
+} from "class-validator";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 
 export class VerifyEmailRequestDto {
@@ -8,6 +15,7 @@ export class VerifyEmailRequestDto {
   })
   @IsEmail({}, { message: "Invalid email address" })
   @IsNotEmpty()
+  @MaxLength(254)
   email!: string;
 }
 
@@ -17,15 +25,18 @@ export class ConfirmEmailDto {
   })
   @IsString()
   @IsOptional()
+  @MaxLength(2048)
   token?: string;
 
   @ApiPropertyOptional({ description: "User email (if using OTP)" })
   @IsEmail()
   @IsOptional()
+  @MaxLength(254)
   email?: string;
 
   @ApiPropertyOptional({ description: "6-digit OTP code received via email" })
   @IsString()
   @IsOptional()
+  @Matches(/^\d{6}$/, { message: "OTP must be 6 digits" })
   otp?: string;
 }

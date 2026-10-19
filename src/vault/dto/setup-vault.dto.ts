@@ -5,7 +5,10 @@ import {
   IsOptional,
   IsString,
   Min,
+  Max,
   Length,
+  Matches,
+  MaxLength,
   IsBase64,
   Equals,
 } from "class-validator";
@@ -19,6 +22,8 @@ export class SetupVaultDto {
   })
   @IsString()
   @IsNotEmpty()
+  @IsBase64()
+  @Length(44, 44)
   masterKeyHash!: string;
 
   @ApiProperty({
@@ -49,6 +54,7 @@ export class SetupVaultDto {
   @IsOptional()
   @IsInt()
   @Min(1)
+  @Max(10)
   kdfIterations?: number;
 
   @ApiPropertyOptional({
@@ -60,6 +66,7 @@ export class SetupVaultDto {
   @IsOptional()
   @IsInt()
   @Min(1024)
+  @Max(262144)
   kdfMemory?: number;
 
   // Recovery envelope: the master key wrapped under a key the client derives
@@ -75,20 +82,20 @@ export class SetupVaultDto {
 
   @ApiPropertyOptional({ description: "AES-GCM ciphertext of the master key" })
   @IsOptional()
-  @IsString()
-  @IsNotEmpty()
+  @IsBase64()
+  @MaxLength(4096)
   wrappedMasterKey?: string;
 
   @ApiPropertyOptional({ description: "IV used for the wrapped master key" })
   @IsOptional()
-  @IsString()
-  @IsNotEmpty()
+  @IsBase64()
+  @MaxLength(128)
   wrappedMasterIv?: string;
 
   @ApiPropertyOptional({ description: "GCM tag for the wrapped master key" })
   @IsOptional()
-  @IsString()
-  @IsNotEmpty()
+  @IsBase64()
+  @MaxLength(128)
   wrappedMasterTag?: string;
 }
 
@@ -96,6 +103,7 @@ export class VerifyVaultRecoveryDto {
   @ApiProperty({ description: "6-digit code emailed for vault recovery" })
   @IsString()
   @Length(6, 6)
+  @Matches(/^\d{6}$/, { message: "OTP must be 6 digits" })
   otp!: string;
 }
 
@@ -103,6 +111,8 @@ export class VerifyVaultRecoveryDto {
 export class CompleteVaultRecoveryDto {
   @IsString()
   @IsNotEmpty()
+  @IsBase64()
+  @Length(44, 44)
   masterKeyHash!: string;
 
   @IsBase64()

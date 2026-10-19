@@ -10,6 +10,8 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  ArrayMaxSize,
+  MaxLength,
   ValidateNested,
 } from "class-validator";
 import { AddAttendeeDto } from "./add-attendee.dto";
@@ -28,6 +30,7 @@ export class CreateEventDto {
   })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(200)
   title!: string;
 
   @ApiPropertyOptional({
@@ -36,6 +39,7 @@ export class CreateEventDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(5000)
   description?: string;
 
   @ApiPropertyOptional({
@@ -44,6 +48,7 @@ export class CreateEventDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(500)
   location?: string;
 
   @ApiProperty({
@@ -73,6 +78,7 @@ export class CreateEventDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(500)
   recurrenceRule?: string;
 
   @ApiPropertyOptional({
@@ -90,6 +96,7 @@ export class CreateEventDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(32)
   color?: string;
 
   @ApiPropertyOptional({
@@ -98,6 +105,7 @@ export class CreateEventDto {
   })
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(50)
   @ValidateNested({ each: true })
   @Type(() => AddAttendeeDto)
   attendees?: AddAttendeeDto[];

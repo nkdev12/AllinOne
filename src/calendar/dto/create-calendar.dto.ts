@@ -6,6 +6,7 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  MaxLength,
 } from "class-validator";
 
 export class CreateCalendarDto {
@@ -15,6 +16,7 @@ export class CreateCalendarDto {
   })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(120)
   name!: string;
 
   @ApiPropertyOptional({
@@ -23,11 +25,13 @@ export class CreateCalendarDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(2000)
   description?: string;
 
   @ApiPropertyOptional({ example: "#4285F4", description: "Hex color badge" })
   @IsOptional()
   @IsString()
+  @MaxLength(32)
   color?: string;
 
   @ApiPropertyOptional({
@@ -36,6 +40,7 @@ export class CreateCalendarDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(50)
   timeZone?: string;
 
   @ApiPropertyOptional({

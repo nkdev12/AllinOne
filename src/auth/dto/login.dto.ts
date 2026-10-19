@@ -6,6 +6,7 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  MaxLength,
 } from "class-validator";
 import { Platform } from "@prisma/client";
 
@@ -16,11 +17,13 @@ export class LoginDto {
   })
   @IsEmail({}, { message: "Invalid email address" })
   @IsNotEmpty()
+  @MaxLength(254)
   email!: string;
 
   @ApiProperty({ example: "SecureP@ssw0rd!", description: "Password" })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(256)
   password!: string;
 
   @ApiPropertyOptional({
@@ -39,6 +42,7 @@ export class LoginDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   deviceName?: string;
 
   @ApiPropertyOptional({
@@ -56,6 +60,7 @@ export class LoginDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(32)
   appVersion?: string;
 
   @ApiPropertyOptional({
@@ -64,5 +69,6 @@ export class LoginDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(4096)
   publicKey?: string;
 }
