@@ -1,0 +1,13 @@
+# Nixpacks configuration for Railway builds
+# Ensures devDependencies are installed during the build phase so TypeScript
+# and Nest CLI can compile the application even when NODE_ENV=production.
+
+[variables]
+NPM_CONFIG_PRODUCTION = "false"
+
+[phases.install]
+cmds = ["npm ci --include=dev"]
+
+[phases.build]
+cmds = ["npm run build"]
+
