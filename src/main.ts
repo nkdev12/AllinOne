@@ -56,7 +56,7 @@ async function bootstrap() {
   const allowedOrigins = new Set([
     ...(explicitAllowedOrigins.length > 0
       ? explicitAllowedOrigins
-      : ["http://localhost:3000"]),
+      : ["http://localhost:3000", "https://allmynote-frontend.nkdev12.workers.dev"]),
     ...PRODUCTION_WEB_ORIGINS,
   ]);
 
