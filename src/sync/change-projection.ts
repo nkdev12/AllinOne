@@ -41,9 +41,11 @@ import {
  * never spoken to REST agreed with each other and disagreed with the server.
  *
  * So the projection runs inside the same transaction as the log append, for
- * accepted changes only, and a change that projects onto nothing aborts the
- * push. That is deliberate: a mirror that silently fails is a row that quietly
- * lies, and the log is the one copy still telling the truth.
+ * accepted changes only, and a change that projects onto nothing is refused: the
+ * transaction covering that one change rolls back and the change comes home in
+ * the response's `rejected` array. Refusing rather than dropping quietly is
+ * deliberate — a mirror that silently fails is a row that quietly lies, and the
+ * log is the one copy still telling the truth.
  *
  * `note`, `folder`, `task`, `event`, and `calendar` are projected: their payloads
  * are validated by `DOCUMENT_SHAPES` and mapped directly onto the Prisma entity
@@ -107,7 +109,10 @@ export type ChangeProjectionClient = {
     Prisma.TransactionClient["financeGroup"],
     "findUnique" | "create" | "update"
   >;
-  resourceShare?: Pick<Prisma.TransactionClient["resourceShare"], "findFirst">;
+  resourceShare?: Pick<
+    Prisma.TransactionClient["resourceShare"],
+    "findFirst" | "findMany"
+  >;
   user?: Pick<Prisma.TransactionClient["user"], "findMany">;
   financeSharedExpense?: Pick<
     Prisma.TransactionClient["financeSharedExpense"],
@@ -460,9 +465,9 @@ function folderColumns(payload: Record<string, any>): {
 /**
  * Each key the payload really has, narrowed to what its column can hold.
  *
- * `assertPushableChanges` has already refused a batch that breaks these rules,
+ * `changePayloadRejection` has already refused a change that breaks these rules,
  * so every branch below is a value that cannot reach it — and it is still the
- * projection that would throw on it, taking the whole push with it. Narrowing
+ * projection that would throw on it, costing that one change its write. Narrowing
  * here means a payload from a build this server has not been introduced to
  * costs the columns it got wrong and nothing else.
  */
@@ -494,9 +499,9 @@ function isTextOrNull(value: unknown): value is string | null {
  * The currency column for a payload value, normalised exactly the way the REST
  * write boundary normalises it (`normaliseCurrency`).
  *
- * A non-string is a currency no device meant: `assertPushableChanges` already
+ * A non-string is a currency no device meant: `changePayloadRejection` already
  * refuses one, and the projection is the thing that would otherwise throw
- * `value.trim is not a function` and take the whole push down with it. Every
+ * `value.trim is not a function` and cost that change its write. Every
  * currency a projection writes goes through here, because a row stored as "inr"
  * is invisible to the exact-upper-case money reads the same way it was before
  * the REST path was fixed — the push mirror simply had not been told.
@@ -1237,6 +1242,10 @@ async function projectFinanceBudgetChange(
           ? payload.categoryId
           : null,
         amountMinor,
+        currency:
+          typeof payload.currency === "string"
+            ? payload.currency.toUpperCase()
+            : "INR",
         period: (payload.period as any) ?? "MONTHLY",
         startDate: payload.startDate ? new Date(payload.startDate) : null,
         endDate: payload.endDate ? new Date(payload.endDate) : null,
@@ -1263,6 +1272,9 @@ async function projectFinanceBudgetChange(
           }
         : {}),
       ...(payload.amountMinor !== undefined ? { amountMinor } : {}),
+      ...(typeof payload.currency === "string"
+        ? { currency: payload.currency.toUpperCase() }
+        : {}),
       ...(payload.period !== undefined
         ? { period: payload.period as any }
         : {}),
@@ -1334,6 +1346,10 @@ async function projectFinanceSavingsGoalChange(
         name: typeof payload.name === "string" ? payload.name : "Savings Goal",
         targetAmountMinor,
         currentAmountMinor,
+        currency:
+          typeof payload.currency === "string"
+            ? payload.currency.toUpperCase()
+            : "INR",
         targetDate: payload.targetDate ? new Date(payload.targetDate) : null,
         color: isTextOrNull(payload.color) ? payload.color : null,
         iconKey: isTextOrNull(payload.iconKey) ? payload.iconKey : null,
@@ -1355,6 +1371,9 @@ async function projectFinanceSavingsGoalChange(
       ...(payload.targetAmountMinor !== undefined ? { targetAmountMinor } : {}),
       ...(payload.currentAmountMinor !== undefined
         ? { currentAmountMinor }
+        : {}),
+      ...(typeof payload.currency === "string"
+        ? { currency: payload.currency.toUpperCase() }
         : {}),
       ...(payload.targetDate !== undefined
         ? {
@@ -1591,6 +1610,10 @@ async function projectFinanceLoanChange(
           : null,
         principalAmountMinor,
         remainingAmountMinor,
+        currency:
+          typeof payload.currency === "string"
+            ? payload.currency.toUpperCase()
+            : "INR",
         dueDate: payload.dueDate ? new Date(payload.dueDate) : null,
         notes: isTextOrNull(payload.notes) ? payload.notes : null,
         isSettled,
@@ -1625,6 +1648,9 @@ async function projectFinanceLoanChange(
         : {}),
       ...(payload.remainingAmountMinor !== undefined
         ? { remainingAmountMinor }
+        : {}),
+      ...(typeof payload.currency === "string"
+        ? { currency: payload.currency.toUpperCase() }
         : {}),
       ...(payload.dueDate !== undefined
         ? { dueDate: payload.dueDate ? new Date(payload.dueDate) : null }
@@ -1859,6 +1885,296 @@ async function assertSharedScope(
   }
 }
 
+/**
+ * The key for a change this server will not store because it names somebody the
+ * pusher has no authority over.
+ *
+ * `ErrorCode` carries no ownership key (`src/common/errors/error-code.ts` is not
+ * this module's to extend), and the two refusal families have to stay
+ * distinguishable: an unstorable *payload* is a bug in the device's builder that
+ * will fail identically forever, while a lost *grant* is a group the user has
+ * left, and the app wants to drop that row quietly rather than report a broken
+ * build. One key each is the only way a client can tell them apart without
+ * reading prose.
+ */
+export const SYNC_PUSH_UNAUTHORIZED = "SYNC_PUSH_UNAUTHORIZED";
+
+function unauthorizedChange(message: string, details: Record<string, unknown>) {
+  return new ForbiddenException({
+    code: SYNC_PUSH_UNAUTHORIZED,
+    message,
+    details,
+  });
+}
+
+/**
+ * The user ids this group answers for, or `undefined` when the question cannot be
+ * asked.
+ *
+ * Three sets, because those are the people both this server and the app treat as
+ * "in the group": the owner (a member of their own group whether or not they
+ * listed themselves), the group's own `members` column — which is exactly the list
+ * the client offers in its "Paid by" and "Split with" pickers — and every user
+ * holding a live grant on the group, who are precisely the accounts
+ * `replicateGroupChange` copies a row like this one to. Refusing a grantee would
+ * reject a collaborator the owner has already shared with.
+ *
+ * It is one read per change rather than one per candidate id because a split names
+ * up to 100 participants (`weightOnlyShares`/`validShares` in
+ * `change-payload.validator.ts`), and asking each of them separately would put a
+ * hundred round trips inside the transaction that also writes the row.
+ *
+ * Fails closed for a group the collection does not hold (`new Set()` — nobody is a
+ * member of nothing, and `assertSharedScope` has already refused such a change on
+ * the create path) and stays permissive only where nothing can be known: a
+ * projection client without the delegate, or a `members` column that is not the
+ * array every writer stores. That is the same concession `resolveReferenceOwner`
+ * makes to a client missing a delegate — the real push path always hands the whole
+ * transaction client.
+ */
+async function financeGroupMemberIds(
+  tx: ChangeProjectionClient,
+  groupId: string,
+): Promise<Set<string> | undefined> {
+  const group = await tx.financeGroup?.findUnique({
+    where: { id: groupId },
+    select: { ownerId: true, members: true },
+  });
+  if (group === undefined) return undefined;
+  if (group === null) return new Set<string>();
+  if (!Array.isArray(group.members)) return undefined;
+
+  const ids = new Set<string>([group.ownerId]);
+  for (const member of group.members as any[]) {
+    if (member && typeof member.id === "string") ids.add(member.id);
+  }
+
+  const grants = await tx.resourceShare?.findMany({
+    where: {
+      resourceType: "EXPENSE_GROUP",
+      resourceId: groupId,
+      deletedAt: null,
+    },
+    select: { sharedWithUserId: true },
+  });
+  if (grants === undefined) return undefined;
+  for (const grant of grants as Array<{ sharedWithUserId: string }>) {
+    ids.add(grant.sharedWithUserId);
+  }
+  return ids;
+}
+
+/**
+ * Keep the actor in the same participant set used for settlement endpoints.
+ *
+ * `assertSharedScope` establishes write authority first (owner or an
+ * EDITOR/ADMIN grant). This second, deliberately adjacent assertion makes the
+ * invariant explicit at the point a settlement can be re-pointed: the author
+ * and both people named by the payment must all belong to its *destination*
+ * group. It also fails closed if those two sources of authority ever drift.
+ */
+function assertSettlementAuthorMembership(
+  userId: string,
+  refs: { groupId?: string | null },
+  membership: Set<string> | undefined,
+): void {
+  if (!refs.groupId) return;
+  if (membership?.has(userId) == true) return;
+  throw unauthorizedChange(
+    "You are not a member of the group this settlement belongs to.",
+    { groupId: refs.groupId, userId },
+  );
+}
+
+/**
+ * Whose name this expense is credited with, checked against the group being
+ * written rather than taken from the payload.
+ *
+ * `resolveReferenceOwner` is the pattern every other caller-supplied foreign key
+ * in this file follows, and the shared expense was the one that skipped it: the
+ * validator only asserts that `paidByUserId` is "a string"
+ * (`change-payload.validator.ts`), so any id an EDITOR could name was stamped
+ * onto a row the sync path then propagated to that person's own devices — strictly
+ * weaker than `POST /finance/groups/:id/expenses` for the same row.
+ *
+ * Two coercions survive on purpose, because they are the ones that existed before
+ * this guard and cost nobody a reference:
+ * - a change that does not name a payer credits the pusher, and
+ * - `"You"`, the client's local id for itself inside a member list, means the
+ *   pusher — `assertRegisteredGroupMembers` already reads it that way, and a
+ *   device that queued an expense before its group snapshot landed would
+ *   otherwise lose the change to a membership test it cannot pass yet.
+ * A payer that is named, is not the pusher, and is not in the group is refused:
+ * silently rewriting it to the pusher would store a document the device never
+ * authored, which is the thing this file's whole stale-write rule exists to avoid.
+ */
+function resolveSharedExpensePayer(
+  userId: string,
+  refs: { groupId?: string | null; tripId?: string | null },
+  membership: Set<string> | undefined,
+  payload: Record<string, any>,
+): string {
+  const named = payload.paidByUserId;
+  if (named === undefined || named === null || typeof named !== "string") {
+    return userId;
+  }
+  if (named === "You" || named === userId) return userId;
+
+  if (!refs.groupId) {
+    // A trip-only expense has no member list: the trip is the pusher's alone, so
+    // the only payer this scope can vouch for is the pusher.
+    throw unauthorizedChange(
+      "This expense names a payer the group you are writing to does not include.",
+      { tripId: refs.tripId, paidByUserId: named },
+    );
+  }
+  if (membership && !membership.has(named)) {
+    throw unauthorizedChange(
+      "This expense names a payer who is not a member of the group.",
+      { groupId: refs.groupId, paidByUserId: named },
+    );
+  }
+  return named;
+}
+
+/**
+ * Every participant a pushed split names, held to the same membership the payer
+ * is held to.
+ *
+ * The payer says who is owed; a share row says who owes, and `readBalances`
+ * (`groups.service.ts`) sums those rows into a debt attributed to the user id
+ * written beside them. An id outside the group therefore does two things with one
+ * forged change: it invents an obligation on somebody who never agreed to it, and
+ * it makes that person's balance depend on a row no device of theirs authored —
+ * `replicateGroupChange` copies this very change into the *victim's* oplog, so the
+ * debt renders on their screens as something they made. `shares[].userId` was
+ * checked for uniqueness only (`change-payload.validator.ts`), never membership.
+ *
+ * The same two coercions the payer branch allows: `"You"` and the pusher's own id
+ * are one participant, and the pusher is in this group by construction because
+ * `assertSharedScope` just proved they own it or hold an EDITOR/ADMIN grant on it.
+ * A trip-only expense has no participant list at all, which is why a foreign
+ * participant there is refused rather than waved through — same rule, same reason
+ * as the payer branch above.
+ *
+ * Only the shares the change speaks are judged: an UPDATE that rewords a title
+ * leaves the stored participants alone, and refusing them here would refuse a
+ * change that does not mention them.
+ */
+function assertSharedExpenseParticipants(
+  userId: string,
+  refs: { groupId?: string | null; tripId?: string | null },
+  membership: Set<string> | undefined,
+  shares: unknown,
+): void {
+  if (!Array.isArray(shares)) return; // the allocator already refuses a non-list
+
+  const strangers = new Set<string>();
+  for (const share of shares as any[]) {
+    const participant = share?.userId;
+    if (typeof participant !== "string") continue;
+    if (participant === "You" || participant === userId) continue;
+    // `membership` is only unresolved in two different ways: no group at all, in
+    // which case nobody but the pusher can be vouched for, and a group the
+    // collection cannot describe, in which case nothing is provable and the
+    // participant passes.
+    if (!membership) {
+      if (!refs.groupId) strangers.add(participant);
+    } else if (!membership.has(participant)) {
+      strangers.add(participant);
+    }
+  }
+  if (strangers.size === 0) return;
+
+  if (!refs.groupId) {
+    throw unauthorizedChange(
+      "This split assigns a share to somebody the trip you are writing to has no participant list for.",
+      { tripId: refs.tripId, participants: [...strangers] },
+    );
+  }
+  throw unauthorizedChange(
+    "This split assigns a share to somebody who is not a member of the group.",
+    { groupId: refs.groupId, participants: [...strangers] },
+  );
+}
+
+/**
+ * Whose payment a pushed settlement names (`fromUserId` who paid or `toUserId` who received),
+ * checked against the group being written rather than taken from the payload verbatim.
+ *
+ * Like `resolveSharedExpensePayer`, settlements replicate through `replicateGroupChange`
+ * to every member of the group and shift debts in `readBalances`. An attacker who could
+ * name an arbitrary user for `fromUserId` or `toUserId` would forge obligations or payments
+ * on victims who never authored or agreed to them.
+ *
+ * Coercions:
+ * - `"You"` and the pusher's own id resolve to `userId`.
+ * - In a trip without a group (trip-only), only the pusher is vouched for; naming an external user is refused.
+ * - When `membership` is defined, foreign participants are refused with `SYNC_PUSH_UNAUTHORIZED`.
+ */
+function resolveSettlementParticipant(
+  userId: string,
+  refs: { groupId?: string | null; tripId?: string | null },
+  membership: Set<string> | undefined,
+  field: "fromUserId" | "toUserId",
+  named: unknown,
+): string {
+  if (named === undefined || named === null || typeof named !== "string") {
+    return field === "fromUserId" ? userId : "";
+  }
+  if (named === "You" || named === userId) return userId;
+
+  if (!refs.groupId) {
+    throw unauthorizedChange(
+      "This settlement names a participant the group you are writing to does not include.",
+      { tripId: refs.tripId, [field]: named },
+    );
+  }
+  if (membership && !membership.has(named)) {
+    throw unauthorizedChange(
+      "This settlement names a participant who is not a member of the group.",
+      { groupId: refs.groupId, [field]: named },
+    );
+  }
+  return named;
+}
+
+/**
+ * The account a shared expense was paid from, or `null`.
+ *
+ * The payer id says *who*; this says *whose money*, and it is the reference that
+ * must not be pointed at somebody else's private ledger. The account is resolved
+ * through the same helper the transaction branch uses, so an id the collection
+ * does not answer for is refused alongside a provably foreign one, and what lands
+ * is always an account the pusher owns — the group member writing this row, whose
+ * authority over the group `assertSharedScope` just proved. That is the checkable
+ * form of "an account of this group": `FinanceAccount` has no group column, so a
+ * group-owned account does not exist to point at, and the REST write boundary
+ * resolves the same field under the caller
+ * (`groups.service.ts` `assertAccountScope`) for the same reason.
+ *
+ * A value that is not a string stays the coercion to `null` this branch already
+ * performed, so the only behaviour that changes here is the forged reference.
+ */
+async function resolvePayerAccount(
+  tx: ChangeProjectionClient,
+  userId: string,
+  payload: Record<string, any>,
+): Promise<string | null> {
+  const ref =
+    typeof payload.payerAccountId === "string" ? payload.payerAccountId : null;
+  if (ref === null) return null;
+
+  const owner = await resolveReferenceOwner(tx.financeAccount, ref);
+  if (referenceIsUnusable(owner, userId)) {
+    throw unauthorizedChange(
+      "This expense is paid from an account that is not yours.",
+      { payerAccountId: ref },
+    );
+  }
+  return ref;
+}
+
 async function projectFinanceSharedExpenseChange(
   tx: ChangeProjectionClient,
   userId: string,
@@ -1904,6 +2220,33 @@ async function projectFinanceSharedExpenseChange(
     return;
   }
 
+  // The two references that say who paid, resolved against the group this change
+  // writes into before anything is spent on arithmetic. Both are the pusher's to
+  // name only inside that group's membership, and the account additionally has to
+  // be one the pusher owns.
+  const scope = {
+    groupId: isTextOrNull(payload.groupId)
+      ? payload.groupId
+      : (existing?.groupId ?? null),
+    tripId: isTextOrNull(payload.tripId)
+      ? payload.tripId
+      : (existing?.tripId ?? null),
+  };
+  // One membership read for the payer and every share together, rather than one
+  // per named participant.
+  const members = scope.groupId
+    ? await financeGroupMemberIds(tx, scope.groupId)
+    : undefined;
+
+  const paidByUserId = resolveSharedExpensePayer(
+    userId,
+    scope,
+    members,
+    payload,
+  );
+  assertSharedExpenseParticipants(userId, scope, members, payload.shares);
+  const payerAccountId = await resolvePayerAccount(tx, userId, payload);
+
   // The amounts come from the same allocator the REST write path uses
   // (`groups.service.ts`), imported rather than re-derived here: a device that
   // queues an honest three-way split of 10000 (3333 x 3, because its own
@@ -1916,9 +2259,11 @@ async function projectFinanceSharedExpenseChange(
   //
   // It still throws. That is the established shape of this file —
   // `assertSharedScope` already throws `BadRequestException` and
-  // `ForbiddenException` mid-push, and the whole batch rolls back with them — so
-  // a split no device can replay costs the push exactly the 400 the REST path
-  // would have cost the same split.
+  // `ForbiddenException` mid-projection — and `/sync/push` now answers a throw
+  // with a per-change rejection: this change is refused with the code the
+  // projection put on it, its own transaction rolls back, and every other change
+  // in the request is applied and committed. A split no device can replay still
+  // costs the push exactly what the REST path would have cost the same split.
   const totalMinorNumber = Math.round(
     Number(payload.totalAmountMinor ?? existing?.totalAmountMinor ?? 0),
   );
@@ -1950,10 +2295,8 @@ async function projectFinanceSharedExpenseChange(
         id: change.entityId,
         groupId: isTextOrNull(payload.groupId) ? payload.groupId : null,
         tripId: isTextOrNull(payload.tripId) ? payload.tripId : null,
-        paidByUserId: payload.paidByUserId ?? userId,
-        payerAccountId: isTextOrNull(payload.payerAccountId)
-          ? payload.payerAccountId
-          : null,
+        paidByUserId,
+        payerAccountId,
         title:
           typeof payload.title === "string" ? payload.title : "Shared Expense",
         totalAmountMinor,
@@ -1984,16 +2327,8 @@ async function projectFinanceSharedExpenseChange(
       ...(payload.tripId !== undefined
         ? { tripId: isTextOrNull(payload.tripId) ? payload.tripId : null }
         : {}),
-      ...(typeof payload.paidByUserId === "string"
-        ? { paidByUserId: payload.paidByUserId }
-        : {}),
-      ...(payload.payerAccountId !== undefined
-        ? {
-            payerAccountId: isTextOrNull(payload.payerAccountId)
-              ? payload.payerAccountId
-              : null,
-          }
-        : {}),
+      ...(typeof payload.paidByUserId === "string" ? { paidByUserId } : {}),
+      ...(payload.payerAccountId !== undefined ? { payerAccountId } : {}),
       ...(typeof payload.title === "string" ? { title: payload.title } : {}),
       ...(payload.totalAmountMinor !== undefined ? { totalAmountMinor } : {}),
       ...(shareData ? { shares: { deleteMany: {}, create: shareData } } : {}),
@@ -2065,12 +2400,44 @@ async function projectFinanceSettlementChange(
     return;
   }
 
-  const from = payload.fromUserId ?? existing?.fromUserId;
-  const to = payload.toUserId ?? existing?.toUserId;
+  const scope = {
+    groupId: isTextOrNull(payload.groupId)
+      ? payload.groupId
+      : (existing?.groupId ?? null),
+    tripId: isTextOrNull(payload.tripId)
+      ? payload.tripId
+      : (existing?.tripId ?? null),
+  };
+  const members = scope.groupId
+    ? await financeGroupMemberIds(tx, scope.groupId)
+    : undefined;
+  assertSettlementAuthorMembership(userId, scope, members);
+
+  const resolvedFrom =
+    payload.fromUserId !== undefined
+      ? resolveSettlementParticipant(
+          userId,
+          scope,
+          members,
+          "fromUserId",
+          payload.fromUserId,
+        )
+      : existing?.fromUserId;
+  const resolvedTo =
+    payload.toUserId !== undefined
+      ? resolveSettlementParticipant(
+          userId,
+          scope,
+          members,
+          "toUserId",
+          payload.toUserId,
+        )
+      : existing?.toUserId;
+
   if (
-    !from ||
-    !to ||
-    from === to ||
+    !resolvedFrom ||
+    !resolvedTo ||
+    resolvedFrom === resolvedTo ||
     (payload.amountMinor !== undefined &&
       (!Number.isSafeInteger(payload.amountMinor) || payload.amountMinor <= 0))
   )
@@ -2085,8 +2452,8 @@ async function projectFinanceSettlementChange(
         id: change.entityId,
         groupId: isTextOrNull(payload.groupId) ? payload.groupId : null,
         tripId: isTextOrNull(payload.tripId) ? payload.tripId : null,
-        fromUserId: payload.fromUserId ?? userId,
-        toUserId: payload.toUserId ?? "",
+        fromUserId: resolvedFrom,
+        toUserId: resolvedTo,
         amountMinor,
         currency: currencyColumn(payload.currency),
         date,
@@ -2114,11 +2481,9 @@ async function projectFinanceSettlementChange(
         ? { tripId: isTextOrNull(payload.tripId) ? payload.tripId : null }
         : {}),
       ...(typeof payload.fromUserId === "string"
-        ? { fromUserId: payload.fromUserId }
+        ? { fromUserId: resolvedFrom }
         : {}),
-      ...(typeof payload.toUserId === "string"
-        ? { toUserId: payload.toUserId }
-        : {}),
+      ...(typeof payload.toUserId === "string" ? { toUserId: resolvedTo } : {}),
       ...(payload.amountMinor !== undefined ? { amountMinor } : {}),
       ...(typeof payload.currency === "string"
         ? { currency: currencyColumn(payload.currency) }
