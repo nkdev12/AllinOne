@@ -203,7 +203,9 @@ async function bootstrap() {
     Number(process.env.PORT) || configService.get<number>("APP_PORT", 3000);
   await app.listen(port, "0.0.0.0");
 
-  logger.log(`🚀 Allinone Backend started on http://localhost:${port}`);
+  logger.log(
+    `🚀 Allinone Backend listening on 0.0.0.0:${port} (process.env.PORT=${process.env.PORT ?? "unset"})`,
+  );
   logger.log(`📚 API Documentation: http://localhost:${port}/api`);
   logger.log(`Environment: ${environment}`);
   const dbUrl = configService.get<string>("DATABASE_URL", "");
