@@ -8,6 +8,7 @@ import { createValidationPipe } from "./common/errors/validation.pipe";
 import { SyncIoAdapter } from "./sync/adapters/sync-io.adapter";
 
 const PRODUCTION_WEB_ORIGINS = [
+  "https://allmynote.nkdev12.workers.dev",
   "https://allmynote-frontend.nkdev12.workers.dev",
 ];
 
@@ -56,7 +57,11 @@ async function bootstrap() {
   const allowedOrigins = new Set([
     ...(explicitAllowedOrigins.length > 0
       ? explicitAllowedOrigins
-      : ["http://localhost:3000", "https://allmynote-frontend.nkdev12.workers.dev"]),
+      : [
+          "http://localhost:3000",
+          "https://allmynote.nkdev12.workers.dev",
+          "https://allmynote-frontend.nkdev12.workers.dev",
+        ]),
     ...PRODUCTION_WEB_ORIGINS,
   ]);
 
