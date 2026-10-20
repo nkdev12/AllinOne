@@ -27,6 +27,30 @@ export function validMembers(value: unknown): boolean {
   });
 }
 
+/**
+ * The settlement facts one share may carry on the wire: `isSettled`, `settledAt`
+ * and `version`.
+ *
+ * Every key is optional, and that is the whole point. The builds shipping today
+ * put exactly three keys in a share (`userId`, `owedAmountMinor`, `shareUnits` —
+ * `ExpenseShareRow` in the Flutter client's `local_store_v4.dart`), so a rule
+ * that made the new keys mandatory would refuse every change already queued on
+ * every phone the moment this deploys. They are judged when present because a
+ * share whose `isSettled` is the string `"yes"` is a share no device can draw,
+ * and a `version` of 0 is a row the replay order cannot place.
+ */
+export function validShareSettlementFlags(share: any): boolean {
+  return (
+    (share?.isSettled === undefined || typeof share?.isSettled === "boolean") &&
+    (share?.settledAt === undefined ||
+      share?.settledAt === null ||
+      (typeof share?.settledAt === "string" &&
+        !Number.isNaN(Date.parse(share?.settledAt)))) &&
+    (share?.version === undefined ||
+      (Number.isSafeInteger(share?.version) && share?.version >= 1))
+  );
+}
+
 export function validShares(value: unknown): boolean {
   if (!Array.isArray(value) || !value.length || value.length > 100)
     return false;
@@ -42,7 +66,8 @@ export function validShares(value: unknown): boolean {
       (share.shareUnits != null &&
         (typeof share.shareUnits !== "number" ||
           !Number.isFinite(share.shareUnits) ||
-          share.shareUnits < 0))
+          share.shareUnits < 0)) ||
+      !validShareSettlementFlags(share)
     )
       return false;
     ids.add(share.userId);

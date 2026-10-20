@@ -408,6 +408,161 @@ describe("Accounts and transactions integrity", () => {
     });
   });
 
+  describe("currency + opening-balance pair on PATCH /accounts/:id", () => {
+    function accountUpdatePayload(store: ReturnType<typeof createStore>) {
+      const logged = store.state.changes
+        .filter(
+          (change) =>
+            change.entityType === "finance_account" &&
+            change.operation === "UPDATE",
+        )
+        .pop();
+      return logged;
+    }
+
+    it("persists both halves of a re-denomination and mirrors the opening across", async () => {
+      const store = createStore();
+      seedAccount(store, {
+        currency: "INR",
+        openingBalanceMinor: BigInt(100000),
+        currentBalanceMinor: BigInt(100000),
+      });
+
+      const updated = await new AccountsService(store.client).updateAccount(
+        userId,
+        "acc-1",
+        { currency: "usd", openingBalanceMinor: 250000 },
+      );
+
+      // Pre-fix the `data` map had no `openingBalanceMinor` key, so the balance
+      // the client re-entered for the new currency simply vanished: the row stayed
+      // at 100000 hundredths and every device that pulled the change got an
+      // account whose two balances disagreed.
+      expect(store.state.accounts[0].currency).toBe("USD");
+      expect(store.state.accounts[0].openingBalanceMinor).toBe(BigInt(250000));
+      expect(store.state.accounts[0].currentBalanceMinor).toBe(BigInt(250000));
+      expect(updated.currency).toBe("USD");
+      expect(updated.openingBalanceMinor).toBe(250000);
+      expect(updated.currentBalanceMinor).toBe(250000);
+
+      // Hundredths copied verbatim — no 83x scaling — and the version bump plus
+      // the oplog entry are the same write.
+      const logged = accountUpdatePayload(store);
+      expect(logged).toBeDefined();
+      expect(logged.payload).toMatchObject({
+        currency: "USD",
+        openingBalanceMinor: 250000,
+        currentBalanceMinor: 250000,
+      });
+      expect(logged.version).toBe(2);
+      expect(logged.version).toBe(store.state.accounts[0].version);
+    });
+
+    it("leaves the running balance to the ledger when only the opening moves", async () => {
+      const store = createStore();
+      seedAccount(store, {
+        openingBalanceMinor: BigInt(100000),
+        currentBalanceMinor: BigInt(100000),
+      });
+
+      await new AccountsService(store.client).updateAccount(userId, "acc-1", {
+        openingBalanceMinor: 120000,
+      });
+
+      // No currency switch, so nothing re-denominates: `currentBalanceMinor` is
+      // owned by the transactions booked against the account, not by this patch.
+      expect(store.state.accounts[0].openingBalanceMinor).toBe(BigInt(120000));
+      expect(store.state.accounts[0].currentBalanceMinor).toBe(BigInt(100000));
+
+      // And the guard now reads the diverged pair as "the balance has moved", so
+      // a later currency switch is refused — which is the point of the guard.
+      await expect(
+        new AccountsService(store.client).updateAccount(userId, "acc-1", {
+          currency: "USD",
+        }),
+      ).rejects.toThrow(BadRequestException);
+      expect(store.state.accounts[0].currency).toBe("INR");
+    });
+
+    it("400s a re-denomination the account has outgrown and writes neither field", async () => {
+      const store = createStore();
+      seedAccount(store, {
+        openingBalanceMinor: BigInt(100000),
+        currentBalanceMinor: BigInt(100000),
+      });
+      seedTransaction(store, { amountMinor: BigInt(500) });
+
+      await expect(
+        new AccountsService(store.client).updateAccount(userId, "acc-1", {
+          currency: "USD",
+          openingBalanceMinor: 250000,
+        }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(store.state.accounts[0].currency).toBe("INR");
+      expect(store.state.accounts[0].openingBalanceMinor).toBe(BigInt(100000));
+      expect(store.state.accounts[0].currentBalanceMinor).toBe(BigInt(100000));
+      expect(accountUpdatePayload(store)).toBeUndefined();
+    });
+
+    it("keeps a re-denominated account re-denominable, because the pair stayed equal", async () => {
+      const store = createStore();
+      seedAccount(store);
+      const accounts = new AccountsService(store.client);
+
+      await accounts.updateAccount(userId, "acc-1", {
+        currency: "USD",
+        openingBalanceMinor: 250000,
+      });
+      await accounts.updateAccount(userId, "acc-1", {
+        currency: "eur",
+        openingBalanceMinor: 300000,
+      });
+
+      expect(store.state.accounts[0].currency).toBe("EUR");
+      expect(store.state.accounts[0].openingBalanceMinor).toBe(BigInt(300000));
+      expect(store.state.accounts[0].currentBalanceMinor).toBe(BigInt(300000));
+      expect(store.state.accounts[0].version).toBe(3);
+    });
+
+    it("treats a JSON null opening balance as silence, not as zero", async () => {
+      const store = createStore();
+      seedAccount(store, {
+        openingBalanceMinor: BigInt(100000),
+        currentBalanceMinor: BigInt(100000),
+      });
+
+      await new AccountsService(store.client).updateAccount(userId, "acc-1", {
+        openingBalanceMinor: null,
+      } as any);
+
+      // A PATCH that carried the key as `null` must not be read as "move the
+      // balance to 0", because the class-validator rule around it is optional.
+      expect(store.state.accounts[0].openingBalanceMinor).toBe(BigInt(100000));
+      expect(store.state.accounts[0].currentBalanceMinor).toBe(BigInt(100000));
+    });
+
+    it("still fences a fractional opening balance before it reaches BigInt", async () => {
+      const store = createStore();
+      seedAccount(store);
+
+      await expect(
+        new AccountsService(store.client).updateAccount(userId, "acc-1", {
+          openingBalanceMinor: 1.5,
+        }),
+      ).rejects.toThrow(BadRequestException);
+      await expect(
+        new AccountsService(store.client).updateAccount(userId, "acc-1", {
+          openingBalanceMinor: Number.MAX_SAFE_INTEGER + 1,
+        }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(store.state.accounts[0].openingBalanceMinor).toBe(BigInt(0));
+      expect(store.state.accounts[0].version).toBe(1);
+      expect(accountUpdatePayload(store)).toBeUndefined();
+    });
+  });
+
   describe("adjustAccount only moves the caller's own balances", () => {
     function balanceOf(
       store: ReturnType<typeof createStore>,

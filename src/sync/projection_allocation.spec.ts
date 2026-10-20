@@ -34,13 +34,26 @@ const group = {
   currency: "INR",
 };
 
-function expenseTx(row: Record<string, any> | null): Fake {
+function expenseTx(row: Record<string, any> | null, shares: any[] = []): Fake {
   return {
     financeGroup: stubGroup(),
     financeSharedExpense: {
       findUnique: jest.fn().mockResolvedValue(row),
       create: jest.fn().mockResolvedValue({ id: expenseId }),
       update: jest.fn().mockResolvedValue({ id: expenseId }),
+    },
+    // The share table, row by row. An UPDATE branch that still nested
+    // `shares: { deleteMany: {}, create: [...] }` would never be seen here at all,
+    // which is exactly how the rebuild hid from this file for so long.
+    financeExpenseShare: {
+      findMany: jest
+        .fn()
+        .mockResolvedValue(shares.map((share) => ({ ...share }))),
+      create: jest.fn().mockImplementation(async ({ data }) => ({
+        id: `share-${data.userId}`,
+        ...data,
+      })),
+      update: jest.fn().mockImplementation(async ({ data }) => ({ ...data })),
     },
   };
 }
@@ -81,6 +94,10 @@ function expenseChange(
 
 const createdShares = (tx: any) =>
   tx.financeSharedExpense.create.mock.calls[0][0].data.shares.create;
+
+/** What the UPDATE branch wrote straight onto the share table, row by row. */
+const projectedShares = (tx: any) =>
+  tx.financeExpenseShare.create.mock.calls.map((call: any) => call[0].data);
 
 const minor = (share: any) => Number(share.owedAmountMinor);
 
@@ -279,12 +296,22 @@ describe("finance_shared_expense projection allocation", () => {
     );
 
     const data = tx.financeSharedExpense.update.mock.calls[0][0].data;
-    expect(data.shares.create.map((s: any) => [s.userId, minor(s)])).toEqual([
+    // This asserted `expect(data.shares.deleteMany).toEqual({})` while the UPDATE
+    // branch still rebuilt the table: the nested delete was the mechanism, and the
+    // assertion was only ever pinning it. The allocation it proved is unchanged —
+    // the same three amounts now reach the share table as three row inserts, and no
+    // delete runs at all, because a device push that erased a tombstone also erased
+    // the fact that somebody left. See `projection_share_diff.spec.ts` for the
+    // tombstone half.
+    expect(data).not.toHaveProperty("shares");
+    expect(projectedShares(tx).map((s: any) => [s.userId, minor(s)])).toEqual([
       ["user-a", 334],
       ["user-b", 333],
       ["user-c", 333],
     ]);
-    expect(data.shares.deleteMany).toEqual({});
+    expect(tx.financeExpenseShare.findMany).toHaveBeenCalledTimes(1);
+    // Nobody is in the table yet, so there is nothing to tombstone.
+    expect(tx.financeExpenseShare.update).not.toHaveBeenCalled();
   });
 
   it("leaves the shares an update never mentions out of the write", async () => {
@@ -309,6 +336,11 @@ describe("finance_shared_expense projection allocation", () => {
     expect(
       tx.financeSharedExpense.update.mock.calls[0][0].data,
     ).not.toHaveProperty("shares");
+    // A change that never spoke about the split does not even read it: no row is
+    // touched, so no version moves and no `isSettled` can be lost.
+    expect(tx.financeExpenseShare.findMany).not.toHaveBeenCalled();
+    expect(tx.financeExpenseShare.create).not.toHaveBeenCalled();
+    expect(tx.financeExpenseShare.update).not.toHaveBeenCalled();
   });
 });
 

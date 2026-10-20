@@ -25,7 +25,9 @@ import { GetUser } from "@/auth/decorators/get-user.decorator";
 import { CreateGroupDto } from "./dto/create-group.dto";
 import { UpdateGroupDto } from "./dto/update-group.dto";
 import { CreateSharedExpenseDto } from "./dto/create-shared-expense.dto";
+import { UpdateSharedExpenseDto } from "./dto/update-shared-expense.dto";
 import { CreateSettlementDto } from "./dto/create-settlement.dto";
+import { UpdateSettlementDto } from "./dto/update-settlement.dto";
 
 @ApiTags("Finance Groups & Split")
 @Controller("finance/groups")
@@ -115,6 +117,25 @@ export class GroupsController {
     return this.groupsService.getSharedExpenses(userId, groupId);
   }
 
+  @Patch(":id/expenses/:expenseId")
+  @ApiOperation({ summary: "Edit a shared expense and its split" })
+  @ApiResponse({ status: 200, description: "Shared expense updated" })
+  @ApiResponse({ status: 403, description: "Not the owner or an editor" })
+  @ApiResponse({ status: 404, description: "Group or expense not found" })
+  async updateSharedExpense(
+    @GetUser("id") userId: string,
+    @Param("id", ParseUUIDPipe) groupId: string,
+    @Param("expenseId", ParseUUIDPipe) expenseId: string,
+    @Body() dto: UpdateSharedExpenseDto,
+  ) {
+    return this.groupsService.updateSharedExpense(
+      userId,
+      groupId,
+      expenseId,
+      dto,
+    );
+  }
+
   @Delete(":id/expenses/:expenseId")
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: "Delete a shared expense" })
@@ -150,6 +171,25 @@ export class GroupsController {
     @Param("id", ParseUUIDPipe) groupId: string,
   ) {
     return this.groupsService.getSettlements(userId, groupId);
+  }
+
+  @Patch(":id/settlements/:settlementId")
+  @ApiOperation({ summary: "Edit a recorded settlement" })
+  @ApiResponse({ status: 200, description: "Settlement updated" })
+  @ApiResponse({ status: 403, description: "Not the owner or an editor" })
+  @ApiResponse({ status: 404, description: "Group or settlement not found" })
+  async updateSettlement(
+    @GetUser("id") userId: string,
+    @Param("id", ParseUUIDPipe) groupId: string,
+    @Param("settlementId", ParseUUIDPipe) settlementId: string,
+    @Body() dto: UpdateSettlementDto,
+  ) {
+    return this.groupsService.updateSettlement(
+      userId,
+      groupId,
+      settlementId,
+      dto,
+    );
   }
 
   @Delete(":id/settlements/:settlementId")

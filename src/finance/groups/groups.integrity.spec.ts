@@ -14,9 +14,14 @@ import { CreateSharedExpenseDto } from "./dto/create-shared-expense.dto";
 import { CreateSettlementDto } from "./dto/create-settlement.dto";
 import { CreateTripDto } from "../trips/dto/create-trip.dto";
 import { CreateItineraryItemDto } from "../trips/dto/create-itinerary-item.dto";
+import { UpdateSharedExpenseDto } from "./dto/update-shared-expense.dto";
+import { UpdateSettlementDto } from "./dto/update-settlement.dto";
+import { changePayloadViolations } from "@/sync/change-payload.validator";
 
 const USER = "user-owner";
 const FOREIGN_USER = "user-someone-else";
+const EDITOR = "user-editor";
+const VIEWER = "user-viewer";
 const GROUP = "group-1";
 const TRIP = "trip-1";
 const FOREIGN_TRIP = "trip-foreign";
@@ -35,6 +40,7 @@ function matchesWhere(row: any, where: any): boolean {
       return Object.entries(condition as any).every(
         ([op, operand]: [string, any]) => {
           if (op === "in") return operand.includes(value);
+          if (op === "not") return value !== operand;
           if (op === "gte") return value >= operand;
           if (op === "lte") return value <= operand;
           throw new Error(`unsupported operator ${op}`);
@@ -75,6 +81,7 @@ function createStore() {
     settlements: [] as any[],
     accounts: [] as any[],
     attachments: [] as any[],
+    grants: [] as any[],
     changes: [] as any[],
     ops: [] as string[],
     cursor: BigInt(0),
@@ -86,8 +93,32 @@ function createStore() {
   const sharesOf = (expenseId: string) =>
     state.shares.filter((share) => share.sharedExpenseId === expenseId);
 
-  const withShares = (row: any, include: any) =>
-    include?.shares ? { ...row, shares: sharesOf(row.id) } : { ...row };
+  const byUserId = (rows: any[]) =>
+    [...rows].sort((a, b) =>
+      a.userId === b.userId ? 0 : a.userId < b.userId ? -1 : 1,
+    );
+
+  /**
+   * Mirrors `include: { shares: { where: … } }` — the nested filter is applied
+   * here rather than ignored, so a read path that forgets `deletedAt: null` gets
+   * the tombstoned rows back and a test notices. An ignored `where` would have
+   * made the whole half-migration invisible from inside this suite.
+   *
+   * Rows are handed back as copies, because that is what a query returns: a live
+   * object out of `state` would let the service read its own write back through
+   * the row it had already bumped, and a version it never advanced would look
+   * correct here and be wrong against the database.
+   */
+  const withShares = (row: any, include: any) => {
+    if (!include?.shares) return { ...row };
+    const where = include.shares.where;
+    return {
+      ...row,
+      shares: sharesOf(row.id)
+        .filter((share) => where === undefined || matchesWhere(share, where))
+        .map((share) => ({ ...share })),
+    };
+  };
 
   const client: any = {
     $transaction: async (fn: any) => {
@@ -192,6 +223,10 @@ function createStore() {
             id: id("share"),
             sharedExpenseId: row.id,
             isSettled: false,
+            settledAt: null,
+            deletedAt: null,
+            version: 1,
+            createdAt: new Date(),
             ...share,
           });
         }
@@ -210,6 +245,42 @@ function createStore() {
         bump(row, data);
         return { ...row };
       },
+    },
+    financeExpenseShare: {
+      findMany: async ({ where, orderBy }: any) => {
+        state.ops.push("read:share");
+        const rows = state.shares.filter((share) =>
+          matchesWhere(share, where ?? {}),
+        );
+        const ordered = orderBy?.userId === "asc" ? byUserId(rows) : rows;
+        return ordered.map((share) => ({ ...share }));
+      },
+      create: async ({ data }: any) => {
+        state.ops.push("create:share");
+        const row = {
+          id: id("share"),
+          isSettled: false,
+          settledAt: null,
+          deletedAt: null,
+          version: 1,
+          createdAt: new Date(),
+          ...data,
+        };
+        state.shares.push(row);
+        return { ...row };
+      },
+      update: async ({ where, data }: any) => {
+        state.ops.push("update:share");
+        const row = state.shares.find((share) => share.id === where.id)!;
+        bump(row, data);
+        return { ...row };
+      },
+    },
+    resourceShare: {
+      findFirst: async ({ where }: any) =>
+        state.grants.find((grant) => matchesWhere(grant, where)) ?? null,
+      findMany: async ({ where }: any) =>
+        state.grants.filter((grant) => matchesWhere(grant, where ?? {})),
     },
     financeSettlement: {
       create: async ({ data }: any) => {
@@ -335,6 +406,53 @@ function deletedIds(state: any, entityType: string): string[] {
   return changesFor(state, entityType, ChangeOperation.DELETE).map(
     (change: any) => change.entityId,
   );
+}
+
+/** A `ResourceShare` grant on the seeded group, in the shape the store reads. */
+function seedGrant(store: ReturnType<typeof createStore>, overrides: any = {}) {
+  const row = {
+    id: `grant-${store.state.grants.length + 1}`,
+    resourceType: "EXPENSE_GROUP",
+    resourceId: GROUP,
+    ownerId: USER,
+    sharedWithUserId: EDITOR,
+    sharedWithEmail: "editor@example.test",
+    role: "EDITOR",
+    deletedAt: null,
+    createdAt: new Date(),
+    ...overrides,
+  };
+  store.state.grants.push(row);
+  return row;
+}
+
+function last(rows: any[]) {
+  return rows[rows.length - 1];
+}
+
+/**
+ * A three-person split with known amounts, so a test can say exactly which rows
+ * an edit was allowed to touch: `EXACT` keeps the client's numbers instead of
+ * reallocating them, and the rows come back ordered by `userId`.
+ */
+async function seedExactSplit(store: ReturnType<typeof createStore>) {
+  seedGroup(store);
+  const service = new GroupsService(store.client);
+  const expense = await service.addSharedExpense(
+    USER,
+    GROUP,
+    expenseDto({
+      splitType: FinanceSplitType.EXACT,
+      paidByUserId: "Alice",
+      totalAmountMinor: 10000,
+      shares: [
+        { userId: "Alice", owedAmountMinor: 4000 },
+        { userId: "Bob", owedAmountMinor: 3000 },
+        { userId: "Charlie", owedAmountMinor: 3000 },
+      ],
+    }),
+  );
+  return { service, expense };
 }
 
 async function invalidFields(dtoClass: any, payload: any): Promise<string[]> {
@@ -953,5 +1071,845 @@ describe("DTO bounds", () => {
         title: "Beach",
       }),
     ).toContain("dayIndex");
+  });
+
+  it("keeps every create rule reachable one field at a time on the update DTOs", async () => {
+    // An edit form sends one field. If `PartialType` had kept any of the create
+    // DTO's `@IsNotEmpty`/`@ArrayNotEmpty` obligations, the form would 400 on a
+    // payload that only renames the title.
+    expect(await invalidFields(UpdateSharedExpenseDto, {})).toEqual([]);
+    expect(
+      await invalidFields(UpdateSharedExpenseDto, { title: "renamed" }),
+    ).toEqual([]);
+    expect(await invalidFields(UpdateSettlementDto, {})).toEqual([]);
+
+    // …and the bounds themselves still bite when the field is sent.
+    expect(
+      await invalidFields(UpdateSharedExpenseDto, { shares: [] }),
+    ).toContain("shares");
+    expect(
+      await invalidFields(UpdateSharedExpenseDto, {
+        shares: Array.from({ length: 101 }, (_, i) => ({ userId: `u-${i}` })),
+      }),
+    ).toContain("shares");
+    expect(
+      await invalidFields(UpdateSharedExpenseDto, {
+        shares: [{ userId: "Alice", owedAmountMinor: 1.5 }],
+      }),
+    ).toContain("shares");
+    expect(
+      await invalidFields(UpdateSharedExpenseDto, {
+        payerAccountId: "not-a-uuid",
+      }),
+    ).toContain("payerAccountId");
+    expect(
+      await invalidFields(UpdateSettlementDto, { amountMinor: 0 }),
+    ).toContain("amountMinor");
+    expect(
+      await invalidFields(UpdateSettlementDto, { tripId: "nope" }),
+    ).toContain("tripId");
+  });
+});
+
+describe("PATCH a shared expense", () => {
+  it("edits one participant without recreating the others", async () => {
+    const store = createStore();
+    const { service, expense } = await seedExactSplit(store);
+    const idsBefore = store.state.shares.map((row) => row.id);
+    store.state.ops = [];
+    store.state.changes = [];
+
+    const updated = await service.updateSharedExpense(USER, GROUP, expense.id, {
+      shares: [
+        { userId: "Bob", owedAmountMinor: 3500 },
+        { userId: "Charlie", owedAmountMinor: 2500 },
+        { userId: "Alice", owedAmountMinor: 4000 },
+      ],
+    });
+
+    // The whole point of the fix: the rows are the same rows, in the same order,
+    // with new numbers on them.
+    expect(store.state.shares.map((row) => row.id)).toEqual(idsBefore);
+    expect(store.state.shares).toHaveLength(3);
+    expect(store.state.ops.filter((op) => op === "create:share")).toHaveLength(
+      0,
+    );
+    expect(store.state.ops.filter((op) => op === "update:share")).toHaveLength(
+      2,
+    );
+
+    expect(
+      updated.shares.map((s: any) => [s.userId, s.owedAmountMinor]),
+    ).toEqual([
+      ["Alice", 4000],
+      ["Bob", 3500],
+      ["Charlie", 2500],
+    ]);
+
+    // Only the rows that actually moved were written, so a version reads as the
+    // history it claims: Alice's share was never touched by this request.
+    const versions = new Map(
+      store.state.shares.map((row) => [row.userId, row.version]),
+    );
+    expect(versions.get("Alice")).toBe(1);
+    expect(versions.get("Bob")).toBe(2);
+    expect(versions.get("Charlie")).toBe(2);
+  });
+
+  it("leaves every share row alone when the request does not mention the split", async () => {
+    const store = createStore();
+    const { service, expense } = await seedExactSplit(store);
+    store.state.ops = [];
+
+    await service.updateSharedExpense(USER, GROUP, expense.id, {
+      title: "Dinner, with tips",
+    });
+
+    expect(
+      store.state.ops.filter(
+        (op) => op === "update:share" || op === "create:share",
+      ),
+    ).toHaveLength(0);
+    expect(store.state.expenses[0].title).toBe("Dinner, with tips");
+    expect(store.state.shares.every((row) => row.deletedAt === null)).toBe(
+      true,
+    );
+  });
+
+  it("tombstones a dropped participant instead of deleting the row", async () => {
+    const store = createStore();
+    const { service, expense } = await seedExactSplit(store);
+    const charlie = store.state.shares.find((row) => row.userId === "Charlie");
+    store.state.changes = [];
+
+    await service.updateSharedExpense(USER, GROUP, expense.id, {
+      shares: [
+        { userId: "Alice", owedAmountMinor: 6000 },
+        { userId: "Bob", owedAmountMinor: 4000 },
+      ],
+    });
+
+    const kept = store.state.shares.find((row) => row.id === charlie.id);
+    expect(kept).toBeTruthy();
+    expect(kept.owedAmountMinor).toBe(BigInt(3000));
+    expect(kept.deletedAt).toBeInstanceOf(Date);
+    expect(kept.version).toBe(2);
+
+    const listed = await service.getSharedExpenses(USER, GROUP);
+    expect(listed[0].shares.map((s: any) => s.userId)).toEqual([
+      "Alice",
+      "Bob",
+    ]);
+
+    const change = last(
+      changesFor(store.state, "finance_shared_expense", ChangeOperation.UPDATE),
+    );
+    expect(change.payload.shares.map((s: any) => s.userId)).toEqual([
+      "Alice",
+      "Bob",
+    ]);
+  });
+
+  it("keeps a settled share settled when another field set is edited", async () => {
+    const store = createStore();
+    const { service, expense } = await seedExactSplit(store);
+    const settledAt = new Date("2026-10-12T09:00:00.000Z");
+    // What a second device left behind: Bob marked his own half paid.
+    const bob = store.state.shares.find((row) => row.userId === "Bob");
+    bob.isSettled = true;
+    bob.settledAt = settledAt;
+    store.state.changes = [];
+
+    const updated = await service.updateSharedExpense(USER, GROUP, expense.id, {
+      title: "Dinner, corrected",
+      shares: [
+        { userId: "Alice", owedAmountMinor: 5000 },
+        { userId: "Bob", owedAmountMinor: 2500 },
+        { userId: "Charlie", owedAmountMinor: 2500 },
+      ],
+    });
+
+    // Bob's row is written by this edit (his amount moved) and still settles.
+    const storedBob = store.state.shares.find((row) => row.userId === "Bob");
+    expect(storedBob.isSettled).toBe(true);
+    expect(storedBob.settledAt).toBe(settledAt);
+    expect(Number(storedBob.owedAmountMinor)).toBe(2500);
+    expect(
+      (updated.shares as any[]).find((s) => s.userId === "Bob").isSettled,
+    ).toBe(true);
+
+    const payload = last(
+      changesFor(store.state, "finance_shared_expense", ChangeOperation.UPDATE),
+    ).payload;
+    expect(payload.shares).toEqual([
+      {
+        userId: "Alice",
+        owedAmountMinor: 5000,
+        shareUnits: null,
+        isSettled: false,
+        settledAt: null,
+        version: 2,
+      },
+      {
+        userId: "Bob",
+        owedAmountMinor: 2500,
+        shareUnits: null,
+        isSettled: true,
+        settledAt: settledAt.toISOString(),
+        version: 2,
+      },
+      {
+        userId: "Charlie",
+        owedAmountMinor: 2500,
+        shareUnits: null,
+        isSettled: false,
+        settledAt: null,
+        version: 2,
+      },
+    ]);
+  });
+
+  it("bumps the version, appends one UPDATE per recipient and notifies", async () => {
+    const store = createStore();
+    const notifications: any[] = [];
+    const service = new GroupsService(store.client, {
+      notifyMutation: (entry: any) => notifications.push(entry),
+    } as any);
+    seedGroup(store);
+    seedGrant(store, { sharedWithUserId: EDITOR, role: "EDITOR" });
+    const expense = await service.addSharedExpense(USER, GROUP, expenseDto());
+    store.state.changes = [];
+    // The CREATE notified too; only what the edit notifies is under test here.
+    notifications.length = 0;
+
+    await service.updateSharedExpense(USER, GROUP, expense.id, {
+      title: "Dinner, split again",
+    });
+
+    expect(store.state.expenses[0].version).toBe(2);
+    const updates = changesFor(
+      store.state,
+      "finance_shared_expense",
+      ChangeOperation.UPDATE,
+    );
+    // owner + actor collapse to one recipient, the EDITOR grantee is the second.
+    expect(updates).toHaveLength(2);
+    expect(new Set(updates.map((change: any) => change.userId))).toEqual(
+      new Set([USER, EDITOR]),
+    );
+    expect(updates.every((c: any) => c.version === 2)).toBe(true);
+    expect(new Set(notifications.map((n) => String(n.highestCursor)))).toEqual(
+      new Set(updates.map((c: any) => String(c.cursor))),
+    );
+  });
+
+  it("re-runs the create path's rules on the fields it edits, and writes nothing", async () => {
+    const store = createStore();
+    const { service, expense } = await seedExactSplit(store);
+    seedTrip(store, { id: FOREIGN_TRIP, ownerId: FOREIGN_USER });
+    store.state.accounts.push({
+      id: FOREIGN_UUID,
+      userId: FOREIGN_USER,
+      currency: "INR",
+      deletedAt: null,
+    });
+    store.state.attachments.push({ id: FOREIGN_UUID, userId: FOREIGN_USER });
+    const versionBefore = store.state.expenses[0].version;
+    const idsBefore = store.state.shares.map((row) => row.id);
+
+    const refused: Array<[any, any]> = [
+      [{ currency: "USD" }, BadRequestException],
+      [{ tripId: FOREIGN_TRIP }, ForbiddenException],
+      [{ payerAccountId: FOREIGN_UUID }, BadRequestException],
+      [{ receiptAttachmentId: FOREIGN_UUID }, BadRequestException],
+      // 1..100 participants, unique ids, non-negative safe integers, and the
+      // exact-sum contract — the same allocator the create path runs.
+      [{ shares: [] }, BadRequestException],
+      [
+        { shares: [{ userId: "Alice" }, { userId: "Alice" }] },
+        BadRequestException,
+      ],
+      [
+        { shares: [{ userId: "Alice", owedAmountMinor: -1 }] },
+        BadRequestException,
+      ],
+      [
+        { shares: [{ userId: "Alice", owedAmountMinor: 9999 }] },
+        BadRequestException,
+      ],
+      [{ totalAmountMinor: Number.POSITIVE_INFINITY }, BadRequestException],
+      [
+        {
+          totalAmountMinor: 0,
+          shares: [{ userId: "Alice", owedAmountMinor: 0 }],
+        },
+        BadRequestException,
+      ],
+    ];
+
+    for (const [body, errorType] of refused) {
+      await expect(
+        service.updateSharedExpense(USER, GROUP, expense.id, body),
+      ).rejects.toBeInstanceOf(errorType);
+    }
+
+    expect(store.state.expenses[0].version).toBe(versionBefore);
+    expect(store.state.shares.map((row) => row.id)).toEqual(idsBefore);
+    expect(store.state.shares.every((row) => row.deletedAt === null)).toBe(
+      true,
+    );
+    expect(changesFor(store.state, "finance_shared_expense")).toHaveLength(1);
+  });
+
+  it("keeps a tombstoned share out of the balances and the suggested plan", async () => {
+    const store = createStore();
+    const { service, expense } = await seedExactSplit(store);
+
+    await service.updateSharedExpense(USER, GROUP, expense.id, {
+      shares: [
+        { userId: "Alice", owedAmountMinor: 7000 },
+        { userId: "Bob", owedAmountMinor: 3000 },
+      ],
+    });
+
+    const summary = await service.getGroupBalancesAndSimplifiedDebts(
+      USER,
+      GROUP,
+    );
+    expect(summary.balances).toEqual({ Alice: 3000, Bob: -3000 });
+    expect(Object.keys(summary.balances)).not.toContain("Charlie");
+    expect(summary.simplifiedDebts).toEqual([
+      { fromUserId: "Bob", toUserId: "Alice", amountMinor: 3000 },
+    ]);
+  });
+
+  it("revives the dropped participant's own row when they are added back", async () => {
+    const store = createStore();
+    const { service, expense } = await seedExactSplit(store);
+    const charlie = store.state.shares.find((row) => row.userId === "Charlie");
+
+    await service.updateSharedExpense(USER, GROUP, expense.id, {
+      shares: [
+        { userId: "Alice", owedAmountMinor: 7000 },
+        { userId: "Bob", owedAmountMinor: 3000 },
+      ],
+    });
+    expect(charlie.deletedAt).toBeInstanceOf(Date);
+    const versionAfterDrop = charlie.version;
+    store.state.ops = [];
+    store.state.changes = [];
+
+    const updated = await service.updateSharedExpense(USER, GROUP, expense.id, {
+      shares: [
+        { userId: "Alice", owedAmountMinor: 4000 },
+        { userId: "Bob", owedAmountMinor: 3000 },
+        { userId: "Charlie", owedAmountMinor: 3000 },
+      ],
+    });
+
+    // A rejoin writes the row that is already in the table, so nothing is
+    // created and the expense still holds exactly one row per participant —
+    // which is the property `@@index([sharedExpenseId, userId])` is documented
+    // on, and the one the `/sync/push` diff and the client's `_syncShares`
+    // already honour. Inserting instead leaves the tombstone orphaned forever.
+    expect(store.state.ops.filter((op) => op === "create:share")).toHaveLength(
+      0,
+    );
+    expect(store.state.shares).toHaveLength(3);
+    const forCharlie = store.state.shares.filter(
+      (row) => row.userId === "Charlie",
+    );
+    expect(forCharlie).toHaveLength(1);
+    expect(forCharlie[0].id).toBe(charlie.id);
+    expect(forCharlie[0].deletedAt).toBeNull();
+    expect(Number(forCharlie[0].owedAmountMinor)).toBe(3000);
+    expect(forCharlie[0].version).toBe(versionAfterDrop + 1);
+
+    // Both the response and the appended change have to say "live", or a device
+    // applying the payload would drop him again on arrival.
+    const responded = (updated.shares as any[]).find(
+      (share) => share.userId === "Charlie",
+    );
+    expect(responded).toMatchObject({ owedAmountMinor: 3000, deletedAt: null });
+    const change = last(
+      changesFor(store.state, "finance_shared_expense", ChangeOperation.UPDATE),
+    );
+    expect(change.payload.shares.map((s: any) => s.userId)).toEqual([
+      "Alice",
+      "Bob",
+      "Charlie",
+    ]);
+
+    const listed = await service.getSharedExpenses(USER, GROUP);
+    expect(listed[0].shares.map((s: any) => s.userId)).toEqual([
+      "Alice",
+      "Bob",
+      "Charlie",
+    ]);
+  });
+
+  it("writes nothing when a request replays a split that already has the rejoined participant", async () => {
+    const store = createStore();
+    const { service, expense } = await seedExactSplit(store);
+
+    await service.updateSharedExpense(USER, GROUP, expense.id, {
+      shares: [
+        { userId: "Alice", owedAmountMinor: 7000 },
+        { userId: "Bob", owedAmountMinor: 3000 },
+      ],
+    });
+    const rejoined = [
+      { userId: "Alice", owedAmountMinor: 4000 },
+      { userId: "Bob", owedAmountMinor: 3000 },
+      { userId: "Charlie", owedAmountMinor: 3000 },
+    ];
+    await service.updateSharedExpense(USER, GROUP, expense.id, {
+      shares: rejoined,
+    });
+
+    const ids = store.state.shares.map((row) => row.id);
+    const versions = new Map(
+      store.state.shares.map((row) => [row.userId, row.version]),
+    );
+    store.state.ops = [];
+
+    // The same request again: a second device replaying a split it already sent.
+    // A revive that fired on "this participant has row history" instead of "this
+    // participant's row is a tombstone" would bump every version on every replay.
+    await service.updateSharedExpense(USER, GROUP, expense.id, {
+      shares: rejoined,
+    });
+
+    expect(
+      store.state.ops.filter(
+        (op) => op === "update:share" || op === "create:share",
+      ),
+    ).toHaveLength(0);
+    expect(store.state.shares.map((row) => row.id)).toEqual(ids);
+    expect(
+      new Map(store.state.shares.map((row) => [row.userId, row.version])),
+    ).toEqual(versions);
+  });
+
+  it("neither invents a settlement on a rejoin nor erases the one it finds", async () => {
+    const store = createStore();
+    const { service, expense } = await seedExactSplit(store);
+    const settledAt = new Date("2026-10-12T09:00:00.000Z");
+    const bob = store.state.shares.find((row) => row.userId === "Bob");
+    const charlie = store.state.shares.find((row) => row.userId === "Charlie");
+    // What the settlement flow left behind: Bob paid, Charlie never did.
+    bob.isSettled = true;
+    bob.settledAt = settledAt;
+
+    await service.updateSharedExpense(USER, GROUP, expense.id, {
+      shares: [{ userId: "Alice", owedAmountMinor: 10000 }],
+    });
+    store.state.ops = [];
+
+    await service.updateSharedExpense(USER, GROUP, expense.id, {
+      shares: [
+        { userId: "Alice", owedAmountMinor: 4000 },
+        { userId: "Bob", owedAmountMinor: 3000 },
+        { userId: "Charlie", owedAmountMinor: 3000 },
+      ],
+    });
+
+    // The two rows the rejoin brought back are the ones a client actually reads,
+    // and each keeps exactly the settle state it was left with: `isSettled` and
+    // `settledAt` are not in an expense-edit payload, so the revive can neither
+    // restore a settle nobody recorded for Charlie nor drop Bob's.
+    const liveBob = store.state.shares.find(
+      (row) => row.userId === "Bob" && row.deletedAt == null,
+    );
+    const liveCharlie = store.state.shares.find(
+      (row) => row.userId === "Charlie" && row.deletedAt == null,
+    );
+    expect(liveBob.id).toBe(bob.id);
+    expect(liveBob.isSettled).toBe(true);
+    expect(liveBob.settledAt).toBe(settledAt);
+    expect(liveCharlie.id).toBe(charlie.id);
+    expect(liveCharlie.isSettled).toBe(false);
+    expect(liveCharlie.settledAt).toBeNull();
+
+    const payload = last(
+      changesFor(store.state, "finance_shared_expense", ChangeOperation.UPDATE),
+    ).payload;
+    expect(payload.shares.map((s: any) => [s.userId, s.isSettled])).toEqual([
+      ["Alice", false],
+      ["Bob", true],
+      ["Charlie", false],
+    ]);
+  });
+
+  it("prefers the live row when an old rejoin left a participant both", async () => {
+    const store = createStore();
+    const { service, expense } = await seedExactSplit(store);
+    const original = store.state.shares.find((row) => row.userId === "Charlie");
+    // The artefact the pre-fix diff produced, in exactly this shape: the
+    // tombstone it never looked at, plus the fresh live row its rejoin created.
+    // Widening the read must not let the orphan win the key.
+    original.deletedAt = new Date();
+    original.version = 2;
+    store.state.shares.push({
+      ...original,
+      id: "share-rejoined",
+      deletedAt: null,
+      version: 1,
+      createdAt: new Date(original.createdAt.getTime() + 86_400_000),
+      owedAmountMinor: BigInt(3000),
+    });
+    store.state.ops = [];
+    store.state.changes = [];
+
+    await service.updateSharedExpense(USER, GROUP, expense.id, {
+      shares: [
+        { userId: "Alice", owedAmountMinor: 5000 },
+        { userId: "Bob", owedAmountMinor: 3000 },
+        { userId: "Charlie", owedAmountMinor: 2000 },
+      ],
+    });
+
+    expect(store.state.ops.filter((op) => op === "create:share")).toHaveLength(
+      0,
+    );
+    const live = store.state.shares.find((row) => row.id === "share-rejoined");
+    expect(live.deletedAt).toBeNull();
+    expect(Number(live.owedAmountMinor)).toBe(2000);
+    expect(live.version).toBe(2);
+    // The orphan is not revived, and the departure loop — which still only walks
+    // live rows — does not re-tombstone it either.
+    expect(original.deletedAt).toBeInstanceOf(Date);
+    expect(Number(original.owedAmountMinor)).toBe(3000);
+    expect(original.version).toBe(2);
+    expect(
+      (await service.getSharedExpenses(USER, GROUP))[0].shares.filter(
+        (s: any) => s.userId === "Charlie",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("revives the newest row when a participant has two tombstones", async () => {
+    const store = createStore();
+    const { service, expense } = await seedExactSplit(store);
+    const charlie = store.state.shares.find((row) => row.userId === "Charlie");
+
+    await service.updateSharedExpense(USER, GROUP, expense.id, {
+      shares: [
+        { userId: "Alice", owedAmountMinor: 6000 },
+        { userId: "Bob", owedAmountMinor: 4000 },
+      ],
+    });
+    const versionAfterDrop = charlie.version;
+    // A second, older tombstone for the same participant — what two departures
+    // across two transports leave behind. The row the other devices saw most
+    // recently is the one that comes back.
+    store.state.shares.push({
+      ...charlie,
+      id: "share-older-tombstone",
+      version: 9,
+      createdAt: new Date(charlie.createdAt.getTime() - 86_400_000),
+    });
+    store.state.ops = [];
+
+    await service.updateSharedExpense(USER, GROUP, expense.id, {
+      shares: [
+        { userId: "Alice", owedAmountMinor: 4000 },
+        { userId: "Bob", owedAmountMinor: 3000 },
+        { userId: "Charlie", owedAmountMinor: 3000 },
+      ],
+    });
+
+    expect(store.state.ops.filter((op) => op === "create:share")).toHaveLength(
+      0,
+    );
+    expect(charlie.deletedAt).toBeNull();
+    expect(charlie.version).toBe(versionAfterDrop + 1);
+    const older = store.state.shares.find(
+      (row) => row.id === "share-older-tombstone",
+    );
+    expect(older.deletedAt).toBeInstanceOf(Date);
+    expect(older.version).toBe(9);
+  });
+});
+
+describe("PATCH a settlement", () => {
+  async function seededPayment() {
+    const store = createStore();
+    seedGroup(store);
+    const service = new GroupsService(store.client);
+    await service.addSharedExpense(
+      USER,
+      GROUP,
+      expenseDto({
+        splitType: FinanceSplitType.EXACT,
+        paidByUserId: "Alice",
+        totalAmountMinor: 10000,
+        shares: [
+          { userId: "Alice", owedAmountMinor: 0 },
+          { userId: "Bob", owedAmountMinor: 10000 },
+        ],
+      }),
+    );
+    const settlement = await service.createSettlement(
+      USER,
+      GROUP,
+      settlementDto({ amountMinor: 4000 }),
+    );
+    return { store, service, settlement };
+  }
+
+  it("corrects the payment against the balances that ignore it", async () => {
+    const { store, service, settlement } = await seededPayment();
+    store.state.changes = [];
+
+    const updated = await service.updateSettlement(USER, GROUP, settlement.id, {
+      amountMinor: 10000,
+      paymentMethod: "UPI",
+      notes: "the whole debt",
+    });
+
+    // Measured against the balances *including* this row, 10000 would look like a
+    // 6000 overdraw and this honest correction would be refused.
+    expect(Number(store.state.settlements[0].amountMinor)).toBe(10000);
+    expect(store.state.settlements[0].paymentMethod).toBe("UPI");
+    expect(updated.version).toBe(2);
+
+    const summary = await service.getGroupBalancesAndSimplifiedDebts(
+      USER,
+      GROUP,
+    );
+    expect(summary.balances).toEqual({ Alice: 0, Bob: 0 });
+    expect(summary.simplifiedDebts).toEqual([]);
+
+    const change = last(
+      changesFor(store.state, "finance_settlement", ChangeOperation.UPDATE),
+    );
+    expect(change.payload.amountMinor).toBe(10000);
+    expect(change.payload.notes).toBe("the whole debt");
+    expect(change.payload.createdAt).toBe(
+      store.state.settlements[0].createdAt.toISOString(),
+    );
+  });
+
+  it("refuses a correction that overdraws the debt, and writes nothing", async () => {
+    const { store, service, settlement } = await seededPayment();
+    store.state.changes = [];
+
+    await expect(
+      service.updateSettlement(USER, GROUP, settlement.id, {
+        amountMinor: 10001,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(Number(store.state.settlements[0].amountMinor)).toBe(4000);
+    expect(store.state.settlements[0].version).toBe(1);
+    // The log was cleared above, so any row now would be the refused edit's own.
+    expect(changesFor(store.state, "finance_settlement")).toHaveLength(0);
+  });
+
+  it("holds the currency lock and the party rules of the create path", async () => {
+    const { store, service, settlement } = await seededPayment();
+    seedTrip(store, { id: FOREIGN_TRIP, ownerId: FOREIGN_USER });
+
+    await expect(
+      service.updateSettlement(USER, GROUP, settlement.id, { currency: "usd" }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      service.updateSettlement(USER, GROUP, settlement.id, { toUserId: "Bob" }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      service.updateSettlement(USER, GROUP, settlement.id, {
+        tripId: FOREIGN_TRIP,
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+
+    expect(store.state.settlements[0].currency).toBe("INR");
+    expect(store.state.settlements[0].toUserId).toBe("Alice");
+  });
+});
+
+describe("PATCH authority", () => {
+  async function seeded() {
+    const store = createStore();
+    const { service, expense } = await seedExactSplit(store);
+    const settlement = await service.createSettlement(
+      USER,
+      GROUP,
+      settlementDto({ amountMinor: 1000 }),
+    );
+    return { store, service, expense, settlement };
+  }
+
+  it("403s a VIEWER grantee and 404s a stranger on both routes", async () => {
+    const { store, service, expense, settlement } = await seeded();
+    seedGrant(store, {
+      sharedWithUserId: VIEWER,
+      role: "VIEWER",
+      sharedWithEmail: "viewer@example.test",
+    });
+
+    await expect(
+      service.updateSharedExpense(VIEWER, GROUP, expense.id, { title: "mine" }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(
+      service.updateSettlement(VIEWER, GROUP, settlement.id, { notes: "mine" }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+
+    await expect(
+      service.updateSharedExpense(FOREIGN_USER, GROUP, expense.id, {
+        title: "mine",
+      }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    await expect(
+      service.updateSettlement(FOREIGN_USER, GROUP, settlement.id, {
+        notes: "mine",
+      }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+
+    expect(store.state.expenses[0].title).toBe("Dinner");
+    expect(store.state.settlements[0].notes ?? null).toBe(null);
+  });
+
+  it("403s a revoked grant instead of reading the tombstone as a licence", async () => {
+    const { store, service, expense } = await seeded();
+    seedGrant(store, { deletedAt: new Date() });
+
+    await expect(
+      service.updateSharedExpense(EDITOR, GROUP, expense.id, { title: "mine" }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    // `getGroupById` has no live grant to find either, so the group stays
+    // invisible to a revoked collaborator on both steps — never writable.
+    expect(store.state.expenses[0].title).toBe("Dinner");
+  });
+
+  it("lets an EDITOR grantee through, the same caller the create path accepts", async () => {
+    const { store, service, expense, settlement } = await seeded();
+    seedGrant(store, {});
+    const expenseVersion = store.state.expenses[0].version;
+    store.state.changes = [];
+
+    await expect(
+      service.updateSharedExpense(EDITOR, GROUP, expense.id, {
+        title: "renamed by the editor",
+      }),
+    ).resolves.toBeTruthy();
+    await expect(
+      service.updateSettlement(EDITOR, GROUP, settlement.id, {
+        paymentMethod: "Cash",
+      }),
+    ).resolves.toBeTruthy();
+
+    expect(store.state.expenses[0].version).toBe(expenseVersion + 1);
+    expect(
+      changesFor(store.state, "finance_shared_expense", ChangeOperation.UPDATE),
+    ).toHaveLength(2);
+    expect(
+      changesFor(store.state, "finance_settlement", ChangeOperation.UPDATE),
+    ).toHaveLength(2);
+  });
+});
+
+describe("shares on the sync wire", () => {
+  function expenseChange(shares: any, splitType = "EXACT") {
+    return {
+      entityType: "finance_shared_expense",
+      operation: ChangeOperation.CREATE,
+      payload: {
+        groupId: GROUP,
+        paidByUserId: "Alice",
+        title: "Dinner",
+        totalAmountMinor: 10000,
+        currency: "INR",
+        splitType,
+        date: "2026-10-10T20:00:00.000Z",
+        shares,
+      },
+    };
+  }
+
+  it("still accepts the three-key share the shipping builds send", () => {
+    // Every phone that queued a split before this deploy sent exactly this, and
+    // a rule that made the new keys mandatory would reject its own history.
+    expect(
+      changePayloadViolations(
+        expenseChange([
+          { userId: "Alice", owedAmountMinor: 4000, shareUnits: null },
+          { userId: "Bob", owedAmountMinor: 6000, shareUnits: null },
+        ]),
+        0,
+      ),
+    ).toEqual([]);
+    expect(
+      changePayloadViolations(
+        expenseChange([{ userId: "Alice", owedAmountMinor: 10000 }]),
+        0,
+      ),
+    ).toEqual([]);
+  });
+
+  it("accepts a share that reports its own settlement state", () => {
+    expect(
+      changePayloadViolations(
+        expenseChange([
+          {
+            userId: "Alice",
+            owedAmountMinor: 4000,
+            shareUnits: null,
+            isSettled: true,
+            settledAt: "2026-10-12T09:00:00.000Z",
+            version: 3,
+          },
+          {
+            userId: "Bob",
+            owedAmountMinor: 6000,
+            shareUnits: null,
+            isSettled: false,
+            settledAt: null,
+            version: 1,
+          },
+        ]),
+        0,
+      ),
+    ).toEqual([]);
+
+    // The weight-only half of the rule agrees, or an EQUAL split carrying the
+    // same keys would be refused by the branch that never saw them.
+    expect(
+      changePayloadViolations(
+        expenseChange(
+          [
+            { userId: "Alice", shareUnits: 1, isSettled: false, version: 1 },
+            { userId: "Bob", shareUnits: 2, settledAt: null },
+          ],
+          "SHARES",
+        ),
+        0,
+      ),
+    ).toEqual([]);
+  });
+
+  it("refuses a settlement flag no device could replay", () => {
+    const refused = [
+      { userId: "Alice", owedAmountMinor: 10000, isSettled: "yes" },
+      { userId: "Alice", owedAmountMinor: 10000, settledAt: "last tuesday" },
+      { userId: "Alice", owedAmountMinor: 10000, version: 0 },
+      { userId: "Alice", owedAmountMinor: 10000, version: 1.5 },
+    ];
+
+    for (const share of refused) {
+      expect(
+        changePayloadViolations(expenseChange([share]), 0).map((v) => v.field),
+      ).toEqual(["changes[0].payload.shares"]);
+    }
+
+    expect(
+      changePayloadViolations(
+        expenseChange(
+          [{ userId: "Alice", shareUnits: 1, isSettled: 1 }],
+          "EQUAL",
+        ),
+        0,
+      ).map((v) => v.field),
+    ).toEqual(["changes[0].payload.shares"]);
   });
 });

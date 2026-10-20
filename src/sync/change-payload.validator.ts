@@ -1,4 +1,8 @@
-import { validMembers, validShares } from "../finance/groups/group-validation";
+import {
+  validMembers,
+  validShareSettlementFlags,
+  validShares,
+} from "../finance/groups/group-validation";
 import { ChangeOperation } from "@prisma/client";
 import { ErrorCode } from "@/common/errors/error-code";
 import { badRequest } from "@/common/errors/http-errors";
@@ -1239,6 +1243,10 @@ const FINANCE_GROUP_FIELDS: ReadonlyArray<DocumentField> = [
  * clause that differs — an absent amount, not an invalid one — and lets
  * `allocateExpenseShares` judge the rest. Summing is deliberately not checked
  * here: 3333/3333/3333 for 10000 is a payload this path must accept.
+ *
+ * The settlement keys (`isSettled`, `settledAt`, `version`) are judged here too,
+ * so both halves of this rule agree about them and a weight-only payload cannot
+ * smuggle `isSettled: 1` past a check that only the amount-carrying half runs.
  */
 function weightOnlyShares(value: unknown): boolean {
   if (!Array.isArray(value) || !value.length || value.length > 100)
@@ -1254,7 +1262,8 @@ function weightOnlyShares(value: unknown): boolean {
       (share.shareUnits != null &&
         (typeof share.shareUnits !== "number" ||
           !Number.isFinite(share.shareUnits) ||
-          share.shareUnits < 0))
+          share.shareUnits < 0)) ||
+      !validShareSettlementFlags(share)
     )
       return false;
     ids.add(share.userId);
@@ -1274,9 +1283,17 @@ const FINANCE_SHARED_EXPENSE_FIELDS: ReadonlyArray<DocumentField> = [
     // weight-only shape here is the half of the transport disagreement this file
     // owns — the projection then decides what a valid weight set is, by way of
     // `allocateExpenseShares`, which is one implementation and not a second.
+    //
+    // A share may also carry `isSettled`, `settledAt` and `version`, all optional.
+    // They exist because the row has a tombstone-free life no other finance row
+    // has: shares travel inside their parent expense, so the only way a second
+    // device learns "Bob already paid his half" is through these keys, and a
+    // replay that ignored them would un-settle it. Optional is not decoration —
+    // the builds in the wild send the original three keys and every one of their
+    // queued changes has to stay replayable.
     accepts: (value) => validShares(value) || weightOnlyShares(value),
     expected:
-      "unique participants with non-negative integer shares, or unique participants carrying a non-negative weight",
+      "unique participants with non-negative integer shares, or unique participants carrying a non-negative weight, each optionally settled (`isSettled`, `settledAt`) and versioned",
   },
   {
     key: "groupId",

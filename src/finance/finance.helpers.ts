@@ -17,6 +17,27 @@ export function normaliseCurrency(currency?: string | null): string {
 }
 
 /**
+ * The currency a stored money row is measured in: `normaliseCurrency`, with the
+ * blank code folded into the same `INR` default as `null` and `undefined`.
+ *
+ * `normaliseCurrency` is `??`-based, so a row whose code arrived as `""` (or only
+ * spaces) comes back as `""` — and an empty code matches no expense row, no
+ * currency filter and no client view, which reads as money that measures nothing.
+ * A `""` is reachable without a schema change: the push validator only asks
+ * whether `currency` is a string (`change-payload.validator.ts`,
+ * `FINANCE_BUDGET_FIELDS`), so a device can put one on the log.
+ *
+ * Use this wherever a stored code decides what gets summed (and on the budget
+ * write, so a budget row cannot land blank). The other money writers keep calling
+ * `normaliseCurrency`, which is also what `change-projection.ts` calls, so the
+ * stored shape of an account, transaction, group or trip currency is unchanged.
+ */
+export function resolveCurrency(value?: string | null): string {
+  const code = normaliseCurrency(value);
+  return code.length === 0 ? "INR" : code;
+}
+
+/**
  * Normalise currency string to standard upper case code, returning undefined if empty or not provided.
  */
 export function normaliseCurrencyCode(

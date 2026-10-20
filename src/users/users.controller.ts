@@ -108,7 +108,8 @@ export class UsersController {
       res.write(
         `${JSON.stringify({
           kind: "error",
-          message: "Export stopped before it finished. No deletion is authorised by this bundle.",
+          message:
+            "Export stopped before it finished. No deletion is authorised by this bundle.",
         })}\n`,
       );
     }

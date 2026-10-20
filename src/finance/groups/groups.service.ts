@@ -16,6 +16,8 @@ import { CreateGroupDto } from "./dto/create-group.dto";
 import { UpdateGroupDto } from "./dto/update-group.dto";
 import { CreateSharedExpenseDto } from "./dto/create-shared-expense.dto";
 import { CreateSettlementDto } from "./dto/create-settlement.dto";
+import { UpdateSharedExpenseDto } from "./dto/update-shared-expense.dto";
+import { UpdateSettlementDto } from "./dto/update-settlement.dto";
 import { appendChange } from "@/sync/change-cursor";
 import { ChangeOperation, FinanceSplitType, Prisma } from "@prisma/client";
 
@@ -67,6 +69,16 @@ function sharedExpenseChangePayload(expense: any): Record<string, any> {
       userId: share.userId,
       owedAmountMinor: Number(share.owedAmountMinor),
       shareUnits: share.shareUnits ?? null,
+      // The three keys a share needs to travel with its own history. They are
+      // the reason the row is no longer rebuilt on every edit: a device that
+      // pulls "Alice 3334, settled" has to be able to see that it was settled,
+      // or the next replay from that device quietly un-settles it for everyone.
+      isSettled: share.isSettled ?? false,
+      settledAt:
+        share.settledAt instanceof Date
+          ? share.settledAt.toISOString()
+          : (share.settledAt ?? null),
+      version: share.version ?? 1,
     })),
     groupId: expense.groupId ?? null,
     tripId: expense.tripId ?? null,
@@ -110,6 +122,33 @@ function settlementChangePayload(settlement: any): Record<string, any> {
         : (settlement.createdAt ?? null),
     version: settlement.version ?? 1,
   };
+}
+
+/**
+ * The age of a share row, for picking between two rows that describe the same
+ * participant. Missing or unreadable `createdAt` sorts oldest rather than
+ * throwing: a row written before the column existed is still a row.
+ */
+function shareRowAge(row: any): number {
+  const time = row?.createdAt ? new Date(row.createdAt).getTime() : 0;
+  return Number.isFinite(time) ? time : 0;
+}
+
+/**
+ * Which of two `FinanceExpenseShare` rows for one participant the diff writes.
+ *
+ * A live row always beats a tombstone — the rejoin this diff replaced left
+ * exactly that pair behind, an inserted row next to the tombstone it never read
+ * — and within one state the newest row wins, so the row the other devices saw
+ * most recently is the one an edit moves or a rejoin revives.
+ */
+function isPreferredShareRow(candidate: any, held: any): boolean {
+  // `== null`, not `!== null`: a share written before `deletedAt` existed has no
+  // such key at all, and that is a live row.
+  const candidateLive = candidate.deletedAt == null;
+  const heldLive = held.deletedAt == null;
+  if (candidateLive !== heldLive) return candidateLive;
+  return shareRowAge(candidate) >= shareRowAge(held);
 }
 
 export interface SimplifiedDebt {
@@ -406,8 +445,14 @@ export class GroupsService {
       // the ledger. Each child gets its own tombstone and its own DELETE change
       // in this transaction, so the log replays the whole subtree.
       //
-      // `FinanceExpenseShare` has no `deletedAt`, so shares are not tombstoned;
-      // they are only ever read through their (now deleted) expense.
+      // `FinanceExpenseShare` has `deletedAt` and `version` now, but a share is
+      // still not tombstoned *here*: shares are only ever read through their
+      // parent expense (every `include` in this file filters the relation on
+      // `deletedAt: null`), the parent just got its own tombstone, and a share is
+      // not a `Change` entity type — so a per-share DELETE row would be a change
+      // no device can replay. The tombstone this table gained is for the diff in
+      // `updateSharedExpense`, which keeps a dropped participant's row — and with
+      // it its `isSettled` — instead of deleting it.
       const [expenses, settlements] = await Promise.all([
         tx.financeSharedExpense.findMany({
           where: { groupId, deletedAt: null },
@@ -510,6 +555,38 @@ export class GroupsService {
     }
   }
 
+  /**
+   * Write authority for a group's children: the owner, or a grantee whose
+   * `ResourceShare` says `EDITOR`/`ADMIN`.
+   *
+   * This is the same rule `getGroupById(userId, groupId, true)` applies to the
+   * CREATE routes, spelled out in two steps so the answer is honest: somebody
+   * the owner shared the group with can see it, so telling them it does not exist
+   * is wrong — what they lack is the write grant (`403`). A caller with no grant
+   * at all still gets the `404` the create path gives them, because the group is
+   * not theirs to know about.
+   */
+  private async assertGroupWriteAuthority(userId: string, groupId: string) {
+    const group = await this.getGroupById(userId, groupId);
+    if (group.ownerId === userId) return group;
+
+    const grant = await this.prisma.resourceShare.findFirst({
+      where: {
+        resourceType: "EXPENSE_GROUP",
+        resourceId: groupId,
+        sharedWithUserId: userId,
+        deletedAt: null,
+        role: { in: ["EDITOR", "ADMIN"] },
+      },
+    });
+    if (!grant) {
+      throw new ForbiddenException(
+        "Only the group owner or an editor can change this.",
+      );
+    }
+    return group;
+  }
+
   // -------------------------------------------------------------
   // Shared Expenses
   // -------------------------------------------------------------
@@ -575,7 +652,7 @@ export class GroupsService {
             })),
           },
         },
-        include: { shares: true },
+        include: { shares: { where: { deletedAt: null } } },
       });
 
       const cursors = await this.appendGroupChange(
@@ -609,7 +686,7 @@ export class GroupsService {
         groupId,
         deletedAt: null,
       },
-      include: { shares: true },
+      include: { shares: { where: { deletedAt: null } } },
       orderBy: { date: "desc" },
     });
 
@@ -661,6 +738,261 @@ export class GroupsService {
     this.notifyGroupChanges(notificationCursors);
 
     return { success: true };
+  }
+
+  /**
+   * Rewrite the split in place, keyed on `userId`.
+   *
+   * The alternative this replaces was one statement — `shares: { deleteMany: {},
+   * create: [...] }` — and it cost three things: every row id changed under any
+   * device that had already stored the split, `createdAt` reset to the edit time,
+   * and a share somebody had marked settled came back unsettled, because the
+   * table had neither a tombstone nor a version so there was nowhere to keep
+   * either fact. Keyed on `userId` instead: a participant the request keeps is
+   * updated where they lie, a participant it names that has no row at all gets a
+   * row, a participant it names that left earlier gets their own row back, and a
+   * participant it drops keeps the row with `deletedAt` set.
+   *
+   * The read is deliberately not narrowed to live rows, because it feeds a
+   * decision about *which row to write* rather than an output: a participant who
+   * left the split and comes back has to land on the row the other devices
+   * already hold, revived under its own id, instead of a fresh id that orphans
+   * the tombstone. That is what `prisma/schema.prisma` documents the non-unique
+   * `@@index([sharedExpenseId, userId])` for, what the `/sync/push` projection
+   * diff does, and what the client's `_syncShares` does by matching on `userId`.
+   * Reads that answer "who is in this split today" — the list, the change
+   * payload, the balances — stay on `deletedAt: null`.
+   *
+   * The rows are read *inside* the transaction for the same reason
+   * `createSettlement` reads the balances there: diffing against a copy taken
+   * before the critical section is how a concurrent edit from a second device
+   * gets clobbered.
+   *
+   * Order is deterministic — `requested` arrives sorted by `userId` from
+   * `allocateExpenseShares` and the read asks for the same order — so two devices
+   * that describe the same split write the same rows in the same sequence.
+   */
+  private async applyShareDiff(
+    tx: WriteClient,
+    expenseId: string,
+    requested: ReturnType<typeof allocateExpenseShares>,
+  ): Promise<any[]> {
+    const rows = await tx.financeExpenseShare.findMany({
+      where: { sharedExpenseId: expenseId },
+      orderBy: { userId: "asc" },
+    });
+    // Tombstones aside, `live` is the set the departure loop below tombstones:
+    // exactly what a participant-less request finds in the split right now.
+    const live = rows.filter((row: any) => row.deletedAt == null);
+    const byUser = new Map<string, any>();
+    for (const row of rows) {
+      const held = byUser.get(row.userId);
+      if (!held || isPreferredShareRow(row, held)) byUser.set(row.userId, row);
+    }
+    const wanted = new Set(requested.map((share) => share.userId));
+    const written: any[] = [];
+    const deletedAt = new Date();
+
+    for (const share of requested) {
+      const row = byUser.get(share.userId);
+      if (!row) {
+        written.push(
+          await tx.financeExpenseShare.create({
+            data: {
+              sharedExpenseId: expenseId,
+              userId: share.userId,
+              owedAmountMinor: BigInt(share.owedAmountMinor),
+              shareUnits: share.shareUnits ?? null,
+            },
+          }),
+        );
+        continue;
+      }
+
+      // Coming back from a tombstone is a change in itself, so a revive writes
+      // even when the amounts happen to be the ones the participant left behind;
+      // a live row only moves when the request actually moves it.
+      const reviving = row.deletedAt != null;
+      const amountChanged =
+        Number(row.owedAmountMinor) !== share.owedAmountMinor;
+      const unitsChanged =
+        (row.shareUnits ?? null) !== (share.shareUnits ?? null);
+      if (!reviving && !amountChanged && !unitsChanged) {
+        // Nothing to write, so nothing is bumped: a share that already says what
+        // the request says keeps its version, and a replay of it cannot look
+        // like an edit another device has to win against.
+        written.push(row);
+        continue;
+      }
+
+      // `isSettled` and `settledAt` are deliberately not in this write, and the
+      // revive shares the rule rather than getting its own: an expense-edit
+      // payload carries no settlement state at all (`ExpenseShareItemDto`), so
+      // the only way to keep a rejoin from inventing a settle nobody recorded —
+      // or from erasing one the settlement flow did record — is to write neither
+      // key. Only the participant who owes the money settles it, and an edit
+      // from somebody else's device must not reach that either way.
+      const posted = await tx.financeExpenseShare.update({
+        where: { id: row.id },
+        data: {
+          owedAmountMinor: BigInt(share.owedAmountMinor),
+          shareUnits: share.shareUnits ?? null,
+          ...(reviving ? { deletedAt: null } : {}),
+          version: { increment: 1 },
+        },
+      });
+      written.push({
+        ...row,
+        owedAmountMinor: BigInt(share.owedAmountMinor),
+        shareUnits: share.shareUnits ?? null,
+        ...(reviving ? { deletedAt: null } : {}),
+        version: Number.isSafeInteger(Number(posted?.version))
+          ? Number(posted.version)
+          : Number(row.version ?? 1) + 1,
+      });
+    }
+
+    for (const row of live) {
+      if (wanted.has(row.userId)) continue;
+      await tx.financeExpenseShare.update({
+        where: { id: row.id },
+        data: { deletedAt, version: { increment: 1 } },
+      });
+    }
+
+    return written;
+  }
+
+  /**
+   * Edit a shared expense — including its split — without delete-and-recreate.
+   *
+   * Deleting to edit was the only option this route set offered, and it is the
+   * documented payload-erasure hazard class: the row's `createdAt` and its place
+   * in the change log were lost, every device that held the old shares had to
+   * guess what happened to them, and a settlement recorded against the deleted id
+   * was orphaned. Every rule the CREATE applies is applied here to whatever the
+   * request actually changes, and the mutation still ends in one `$transaction`
+   * that appends the group's `Change` rows.
+   */
+  async updateSharedExpense(
+    userId: string,
+    groupId: string,
+    expenseId: string,
+    dto: UpdateSharedExpenseDto,
+  ) {
+    const group = await this.assertGroupWriteAuthority(userId, groupId);
+
+    const existing = await this.prisma.financeSharedExpense.findFirst({
+      where: { id: expenseId, groupId, deletedAt: null },
+    });
+    if (!existing) {
+      throw new NotFoundException("Shared expense not found");
+    }
+
+    const groupCurrency = normaliseCurrency(group.currency);
+    const incomingCurrency =
+      dto.currency === undefined ? undefined : normaliseCurrency(dto.currency);
+    if (incomingCurrency !== undefined && incomingCurrency !== groupCurrency)
+      throw new BadRequestException("Use the group currency.");
+
+    const totalAmountMinor =
+      dto.totalAmountMinor === undefined
+        ? existing.totalAmountMinor
+        : toMinorUnits(dto.totalAmountMinor, "totalAmountMinor");
+    if (
+      !Number.isSafeInteger(Number(totalAmountMinor)) ||
+      Number(totalAmountMinor) <= 0
+    )
+      throw new BadRequestException(
+        "An expense needs a positive whole amount in minor units.",
+      );
+
+    const splitType = dto.splitType ?? existing.splitType;
+    // The same allocator with the same rules the create path uses — 1..100
+    // participants, unique `userId`s, non-negative safe-integer amounts, finite
+    // weights, and the exact-sum contract for `EXACT`/`ITEMIZED` — now measured
+    // against the total this request leaves in force, which may be the stored one.
+    const shares =
+      dto.shares === undefined
+        ? undefined
+        : allocateExpenseShares(
+            Number(totalAmountMinor),
+            dto.shares,
+            splitType,
+          );
+
+    const trip = await this.assertTripScope(userId, dto.tripId);
+    if (trip && normaliseCurrency(trip.baseCurrency) !== groupCurrency)
+      throw new BadRequestException(
+        "This trip uses a different currency than the group.",
+      );
+    const payerAccount = await this.assertAccountScope(
+      userId,
+      dto.payerAccountId,
+    );
+    await this.assertReceiptScope(userId, dto.receiptAttachmentId);
+
+    const notificationCursors = new Map<string, bigint>();
+
+    const expense = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.financeSharedExpense.update({
+        where: { id: expenseId },
+        data: {
+          ...(dto.title !== undefined ? { title: dto.title } : {}),
+          ...(dto.totalAmountMinor !== undefined ? { totalAmountMinor } : {}),
+          ...(incomingCurrency !== undefined
+            ? { currency: incomingCurrency }
+            : {}),
+          ...(dto.paidByUserId !== undefined
+            ? { paidByUserId: dto.paidByUserId }
+            : {}),
+          ...(dto.payerAccountId !== undefined
+            ? { payerAccountId: payerAccount?.id ?? null }
+            : {}),
+          ...(dto.splitType !== undefined ? { splitType } : {}),
+          ...(dto.date !== undefined ? { date: new Date(dto.date) } : {}),
+          ...(dto.notes !== undefined ? { notes: dto.notes } : {}),
+          ...(dto.receiptAttachmentId !== undefined
+            ? { receiptAttachmentId: dto.receiptAttachmentId }
+            : {}),
+          ...(dto.tripId !== undefined ? { tripId: dto.tripId } : {}),
+          version: { increment: 1 },
+        },
+      });
+
+      // An edit that says nothing about the split leaves every row exactly where
+      // it is — no rebuild, no version churn, no lost `isSettled`.
+      const sharesAfter = shares
+        ? await this.applyShareDiff(tx, expenseId, shares)
+        : await tx.financeExpenseShare.findMany({
+            where: { sharedExpenseId: expenseId, deletedAt: null },
+            orderBy: { userId: "asc" },
+          });
+
+      const cursors = await this.appendGroupChange(
+        tx,
+        groupId,
+        group.ownerId,
+        userId,
+        {
+          entityType: "finance_shared_expense",
+          entityId: expenseId,
+          operation: ChangeOperation.UPDATE,
+          version: updated.version,
+          payload: sharedExpenseChangePayload({
+            ...updated,
+            shares: sharesAfter,
+          }),
+        },
+      );
+      this.mergeChangeCursors(notificationCursors, cursors);
+
+      return { ...updated, shares: sharesAfter };
+    });
+
+    this.notifyGroupChanges(notificationCursors);
+
+    return formatSharedExpenseResponse(expense);
   }
 
   // -------------------------------------------------------------
@@ -808,6 +1140,115 @@ export class GroupsService {
     return { success: true };
   }
 
+  /**
+   * Correct a settlement without deleting it.
+   *
+   * A payment that was miscoded (wrong day, wrong method, a rupee off) used to be
+   * fixable only by deleting the row and creating a new one, which moved the
+   * amount twice through the balances and left the deleted id in every device's
+   * history. The overdraft rule that stops a second full-balance CREATE is applied
+   * here too, against the balances with *this* row left out — otherwise editing a
+   * 4000 payment into 40000 would be the one way to draw a debt below zero.
+   */
+  async updateSettlement(
+    userId: string,
+    groupId: string,
+    settlementId: string,
+    dto: UpdateSettlementDto,
+  ) {
+    const group = await this.assertGroupWriteAuthority(userId, groupId);
+
+    const existing = await this.prisma.financeSettlement.findFirst({
+      where: { id: settlementId, groupId, deletedAt: null },
+    });
+    if (!existing) {
+      throw new NotFoundException("Settlement not found");
+    }
+
+    const fromUserId = dto.fromUserId ?? existing.fromUserId;
+    const toUserId = dto.toUserId ?? existing.toUserId;
+    const amountMinor =
+      dto.amountMinor === undefined
+        ? existing.amountMinor
+        : toMinorUnits(dto.amountMinor, "amountMinor");
+    if (
+      !Number.isSafeInteger(Number(amountMinor)) ||
+      Number(amountMinor) <= 0 ||
+      fromUserId === toUserId
+    )
+      throw new BadRequestException(
+        "Choose different friends and a positive payment amount.",
+      );
+
+    const groupCurrency = normaliseCurrency(group.currency);
+    if (
+      dto.currency !== undefined &&
+      normaliseCurrency(dto.currency) !== groupCurrency
+    )
+      throw new BadRequestException("Use the group currency.");
+
+    const trip = await this.assertTripScope(userId, dto.tripId);
+    if (trip && normaliseCurrency(trip.baseCurrency) !== groupCurrency)
+      throw new BadRequestException(
+        "This trip uses a different currency than the group.",
+      );
+
+    const notificationCursors = new Map<string, bigint>();
+
+    const settlement = await this.prisma.$transaction(async (tx) => {
+      const balances = await this.readBalances(tx, groupId, {
+        excludeSettlementId: settlementId,
+      });
+      if (
+        Number(amountMinor) > -(balances[fromUserId] ?? 0) ||
+        Number(amountMinor) > (balances[toUserId] ?? 0)
+      )
+        throw new BadRequestException(
+          "Payment exceeds the outstanding balance.",
+        );
+
+      const updated = await tx.financeSettlement.update({
+        where: { id: settlementId },
+        data: {
+          ...(dto.fromUserId !== undefined
+            ? { fromUserId: dto.fromUserId }
+            : {}),
+          ...(dto.toUserId !== undefined ? { toUserId: dto.toUserId } : {}),
+          ...(dto.amountMinor !== undefined ? { amountMinor } : {}),
+          ...(dto.currency !== undefined ? { currency: groupCurrency } : {}),
+          ...(dto.date !== undefined ? { date: new Date(dto.date) } : {}),
+          ...(dto.notes !== undefined ? { notes: dto.notes } : {}),
+          ...(dto.paymentMethod !== undefined
+            ? { paymentMethod: dto.paymentMethod }
+            : {}),
+          ...(dto.tripId !== undefined ? { tripId: dto.tripId } : {}),
+          version: { increment: 1 },
+        },
+      });
+
+      const cursors = await this.appendGroupChange(
+        tx,
+        groupId,
+        group.ownerId,
+        userId,
+        {
+          entityType: "finance_settlement",
+          entityId: settlementId,
+          operation: ChangeOperation.UPDATE,
+          version: updated.version,
+          payload: settlementChangePayload(updated),
+        },
+      );
+      this.mergeChangeCursors(notificationCursors, cursors);
+
+      return updated;
+    });
+
+    this.notifyGroupChanges(notificationCursors);
+
+    return formatSettlementResponse(settlement);
+  }
+
   // -------------------------------------------------------------
   // Balances & Debt Simplifier (Min-Cash-Flow Algorithm)
   // -------------------------------------------------------------
@@ -816,18 +1257,33 @@ export class GroupsService {
    * Balances for a group, off whatever client is handed to it — the plain
    * service client for a read, the transaction for a settlement that has to be
    * checked against them before it is written.
+   *
+   * `excludeSettlementId` is for `updateSettlement`, which has to answer "would
+   * this payment still be an overdraft?" about a row that is already in the very
+   * balances it reads.
+   *
+   * Shares are read through `deletedAt: null` because they are tombstoned now:
+   * a participant dropped from a split keeps their row, and counting it would
+   * bill them for a debt the group agreed they no longer carry.
    */
   private async readBalances(
     client: WriteClient,
     groupId: string,
+    options: { excludeSettlementId?: string } = {},
   ): Promise<Record<string, number>> {
     const [expenses, settlements] = await Promise.all([
       client.financeSharedExpense.findMany({
         where: { groupId, deletedAt: null },
-        include: { shares: true },
+        include: { shares: { where: { deletedAt: null } } },
       }),
       client.financeSettlement.findMany({
-        where: { groupId, deletedAt: null },
+        where: {
+          groupId,
+          deletedAt: null,
+          ...(options.excludeSettlementId
+            ? { id: { not: options.excludeSettlementId } }
+            : {}),
+        },
       }),
     ]);
 

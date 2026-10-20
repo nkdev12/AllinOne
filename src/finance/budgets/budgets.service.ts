@@ -9,28 +9,38 @@ import { SyncNotificationService } from "@/sync/sync-notification.service";
 import { CreateBudgetDto } from "./dto/create-budget.dto";
 import { UpdateBudgetDto } from "./dto/update-budget.dto";
 import { appendChange } from "@/sync/change-cursor";
-import { toDateOrThrow, toMinorUnits } from "@/finance/finance.helpers";
+import {
+  resolveCurrency,
+  toDateOrThrow,
+  toMinorUnits,
+} from "@/finance/finance.helpers";
 import {
   ChangeOperation,
   FinanceBudgetPeriod,
   FinanceTransactionType,
 } from "@prisma/client";
 
-/**
- * Spend is only ever summed over transactions in this currency.
- *
- * `FinanceBudget` carries no currency column, so a budget cannot express which
- * currency it caps. Rather than guess per row, the spend query stays pinned to
- * the one currency every account is seeded with. Adding the column is a schema
- * decision (`prisma db push`), not a service fix, so the limitation is stated
- * here in a single place instead of being scattered through the filter: a budget
- * meant for a USD account currently measures nothing.
- */
-const BUDGET_SPEND_CURRENCY = "INR";
-
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
+/**
+ * What a budget's spend window is summed over.
+ *
+ * Spend is summed per budget in THAT budget's own currency: `FinanceBudget`
+ * carries a `currency` column (schema default `"INR"`), the sync payload carries
+ * it, and the client filters both budgets and their expenses on it — so nothing
+ * here pins spend to a single code any more. `resolveCurrency` from
+ * `finance.helpers` is the one rule for what a stored code means (see
+ * `formatBudgetResponse`), and `getBudgetsWithSpending` applies it.
+ */
 type BudgetSpendWindow = { start: Date; end: Date };
+
+/** The few transaction columns the spend bucket reads. */
+type BudgetSpendRow = {
+  currency: string | null;
+  categoryId: string | null;
+  transactionDate: Date;
+  amountMinor: bigint;
+};
 
 /**
  * The calendar cycle the spend windows are anchored to. `monthOneBased` is 1 =
@@ -148,10 +158,19 @@ function resolveBudgetSpendWindow(
   return window;
 }
 
+/**
+ * A budget's currency is answered as `resolveCurrency` of its `currency` column —
+ * trim, upper-case, and the schema default `INR` when the code is missing, empty
+ * or blank. The write path, this response, the emitted payload and the spend
+ * grouping all use that one rule, so the four can never disagree about what a
+ * blank code means, and a client cannot be shown a currency the server did not
+ * measure the spend in.
+ */
 function formatBudgetResponse(budget: any) {
   return {
     ...budget,
     amountMinor: Number(budget.amountMinor),
+    currency: resolveCurrency(budget.currency),
   };
 }
 
@@ -159,6 +178,12 @@ function budgetChangePayload(budget: any): Record<string, any> {
   return {
     categoryId: budget.categoryId ?? null,
     amountMinor: Number(budget.amountMinor),
+    // The code the cap is written in. A device that pulls this change has to
+    // filter this budget by currency to measure it the way the server just did,
+    // and the pull path replays the log rather than the table, so leaving the
+    // key out would silently put every REST-created budget back on the INR
+    // default.
+    currency: resolveCurrency(budget.currency),
     period: budget.period,
     startDate:
       budget.startDate instanceof Date
@@ -211,6 +236,10 @@ export class BudgetsService {
           userId,
           categoryId: dto.categoryId,
           amountMinor,
+          // Omitted means the schema default, not "no currency": a REST-created
+          // budget has to land in the same currency a sync-created one would,
+          // otherwise the two write paths measure different things.
+          currency: resolveCurrency(dto.currency),
           period: dto.period ?? FinanceBudgetPeriod.MONTHLY,
           startDate,
           endDate,
@@ -286,6 +315,15 @@ export class BudgetsService {
     };
   }
 
+  /**
+   * Each of the user's budgets with the spend that counts against it.
+   *
+   * A budget is measured in its own `currency` — never against a pinned one. A
+   * USD cap adds up USD expense rows and an INR cap sitting in the same response
+   * adds up rupee rows, so neither is inflated by the other's money. `spentMinor`,
+   * `remainingMinor` and `percentUsed` are therefore all in the budget's own
+   * currency; the caller cannot add the numbers of two budgets together.
+   */
   async getBudgetsWithSpending(userId: string, month?: number, year?: number) {
     const cycle = this.resolveReferenceCycle(month, year);
 
@@ -296,23 +334,29 @@ export class BudgetsService {
     });
     if (budgets.length === 0) return [];
 
-    // One query over the union of every budget's window, then bucket in memory.
-    // Going per budget would be N round trips for the same rows, since a MONTHLY
-    // budget's window is always inside a YEARLY one anyway.
+    // One query over the union of every budget's window and of every currency
+    // those budgets are written in, then bucket in memory. Going per budget would
+    // be N round trips for the same rows, since a MONTHLY budget's window is
+    // always inside a YEARLY one anyway.
     const windows = budgets.map((b) => resolveBudgetSpendWindow(b, cycle));
+    // Sorted only to keep the emitted query deterministic; `$in` itself does not
+    // care about the order of its operands.
+    const currenciesInPlay = [
+      ...new Set(budgets.map((b) => resolveCurrency(b.currency))),
+    ].sort();
     const unionStart = new Date(
       Math.min(...windows.map((w) => w.start.getTime())),
     );
     const unionEnd = new Date(Math.max(...windows.map((w) => w.end.getTime())));
 
-    const expenses =
+    const expenses: BudgetSpendRow[] =
       unionEnd > unionStart
         ? await this.prisma.financeTransaction.findMany({
             where: {
               account: { userId },
               type: FinanceTransactionType.EXPENSE,
               isExcludedFromBudget: false,
-              currency: BUDGET_SPEND_CURRENCY,
+              currency: { in: currenciesInPlay },
               deletedAt: null,
               transactionDate: {
                 gte: unionStart,
@@ -322,13 +366,30 @@ export class BudgetsService {
           })
         : [];
 
+    // Bucketed once by currency so a budget only ever walks rows it is allowed to
+    // add up. `resolveCurrency` on the row side is what keeps an empty or
+    // lowercase code in the INR bucket rather than outside every bucket.
+    const expensesByCurrency = new Map<string, BudgetSpendRow[]>();
+    for (const expense of expenses) {
+      const key = resolveCurrency(expense.currency);
+      const bucket = expensesByCurrency.get(key);
+      if (bucket) {
+        bucket.push(expense);
+      } else {
+        expensesByCurrency.set(key, [expense]);
+      }
+    }
+
     return budgets.map((b, index) => {
       const budgetAmount = Number(b.amountMinor);
       const window = windows[index];
-      // Summed in minor units so a year of rupee spend cannot drift on a float.
+      // Summed in minor units so a year of spend cannot drift on a float, and
+      // summed only over this budget's own currency so a USD cap is never inflated
+      // by rupee rows booked in the same window.
       let spentMinor = 0n;
-
-      for (const expense of expenses) {
+      const sameCurrency =
+        expensesByCurrency.get(resolveCurrency(b.currency)) ?? [];
+      for (const expense of sameCurrency) {
         if (b.categoryId && expense.categoryId !== b.categoryId) continue;
         const date = expense.transactionDate;
         if (date < window.start || date >= window.end) continue;
@@ -379,6 +440,12 @@ export class BudgetsService {
             : {}),
           ...(dto.amountMinor !== undefined
             ? { amountMinor: toMinorUnits(dto.amountMinor, "amountMinor") }
+            : {}),
+          // Re-denominate the cap only when the caller names a currency: `null`
+          // is not "unset", it is the INR default, so it goes through the same
+          // normalisation the create path uses.
+          ...(dto.currency !== undefined
+            ? { currency: resolveCurrency(dto.currency) }
             : {}),
           ...(dto.period !== undefined ? { period: dto.period } : {}),
           ...(dto.startDate !== undefined

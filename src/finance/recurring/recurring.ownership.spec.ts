@@ -1,7 +1,11 @@
 import "reflect-metadata";
 import { Test, TestingModule } from "@nestjs/testing";
 import { NotFoundException } from "@nestjs/common";
-import { RecurringService, calculateNextOccurrence } from "./recurring.service";
+import {
+  RecurringService,
+  calculateNextOccurrence,
+  recurringTransactionId,
+} from "./recurring.service";
 import { CreateRecurringDto } from "./dto/create-recurring.dto";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { SyncNotificationService } from "@/sync/sync-notification.service";
@@ -34,6 +38,7 @@ describe("Recurring rule ownership and scheduling", () => {
   let categories: Record<string, any>;
   let rulesById: Record<string, any>;
   let dueRules: any[];
+  let generated: any[];
   let changes: any[];
   let concurrentIncomeDeltaMinor: bigint | null;
   let prisma: any;
@@ -73,7 +78,11 @@ describe("Recurring rule ownership and scheduling", () => {
       interval: 1,
       startDate: new Date("2026-01-31T00:00:00.000Z"),
       endDate: null,
-      nextDueDate: new Date("2026-10-31T00:00:00.000Z"),
+      // Past the fake clock (2026-10-19) and inside the worker's catch-up
+      // window, so the default fixture reaches the generator at all: the cron
+      // only owes bills that came due in the last few days, because anything
+      // older is the phone's own backlog.
+      nextDueDate: new Date("2026-10-18T00:00:00.000Z"),
       lastGeneratedAt: null,
       autoGenerate: true,
       deletedAt: null,
@@ -98,6 +107,7 @@ describe("Recurring rule ownership and scheduling", () => {
     categories = {};
     rulesById = {};
     dueRules = [];
+    generated = [];
     changes = [];
     concurrentIncomeDeltaMinor = null;
 
@@ -212,16 +222,53 @@ describe("Recurring rule ownership and scheduling", () => {
       },
       financeCategory: { findFirst: findCategory },
       financeTransaction: {
-        create: jest.fn().mockImplementation(({ data }: { data: any }) =>
-          Promise.resolve({
+        create: jest.fn().mockImplementation(({ data }: { data: any }) => {
+          const row = {
             id: "tx-1",
             version: 1,
             createdAt: new Date(),
             updatedAt: new Date(),
             deletedAt: null,
             ...data,
-          }),
-        ),
+          };
+          generated.push(row);
+          return Promise.resolve({ ...row });
+        }),
+        // The generator's idempotency read, over the rows it has already
+        // written: `recurringRuleId` plus the occurrence's UTC day, which is
+        // what recognises a bill the phone minted and pushed as well as one
+        // this server minted on an earlier tick.
+        findMany: jest.fn().mockImplementation(({ where }: { where: any }) => {
+          const rows = generated.filter((row) => {
+            if (
+              where.recurringRuleId !== undefined &&
+              row.recurringRuleId !== where.recurringRuleId
+            ) {
+              return false;
+            }
+            if (
+              where.deletedAt !== undefined &&
+              (row.deletedAt ?? null) !== where.deletedAt
+            ) {
+              return false;
+            }
+            if (Array.isArray(where.OR)) {
+              return where.OR.some((clause: any) => {
+                if (clause.id !== undefined) return clause.id === row.id;
+                const range = clause.transactionDate;
+                if (!range) return false;
+                const time = row.transactionDate.getTime();
+                if (range.gte && time < range.gte.getTime()) return false;
+                if (range.lt && time >= range.lt.getTime()) return false;
+                return true;
+              });
+            }
+            return true;
+          });
+          return Promise.resolve(
+            typeof where.take === "number" ? rows.slice(0, where.take) : rows,
+          );
+        }),
       },
       financeRecurringRule: {
         create: jest.fn().mockImplementation(({ data }: { data: any }) => {
@@ -245,18 +292,29 @@ describe("Recurring rule ownership and scheduling", () => {
           }
           return Promise.resolve({ ...row });
         }),
-        findMany: jest
-          .fn()
-          .mockImplementation(({ where }: { where: any }) =>
-            Promise.resolve(
-              dueRules
-                .filter(
-                  (rule) =>
-                    where.userId === undefined || rule.userId === where.userId,
-                )
-                .map((rule) => ({ ...rule })),
-            ),
+        findMany: jest.fn().mockImplementation(({ where }: { where: any }) =>
+          Promise.resolve(
+            dueRules
+              .filter(
+                (rule) =>
+                  (where.userId === undefined ||
+                    rule.userId === where.userId) &&
+                  // The due query filters here instead of handing back
+                  // whatever the test parked in `dueRules`: the generator now
+                  // walks a rule through several occurrences per call and
+                  // stops at `now`, so a fixture with a future `nextDueDate`
+                  // has to be invisible rather than silently minted.
+                  (where.nextDueDate?.lte === undefined ||
+                    rule.nextDueDate.getTime() <=
+                      where.nextDueDate.lte.getTime()) &&
+                  (where.autoGenerate === undefined ||
+                    rule.autoGenerate === where.autoGenerate) &&
+                  (where.deletedAt === undefined ||
+                    (rule.deletedAt ?? null) === where.deletedAt),
+              )
+              .map((rule) => ({ ...rule })),
           ),
+        ),
         update: jest.fn().mockImplementation(({ where, data }: any) => {
           const row = rulesById[where.id];
           for (const [key, value] of Object.entries(data)) {
@@ -654,32 +712,45 @@ describe("Recurring rule ownership and scheduling", () => {
       ).toBe("2026-02-13T23:30:00.000Z");
     });
 
-    it("carries the anchor day through a processed rule instead of decaying it", async () => {
+    it("carries the anchor day through every occurrence of a catch-up run", async () => {
+      // Nine months behind the fake clock, so one call walks the whole backlog.
+      // The anchor is the point: a Jan-31 rule that was clamped to Feb 28 has to
+      // be back on the 31st in March, and a run that decays the day would land
+      // the last bill of the walk on the 28th instead of the 31st.
       seedRule({
         startDate: utc("2026-01-31T00:00:00.000Z"),
         nextDueDate: utc("2026-01-31T00:00:00.000Z"),
       });
       dueRules = [rulesById[RULE_ID]];
 
-      await service.processAllDueRules();
-      expect(iso(rulesById[RULE_ID].nextDueDate)).toBe(
-        "2026-02-28T00:00:00.000Z",
-      );
+      // The cron would not touch a backlog this old; the explicit per-user call
+      // owns it (see the catch-up window in `recurring.generation.spec.ts`).
+      const result = await service.processDueRulesForUser(USER);
 
-      rulesById[RULE_ID].nextDueDate = utc("2026-02-28T00:00:00.000Z");
-      dueRules = [rulesById[RULE_ID]];
-      await service.processAllDueRules();
-      expect(iso(rulesById[RULE_ID].nextDueDate)).toBe(
+      expect(result).toEqual({ processed: 9 });
+      expect(generated.map((row) => iso(row.transactionDate))).toEqual([
+        "2026-01-31T00:00:00.000Z",
+        "2026-02-28T00:00:00.000Z",
         "2026-03-31T00:00:00.000Z",
+        "2026-04-30T00:00:00.000Z",
+        "2026-05-31T00:00:00.000Z",
+        "2026-06-30T00:00:00.000Z",
+        "2026-07-31T00:00:00.000Z",
+        "2026-08-31T00:00:00.000Z",
+        "2026-09-30T00:00:00.000Z",
+      ]);
+      expect(iso(rulesById[RULE_ID].nextDueDate)).toBe(
+        "2026-10-31T00:00:00.000Z",
       );
     });
   });
 
   describe("processAllDueRules end-of-schedule handling", () => {
     it("mints a late occurrence that still falls on or before endDate", async () => {
-      // First picked up on 2026-11-05: the 10-31 bill is late but inside the
-      // schedule, so it must be generated and the rule must move on.
-      jest.setSystemTime(new Date("2026-11-05T12:00:00.000Z"));
+      // First picked up on 2026-11-02: the 10-31 bill is late but inside both
+      // the schedule and the cron's catch-up window, so it is generated and the
+      // rule moves on to 11-30.
+      jest.setSystemTime(new Date("2026-11-02T12:00:00.000Z"));
       seedRule({
         nextDueDate: new Date("2026-10-31T00:00:00.000Z"),
         endDate: new Date("2026-11-02T00:00:00.000Z"),
@@ -702,8 +773,11 @@ describe("Recurring rule ownership and scheduling", () => {
     });
 
     it("never mints an occurrence that falls after endDate", async () => {
-      // now (10-19) is before endDate, which is the case the old
-      // `endDate < now` comparison got wrong: it minted the 12-20 bill anyway.
+      // The occurrence and `now` are both past endDate here, which is the case
+      // the old `endDate < now` comparison got wrong in the other direction: it
+      // retired a rule that still owed a bill inside its schedule. The gate is
+      // on the occurrence, so this one mints nothing.
+      jest.setSystemTime(new Date("2026-12-21T12:00:00.000Z"));
       seedRule({
         nextDueDate: new Date("2026-12-20T00:00:00.000Z"),
         endDate: new Date("2026-12-15T00:00:00.000Z"),
@@ -719,7 +793,7 @@ describe("Recurring rule ownership and scheduling", () => {
 
     it("settles an exhausted rule so it stops being due", async () => {
       seedRule({
-        nextDueDate: new Date("2026-10-20T00:00:00.000Z"),
+        nextDueDate: new Date("2026-10-18T00:00:00.000Z"),
         endDate: new Date("2026-10-15T00:00:00.000Z"),
       });
       dueRules = [rulesById[RULE_ID]];
@@ -757,6 +831,96 @@ describe("Recurring rule ownership and scheduling", () => {
       expect(result).toEqual({ processed: 0 });
       expect(prisma.financeTransaction.create).not.toHaveBeenCalled();
       expect(rulesById[RULE_ID].autoGenerate).toBe(false);
+    });
+  });
+
+  describe("idempotent catch-up under tenant scoping", () => {
+    /**
+     * The generator now recognises an occurrence it has already billed. That
+     * read has to stay as scoped as the write it replaces: it is keyed on the
+     * rule's own id, so a foreign transaction can neither be picked up as this
+     * user's bill nor be moved by this user's rule.
+     */
+    it("keys the already-generated read on the rule, never on another tenant", async () => {
+      seedRule();
+      dueRules = [rulesById[RULE_ID]];
+
+      await service.processDueRulesForUser(USER);
+
+      const [read] = prisma.financeTransaction.findMany.mock.calls;
+      expect(read[0].where.recurringRuleId).toBe(RULE_ID);
+      // No `deletedAt: null`: a tombstone spends the occurrence too (see
+      // `occurrenceAlreadyGenerated`).
+      expect(read[0].where.deletedAt).toBeUndefined();
+      expect(read[0].where.userId).toBeUndefined();
+      expect(read[0].take).toBe(1);
+      // Two halves of one question: has this exact occurrence been billed by a
+      // server that already knows the id, and has this UTC day been billed at
+      // all — which is the only way a row the phone minted itself is recognised.
+      expect(read[0].where.OR).toEqual([
+        {
+          id: recurringTransactionId(
+            RULE_ID,
+            new Date("2026-10-18T00:00:00.000Z"),
+          ),
+        },
+        {
+          transactionDate: {
+            gte: new Date("2026-10-18T00:00:00.000Z"),
+            lt: new Date("2026-10-19T00:00:00.000Z"),
+          },
+        },
+      ]);
+    });
+
+    it("replays a catch-up tick without minting a second bill for any occurrence", async () => {
+      seedRule({
+        frequency: FinanceRecurringFrequency.WEEKLY,
+        startDate: new Date("2026-09-27T00:00:00.000Z"),
+        nextDueDate: new Date("2026-09-27T00:00:00.000Z"),
+      });
+      dueRules = [rulesById[RULE_ID]];
+
+      const first = await service.processDueRulesForUser(USER);
+      const firstCount = generated.length;
+      expect(first).toEqual({ processed: firstCount });
+      const balance = accounts[OWN_ACCOUNT].currentBalanceMinor;
+      expect(firstCount).toBeGreaterThan(1);
+
+      // The worker restarts and its startup job runs the same rule again while
+      // every occurrence is still inside the schedule.
+      const replay = await service.processDueRulesForUser(USER);
+
+      expect(replay).toEqual({ processed: 0 });
+      expect(generated).toHaveLength(firstCount);
+      expect(accounts[OWN_ACCOUNT].currentBalanceMinor).toBe(balance);
+      // One bill per week, no repeats.
+      const dates = generated.map((row) => row.transactionDate.toISOString());
+      expect(new Set(dates).size).toBe(dates.length);
+    });
+
+    it("catches up only the caller's rules from the per-user entry point", async () => {
+      seedRule();
+      seedRule({
+        id: "rule-of-b",
+        userId: OTHER_USER,
+        accountId: FOREIGN_ACCOUNT,
+      });
+      dueRules = [rulesById[RULE_ID], rulesById["rule-of-b"]];
+
+      const result = await service.processDueRulesForUser(USER);
+
+      expect(result).toEqual({ processed: 1 });
+      expect(generated.every((row) => row.userId === USER)).toBe(true);
+      expect(accounts[FOREIGN_ACCOUNT].currentBalanceMinor).toBe(
+        BigInt(99900000),
+      );
+      // B's rule is only ever *read* through a filter that names its owner.
+      const scopedReads =
+        prisma.financeRecurringRule.findMany.mock.calls.filter(
+          ([args]: any[]) => args.where.userId === undefined,
+        );
+      expect(scopedReads).toEqual([]);
     });
   });
 

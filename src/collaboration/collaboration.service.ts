@@ -131,6 +131,24 @@ export class CollaborationService {
       return { ownerId: group.ownerId, title: group.name };
     }
 
+    // `TRIP` was listed by `ShareResourceType` and accepted by the DTOs, but this
+    // function had no branch for it and fell through to the last line — so
+    // `POST /collaboration/shares` answered 404 `Resource type 'TRIP' not
+    // supported.` for a grant the schema permits, and no trip grant could ever be
+    // written. Resolving it here is what makes every consumer of a grant
+    // (`checkAccess`, `getSharesForResource`, `revokeShare`, and the trip's own
+    // read/write authority in `trips.service.ts` / `change-projection.ts`) speak
+    // about trips the way they already speak about groups.
+    if (resourceType === "TRIP") {
+      const trip = await this.prisma.financeTrip.findFirst({
+        where: { id: resourceId, deletedAt: null },
+      });
+      if (!trip) {
+        throw new NotFoundException(`Trip with ID '${resourceId}' not found.`);
+      }
+      return { ownerId: trip.ownerId, title: trip.title };
+    }
+
     throw new NotFoundException(
       `Resource type '${resourceType}' not supported.`,
     );
@@ -234,7 +252,7 @@ export class CollaborationService {
               deletedAt: null,
             },
           });
-          await this.queueGroupSnapshot(
+          await this.queueFinanceSnapshot(
             tx,
             dto.resourceType,
             dto.resourceId,
@@ -253,7 +271,7 @@ export class CollaborationService {
             role: dto.role,
           },
         });
-        await this.queueGroupSnapshot(
+        await this.queueFinanceSnapshot(
           tx,
           dto.resourceType,
           dto.resourceId,
@@ -298,66 +316,168 @@ export class CollaborationService {
   }
 
   /** Add the full current ledger to a new collaborator's own sync stream. */
-  private async queueGroupSnapshot(
+  private async queueFinanceSnapshot(
     tx: Prisma.TransactionClient,
     resourceType: ResourceType,
-    groupId: string,
+    resourceId: string,
     recipientId: string,
   ) {
-    if (resourceType !== "EXPENSE_GROUP") return;
-    const group = await tx.financeGroup.findUnique({ where: { id: groupId } });
-    if (!group || group.deletedAt) return;
-    await appendChange(tx, {
-      userId: recipientId,
-      entityType: "finance_group",
-      entityId: group.id,
-      operation: ChangeOperation.CREATE,
-      version: group.version,
-      payload: {
-        name: group.name,
-        members: group.members ?? [],
-        description: group.description,
-        currency: group.currency,
-        iconKey: group.iconKey,
-        isArchived: group.isArchived,
-        createdAt: group.createdAt.toISOString(),
+    if (resourceType === "EXPENSE_GROUP") {
+      const group = await tx.financeGroup.findUnique({
+        where: { id: resourceId },
+      });
+      if (!group || group.deletedAt) return;
+      await appendChange(tx, {
+        userId: recipientId,
+        entityType: "finance_group",
+        entityId: group.id,
+        operation: ChangeOperation.CREATE,
         version: group.version,
-      },
-    });
+        payload: {
+          name: group.name,
+          members: group.members ?? [],
+          description: group.description,
+          currency: group.currency,
+          iconKey: group.iconKey,
+          isArchived: group.isArchived,
+          createdAt: group.createdAt.toISOString(),
+          version: group.version,
+        },
+      });
+    }
+
+    if (resourceType === "TRIP") {
+      // The same rule as a group: a grant is a *sync* event, not only a database
+      // row. A device only sees a trip when a change for it lands on its own log
+      // past its cursor, so the trip and its plan are handed over at the moment
+      // the grant is written — and the trip row first, always, because the client
+      // refuses an itinerary change whose parent trip it does not hold
+      // (`sync_manager.dart` drops an orphan item rather than planting it).
+      const trip = await tx.financeTrip.findUnique({
+        where: { id: resourceId },
+      });
+      if (!trip || trip.deletedAt) return;
+      await appendChange(tx, {
+        userId: recipientId,
+        entityType: "finance_trip",
+        entityId: trip.id,
+        operation: ChangeOperation.CREATE,
+        version: trip.version,
+        payload: {
+          title: trip.title,
+          destinations: trip.destinations ?? [],
+          startDate: trip.startDate.toISOString(),
+          endDate: trip.endDate.toISOString(),
+          baseCurrency: trip.baseCurrency,
+          totalBudgetMinor:
+            trip.totalBudgetMinor === null
+              ? null
+              : Number(trip.totalBudgetMinor),
+          notes: trip.notes,
+          isArchived: trip.isArchived,
+          createdAt: trip.createdAt.toISOString(),
+          version: trip.version,
+        },
+      });
+
+      const items = await tx.financeTripItinerary.findMany({
+        where: { tripId: resourceId, deletedAt: null },
+        orderBy: [{ dayIndex: "asc" }, { sortOrder: "asc" }],
+      });
+      for (const item of items) {
+        await appendChange(tx, {
+          userId: recipientId,
+          entityType: "finance_trip_itinerary",
+          entityId: item.id,
+          operation: ChangeOperation.CREATE,
+          version: item.version,
+          payload: {
+            tripId: item.tripId,
+            dayIndex: item.dayIndex,
+            date: item.date ? item.date.toISOString() : null,
+            title: item.title,
+            plannedCostMinor:
+              item.plannedCostMinor === null
+                ? null
+                : Number(item.plannedCostMinor),
+            notes: item.notes,
+            sortOrder: item.sortOrder,
+            createdAt: item.createdAt.toISOString(),
+            version: item.version,
+          },
+        });
+      }
+    }
+
+    if (resourceType !== "EXPENSE_GROUP" && resourceType !== "TRIP") return;
+
+    // The ledger rows one scope owns. A trip's expenses are found by `tripId`
+    // whether or not they also sit in a group: a collaborator granted the trip and
+    // not the group is owed those rows, and a recipient who holds both grants gets
+    // the same row twice at the same `version`, which is what a replay of the same
+    // change already is. NOTE/PROJECT/CALENDAR grants reach neither branch.
+    await this.queueLedgerRows(
+      tx,
+      recipientId,
+      resourceType === "TRIP"
+        ? { tripId: resourceId }
+        : { groupId: resourceId },
+      false,
+    );
+  }
+
+  /**
+   * Copy every expense and settlement one finance scope owns into a
+   * collaborator's log (`CREATE`) or out of it again (`DELETE`).
+   */
+  private async queueLedgerRows(
+    tx: Prisma.TransactionClient,
+    recipientId: string,
+    scope: { groupId?: string; tripId?: string },
+    tombstone: boolean,
+  ) {
+    const where = { ...scope, deletedAt: null };
     const [expenses, settlements] = await Promise.all([
       tx.financeSharedExpense.findMany({
-        where: { groupId, deletedAt: null },
+        where,
         include: { shares: true },
       }),
-      tx.financeSettlement.findMany({ where: { groupId, deletedAt: null } }),
+      tx.financeSettlement.findMany({ where }),
     ]);
+
+    const operation = tombstone
+      ? ChangeOperation.DELETE
+      : ChangeOperation.CREATE;
+
     for (const expense of expenses) {
       await appendChange(tx, {
         userId: recipientId,
         entityType: "finance_shared_expense",
         entityId: expense.id,
-        operation: ChangeOperation.CREATE,
+        operation,
         version: expense.version,
-        payload: {
-          groupId: expense.groupId,
-          tripId: expense.tripId,
-          paidByUserId: expense.paidByUserId,
-          payerAccountId: expense.payerAccountId,
-          title: expense.title,
-          totalAmountMinor: Number(expense.totalAmountMinor),
-          currency: expense.currency,
-          splitType: expense.splitType,
-          date: expense.date.toISOString(),
-          notes: expense.notes,
-          receiptAttachmentId: expense.receiptAttachmentId,
-          createdAt: expense.createdAt.toISOString(),
-          version: expense.version,
-          shares: expense.shares.map((share) => ({
-            userId: share.userId,
-            owedAmountMinor: Number(share.owedAmountMinor),
-            shareUnits: share.shareUnits,
-          })),
-        },
+        payload: tombstone
+          ? {}
+          : {
+              groupId: expense.groupId,
+              tripId: expense.tripId,
+              paidByUserId: expense.paidByUserId,
+              payerAccountId: expense.payerAccountId,
+              title: expense.title,
+              totalAmountMinor: Number(expense.totalAmountMinor),
+              currency: expense.currency,
+              splitType: expense.splitType,
+              date: expense.date.toISOString(),
+              notes: expense.notes,
+              receiptAttachmentId: expense.receiptAttachmentId,
+              createdAt: expense.createdAt.toISOString(),
+              version: expense.version,
+              shares: expense.shares.map((share) => ({
+                userId: share.userId,
+                owedAmountMinor: Number(share.owedAmountMinor),
+                shareUnits: share.shareUnits,
+              })),
+            },
       });
     }
     for (const settlement of settlements) {
@@ -365,73 +485,97 @@ export class CollaborationService {
         userId: recipientId,
         entityType: "finance_settlement",
         entityId: settlement.id,
-        operation: ChangeOperation.CREATE,
+        operation,
         version: settlement.version,
-        payload: {
-          groupId: settlement.groupId,
-          tripId: settlement.tripId,
-          fromUserId: settlement.fromUserId,
-          toUserId: settlement.toUserId,
-          amountMinor: Number(settlement.amountMinor),
-          currency: settlement.currency,
-          date: settlement.date.toISOString(),
-          notes: settlement.notes,
-          paymentMethod: settlement.paymentMethod,
-          createdAt: settlement.createdAt.toISOString(),
-          version: settlement.version,
-        },
+        payload: tombstone
+          ? {}
+          : {
+              groupId: settlement.groupId,
+              tripId: settlement.tripId,
+              fromUserId: settlement.fromUserId,
+              toUserId: settlement.toUserId,
+              amountMinor: Number(settlement.amountMinor),
+              currency: settlement.currency,
+              date: settlement.date.toISOString(),
+              notes: settlement.notes,
+              paymentMethod: settlement.paymentMethod,
+              createdAt: settlement.createdAt.toISOString(),
+              version: settlement.version,
+            },
       });
     }
   }
 
   /**
-   * Revoking a finance-group grant must remove its locally synced ledger too.
-   * Access checks alone are insufficient: without tombstones the recipient
-   * keeps a readable offline copy after they have been removed from the group.
+   * Revoking a finance-group or finance-trip grant must remove its locally synced
+   * ledger too. Access checks alone are insufficient: without tombstones the
+   * recipient keeps a readable offline copy after they have been removed.
    */
-  private async queueGroupRemoval(
+  private async queueFinanceRemoval(
     tx: Prisma.TransactionClient,
     resourceType: ResourceType,
-    groupId: string,
+    resourceId: string,
     recipientId: string,
   ) {
-    if (resourceType !== "EXPENSE_GROUP") return;
-    const group = await tx.financeGroup.findUnique({ where: { id: groupId } });
-    if (!group) return;
+    if (resourceType === "EXPENSE_GROUP") {
+      const group = await tx.financeGroup.findUnique({
+        where: { id: resourceId },
+      });
+      if (!group) return;
 
-    await appendChange(tx, {
-      userId: recipientId,
-      entityType: "finance_group",
-      entityId: group.id,
-      operation: ChangeOperation.DELETE,
-      version: group.version,
-      payload: {},
-    });
-
-    const [expenses, settlements] = await Promise.all([
-      tx.financeSharedExpense.findMany({ where: { groupId, deletedAt: null } }),
-      tx.financeSettlement.findMany({ where: { groupId, deletedAt: null } }),
-    ]);
-    for (const expense of expenses) {
       await appendChange(tx, {
         userId: recipientId,
-        entityType: "finance_shared_expense",
-        entityId: expense.id,
+        entityType: "finance_group",
+        entityId: group.id,
         operation: ChangeOperation.DELETE,
-        version: expense.version,
+        version: group.version,
         payload: {},
       });
     }
-    for (const settlement of settlements) {
+
+    if (resourceType === "TRIP") {
+      const trip = await tx.financeTrip.findUnique({
+        where: { id: resourceId },
+      });
+      if (!trip) return;
+
       await appendChange(tx, {
         userId: recipientId,
-        entityType: "finance_settlement",
-        entityId: settlement.id,
+        entityType: "finance_trip",
+        entityId: trip.id,
         operation: ChangeOperation.DELETE,
-        version: settlement.version,
+        version: trip.version,
         payload: {},
       });
+
+      // Plan rows are tombstoned with their parent or they outlive it on the
+      // revoked device — the trip is gone, the itinerary stays on screen, and the
+      // client's own parent check means it can never be re-linked.
+      const items = await tx.financeTripItinerary.findMany({
+        where: { tripId: resourceId, deletedAt: null },
+      });
+      for (const item of items) {
+        await appendChange(tx, {
+          userId: recipientId,
+          entityType: "finance_trip_itinerary",
+          entityId: item.id,
+          operation: ChangeOperation.DELETE,
+          version: item.version,
+          payload: {},
+        });
+      }
     }
+
+    if (resourceType !== "EXPENSE_GROUP" && resourceType !== "TRIP") return;
+
+    await this.queueLedgerRows(
+      tx,
+      recipientId,
+      resourceType === "TRIP"
+        ? { tripId: resourceId }
+        : { groupId: resourceId },
+      true,
+    );
   }
 
   async getSharesForResource(
@@ -527,7 +671,7 @@ export class CollaborationService {
       // Legacy rows created before recipients were required can have no user
       // id. They never granted access, and should still be revocable.
       if (share.sharedWithUserId) {
-        await this.queueGroupRemoval(
+        await this.queueFinanceRemoval(
           tx,
           share.resourceType,
           share.resourceId,

@@ -27,9 +27,10 @@ import { WorkerModule } from "./worker.module";
 
 export async function bootstrap() {
   if (process.env.DATABASE_URL) {
-    process.env.DATABASE_URL = process.env.DATABASE_URL
-      .trim()
-      .replace(/^["']|["']$/g, "");
+    process.env.DATABASE_URL = process.env.DATABASE_URL.trim().replace(
+      /^["']|["']$/g,
+      "",
+    );
   }
   const logger = new Logger("Worker");
 
@@ -87,7 +88,13 @@ export async function bootstrap() {
   try {
     const financeQueue = app.get<Queue>(getQueueToken("finance"));
 
-    // Enqueue startup recurring processing with retry configuration
+    // Recurring generation belongs to the client — the app has to work offline,
+    // and the phone's own ticker walks the same schedule (`allmynote_frontend/
+    // lib/services/finance_reminders.dart`). These two jobs are catch-up only:
+    // `RecurringService.processAllDueRules` reaches just the occurrences inside
+    // its lookback window, and the write it makes is keyed on a deterministic
+    // `_id` derived from the rule and the due date, so this startup job being
+    // added again on every deploy cannot mint a bill that already exists.
     await financeQueue.add(
       "process-recurring",
       {},
@@ -98,7 +105,7 @@ export async function bootstrap() {
       },
     );
 
-    // Schedule repeatable finance recurring rule processing (daily)
+    // Schedule repeatable finance recurring rule catch-up (daily)
     await financeQueue.add(
       "process-recurring",
       {},

@@ -53,7 +53,14 @@ export class RecurringController {
   @Post("process-due")
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: "Manually trigger processing of due recurring rules",
+    summary: "Catch up this user's due recurring rules",
+    description:
+      "The explicit, per-user counterpart of the worker's daily catch-up tick, " +
+      "and the one that may reach further back: it walks up to " +
+      "MAX_CATCH_UP_OCCURRENCES occurrences per rule instead of stopping at the " +
+      "cron's lookback window. Idempotent per (rule, due date), so calling it " +
+      "twice — or while the worker is running — mints one transaction per " +
+      "occurrence. `processed` counts the bills this call generated.",
   })
   @ApiResponse({ status: 200, description: "Processed count returned" })
   async processDueRules(@GetUser("id") userId: string) {

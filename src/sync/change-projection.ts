@@ -55,6 +55,14 @@ import {
  * them rather than taking `Prisma.TransactionClient` keeps the pass-through
  * honest — a projection that could `deleteMany` is a projection that will, one
  * day, be given a reason to.
+ *
+ * The one exception is `financeExpenseShare`, whose read half is `findMany`
+ * instead of `findUnique`: a split is a list of rows, and diffing it needs them
+ * all at once (see `applyProjectedShareDiff`). What stays refused on that table
+ * is the delete. A share row is the only finance row whose absence is a fact
+ * worth keeping — a participant who left a split keeps their id and their
+ * `deletedAt` so the other devices can see they left — and no projection gets to
+ * erase that on a device's behalf.
  */
 export type ChangeProjectionClient = {
   note?: Pick<
@@ -117,6 +125,10 @@ export type ChangeProjectionClient = {
   financeSharedExpense?: Pick<
     Prisma.TransactionClient["financeSharedExpense"],
     "findUnique" | "create" | "update"
+  >;
+  financeExpenseShare?: Pick<
+    Prisma.TransactionClient["financeExpenseShare"],
+    "findMany" | "create" | "update"
   >;
   financeSettlement?: Pick<
     Prisma.TransactionClient["financeSettlement"],
@@ -1782,6 +1794,40 @@ async function canEditFinanceGroup(
   return share != null;
 }
 
+/**
+ * The trip analogue of `canEditFinanceGroup`, deliberately the same shape: one
+ * live grant on *this* trip, held by *this* user, carrying a role with write
+ * weight.
+ *
+ * `ShareResourceType` has always listed `TRIP` (`prisma/schema.prisma:821-827`)
+ * and `/collaboration` has always accepted it, but nothing read it back, so a
+ * trip grant was a row that granted nothing. It is read the same way the group
+ * grant is — `sharedWithUserId` (never the email, which is the invite address and
+ * not an identity this server can re-verify), `deletedAt: null` (a revoked grant
+ * must stop answering the instant it is revoked) and `role in [EDITOR, ADMIN]`.
+ *
+ * The role filter is the read/write line, and it is the line the REST side draws
+ * too (`trips.service.ts` `getTripById(userId, tripId, canEdit)`): a VIEWER is
+ * never admitted by this function, so a VIEWER cannot reach a write through the
+ * sync path even though they can see the trip.
+ */
+async function canEditFinanceTrip(
+  tx: ChangeProjectionClient,
+  userId: string,
+  tripId: string,
+): Promise<boolean> {
+  const share = await tx.resourceShare?.findFirst({
+    where: {
+      resourceType: "TRIP",
+      resourceId: tripId,
+      sharedWithUserId: userId,
+      deletedAt: null,
+      role: { in: ["EDITOR", "ADMIN"] },
+    },
+  });
+  return share != null;
+}
+
 async function assertRegisteredGroupMembers(
   tx: ChangeProjectionClient,
   userId: string,
@@ -1845,6 +1891,27 @@ async function findFinanceTripScope(
   });
 }
 
+/**
+ * Write authority over the parent a shared expense or settlement belongs to.
+ *
+ * Everything this function admits is a *write* — it guards the projection of a
+ * pushed `finance_shared_expense` / `finance_settlement` row — so both branches
+ * ask for a grant with write weight (`EDITOR`/`ADMIN`) and nothing less. Read
+ * authority is a different question with a different answer, and it is asked
+ * where reading happens: the REST side (`groups.service.ts` `getGroupById` and
+ * `trips.service.ts` `getTripById`) takes a `canEdit` flag, and a `VIEWER` grant
+ * passes the read call and fails the write call. This function ignores a VIEWER
+ * grant entirely, so opening a trip to a collaborator cannot widen who writes
+ * money rows on it.
+ *
+ * Two refusals and one lock stay exactly as they were: a change that names
+ * neither parent is a malformed change (`BadRequestException`), a parent the
+ * collection does not answer for is treated the same as one the caller has no
+ * claim on (`ForbiddenException`, never a "not found" that would distinguish the
+ * two to a probing device), and the child's currency must equal the parent's
+ * normalised currency — a grantee is pinned to the trip's `baseCurrency` the
+ * same way a group editor is pinned to the group's `currency`.
+ */
 async function assertSharedScope(
   tx: ChangeProjectionClient,
   userId: string,
@@ -1873,7 +1940,12 @@ async function assertSharedScope(
   }
   if (refs.tripId) {
     const parent = await findFinanceTripScope(tx, refs.tripId);
-    if (!parent || parent.ownerId !== userId || parent.deletedAt) {
+    if (
+      !parent ||
+      parent.deletedAt ||
+      (parent.ownerId !== userId &&
+        !(await canEditFinanceTrip(tx, userId, refs.tripId)))
+    ) {
       throw new ForbiddenException("This trip is not available to you.");
     }
     if (
@@ -2177,6 +2249,217 @@ async function resolvePayerAccount(
   return ref;
 }
 
+/** One participant's slice of the split, as the allocator decided it. */
+interface ProjectedShare {
+  userId: string;
+  owedAmountMinor: number;
+  shareUnits: number | null;
+}
+
+/** What one share on the wire says about its own settlement, if anything. */
+interface StatedSettlement {
+  isSettled?: boolean;
+  settledAt?: Date | null;
+}
+
+/**
+ * The settle facts a pushed share states, keyed by `userId`.
+ *
+ * They cannot come from `allocateExpenseShares`, which returns exactly three keys
+ * (`userId`, `owedAmountMinor`, `shareUnits`) because the amounts are the only
+ * thing it is asked to decide. So the flags are read off the payload the device
+ * actually sent — and read here rather than at each write site, because a
+ * `settledAt` that is a string no `Date` accepts is a share stating no settle
+ * fact. `change-payload.validator.ts` already refuses that shape on the wire; this
+ * is the same answer for any caller that reached the projection another way.
+ */
+function pushedShareSettlement(shares: unknown): Map<string, StatedSettlement> {
+  const byUser = new Map<string, StatedSettlement>();
+  if (!Array.isArray(shares)) return byUser;
+
+  for (const share of shares as any[]) {
+    if (!share || typeof share.userId !== "string") continue;
+    const stated: StatedSettlement = {};
+    if (typeof share.isSettled === "boolean")
+      stated.isSettled = share.isSettled;
+    if (share.settledAt === null) {
+      stated.settledAt = null;
+    } else if (typeof share.settledAt === "string") {
+      const parsed = new Date(share.settledAt);
+      if (!Number.isNaN(parsed.getTime())) stated.settledAt = parsed;
+    }
+    if (stated.isSettled !== undefined || stated.settledAt !== undefined) {
+      byUser.set(share.userId, stated);
+    }
+  }
+
+  return byUser;
+}
+
+/**
+ * Rewrite a split in place, keyed on `userId`, for a change that arrived from a
+ * device.
+ *
+ * This is the projection's copy of `groups.service.ts` `applyShareDiff`, and the
+ * semantics are deliberately identical: rows move where they lie, only rows whose
+ * amount or weight really moved are written, `isSettled`/`settledAt` are never
+ * touched by an edit that only moved money, and a participant the payload stopped
+ * listing is tombstoned instead of deleted. It is a copy and not an import for one
+ * reason — that one is a private method on the service and reaches the table
+ * through the service's own client, and sharing it would mean editing a file this
+ * pass does not own.
+ *
+ * The version that replaces here was one nested write on the parent row,
+ * `shares: { deleteMany: {}, create: [...] }`, and on this path it cost more than
+ * it cost over REST: a device pushes an edit to an expense it already holds, so
+ * every share id in its local table went stale on every other device, the
+ * tombstones the REST diff had written came back as live rows (a participant who
+ * left a split was suddenly in it again, and `readBalances` charges them for it),
+ * and `isSettled`/`settledAt`/`version` were dropped on the floor because the
+ * three keys the rebuild created never mentioned them.
+ *
+ * Two things this path does that a plain live-rows-only diff would get wrong.
+ * Tombstones are read as well as live rows, so a participant who left and rejoined
+ * from a phone revives the row they already have an id for instead of stacking a
+ * second one — the REST diff in `groups.service.ts` reads the same way now, and
+ * that agreement is the point: the two transports must not disagree about whether
+ * a rejoined participant is the same person. And the settle facts come from the
+ * payload for the rows the payload is describing for the first time (an insert, or
+ * a revival), because a share a phone pushed already settled has no other
+ * transport that can say so.
+ *
+ * Everything runs on the `tx` this projection was handed, after the parent row is
+ * written and before the change's log entry can commit: a share write that throws
+ * takes the parent update down with it, which is the only way the mirror and the
+ * log can agree about a refused change.
+ */
+async function applyProjectedShareDiff(
+  tx: ChangeProjectionClient,
+  expenseId: string,
+  requested: ProjectedShare[],
+  settlement: Map<string, StatedSettlement>,
+): Promise<void> {
+  const delegate = tx.financeExpenseShare;
+  if (!delegate) {
+    // Only a client that does not carry the table can get here — the real
+    // `Prisma.TransactionClient` `/sync/push` hands in always does. Warn rather
+    // than stay silent: a split that did not land is a row that lies.
+    logger.warn(
+      `Skipped the share diff for finance_shared_expense ${expenseId}: the projection client has no financeExpenseShare delegate.`,
+    );
+    return;
+  }
+
+  // One read for the whole diff, ordered so that two devices describing the same
+  // split write the same rows in the same sequence. Code-point order on `userId`,
+  // then `createdAt` so that the newest row for a participant wins when a REST
+  // rejoin and a device rejoin have left two.
+  const rows = await delegate.findMany({
+    where: { sharedExpenseId: expenseId },
+    orderBy: [{ userId: "asc" }, { createdAt: "asc" }],
+  });
+
+  const liveByUser = new Map<string, (typeof rows)[number]>();
+  const tombstoneByUser = new Map<string, (typeof rows)[number]>();
+  for (const row of rows) {
+    // `!= null` and not `!== null`, as elsewhere in this file: a share written
+    // before the column existed has no `deletedAt` key at all, and that is a live
+    // row — rebuilding it here would be the erasure this diff exists to stop.
+    if (row.deletedAt == null) {
+      if (!liveByUser.has(row.userId)) liveByUser.set(row.userId, row);
+    } else {
+      tombstoneByUser.set(row.userId, row);
+    }
+  }
+
+  const wanted = new Set(requested.map((share) => share.userId));
+  const deletedAt = new Date();
+
+  for (const share of requested) {
+    const owedAmountMinor = BigInt(share.owedAmountMinor);
+    const shareUnits = share.shareUnits ?? null;
+    const live = liveByUser.get(share.userId);
+
+    if (live) {
+      if (
+        Number(live.owedAmountMinor) === share.owedAmountMinor &&
+        (live.shareUnits ?? null) === shareUnits
+      ) {
+        // Nothing to write, so nothing is bumped: a replay of a split that has not
+        // moved cannot look like an edit another device has to win against.
+        continue;
+      }
+      // No `isSettled` / `settledAt` in this write, exactly as in `applyShareDiff`.
+      // Only the participant who owes the money settles it, and a push that moved
+      // an amount must not be able to undo that from another device — the stored
+      // row is the one that knows whether this share is paid.
+      await delegate.update({
+        where: { id: live.id },
+        data: {
+          owedAmountMinor,
+          shareUnits,
+          version: { increment: 1 },
+        },
+      });
+      continue;
+    }
+
+    const stated = settlement.get(share.userId);
+    const revived = tombstoneByUser.get(share.userId);
+
+    if (revived) {
+      // The rejoining participant keeps the row — and so keeps the id every device
+      // that ever saw them still holds. A tombstone coming back is a share this
+      // push is describing from scratch, so the settle facts it states are applied
+      // here; a push that states nothing (`userId`/amount/weight only, the payload
+      // every shipping build sends) leaves the stored ones alone.
+      await delegate.update({
+        where: { id: revived.id },
+        data: {
+          owedAmountMinor,
+          shareUnits,
+          deletedAt: null,
+          ...(stated?.isSettled !== undefined
+            ? { isSettled: stated.isSettled }
+            : {}),
+          ...(stated?.settledAt !== undefined
+            ? { settledAt: stated.settledAt }
+            : {}),
+          version: { increment: 1 },
+        },
+      });
+      continue;
+    }
+
+    await delegate.create({
+      data: {
+        sharedExpenseId: expenseId,
+        userId: share.userId,
+        owedAmountMinor,
+        shareUnits,
+        ...(stated?.isSettled !== undefined
+          ? { isSettled: stated.isSettled }
+          : {}),
+        ...(stated?.settledAt !== undefined
+          ? { settledAt: stated.settledAt }
+          : {}),
+      },
+    });
+  }
+
+  // Live in the table, absent from the payload: out of the split, not out of the
+  // database. The row keeps its id, its amount and its settle facts, and the only
+  // things that move are the tombstone and the version — which is what lets a pull
+  // tell every other device that this participant left.
+  for (const row of liveByUser.values()) {
+    if (wanted.has(row.userId)) continue;
+    await delegate.update({
+      where: { id: row.id },
+      data: { deletedAt, version: { increment: 1 } },
+    });
+  }
+}
+
 async function projectFinanceSharedExpenseChange(
   tx: ChangeProjectionClient,
   userId: string,
@@ -2279,11 +2562,49 @@ async function projectFinanceSharedExpenseChange(
         )
       : undefined;
 
-  const shareData = allocated?.map((share) => ({
-    userId: share.userId,
-    owedAmountMinor: BigInt(share.owedAmountMinor),
-    shareUnits: share.shareUnits ?? null,
-  }));
+  // The settle facts this push states, read once for both branches: the CREATE
+  // below nests them in `shareData`, the UPDATE hands the same map to
+  // `applyProjectedShareDiff`. Reading the payload twice — once here, once at that
+  // call — is how the two branches drifted apart about these keys in the first
+  // place, and one read is what keeps one payload meaning one thing.
+  const settlement = pushedShareSettlement(payload.shares);
+
+  // The nested list, and only for the CREATE below: a brand-new expense has no
+  // rows to diff, so `shares: { create: shareData }` is the whole of what it needs.
+  // The UPDATE branch does not use this — it hands `allocated` and `settlement` to
+  // `applyProjectedShareDiff`, which writes the rows one by one.
+  //
+  // The flags travel with the row's birth, and after that the settlement flow owns
+  // them: a CREATE writes the `isSettled` / `settledAt` a share states, and the
+  // UPDATE diff never rewrites either one on an existing live row. That asymmetry
+  // is deliberate. A phone that recorded "Bala paid me back" and pushes the expense
+  // for the first time has no other transport that can say so, while a device that
+  // only moved an amount must not be able to undo a settlement the participant who
+  // owes the money already made.
+  //
+  // A stated share-level `version` is deliberately not read here. The parent row
+  // takes `version: change.version` because the log entry this change is filed
+  // under really is that edit, and `applyProjectedShareDiff` increments a share row
+  // once per edit it applies — so a row that has never existed has no edit history
+  // to claim, and a client that names 40 gets the column's `@default(1)` instead of
+  // a count it invented. It is the same answer `applyShareDiff` gives over REST.
+  const shareData = allocated?.map((share) => {
+    const stated = settlement.get(share.userId);
+    return {
+      userId: share.userId,
+      owedAmountMinor: BigInt(share.owedAmountMinor),
+      shareUnits: share.shareUnits ?? null,
+      // Stated or absent, never defaulted here: a payload that says nothing about
+      // settlement keeps creating `isSettled = false` / `settledAt = null` rows
+      // through the schema defaults, exactly as it did before these keys existed.
+      ...(stated?.isSettled !== undefined
+        ? { isSettled: stated.isSettled }
+        : {}),
+      ...(stated?.settledAt !== undefined
+        ? { settledAt: stated.settledAt }
+        : {}),
+    };
+  });
 
   const totalAmountMinor = BigInt(
     Math.round(Number(payload.totalAmountMinor ?? 0)),
@@ -2333,7 +2654,6 @@ async function projectFinanceSharedExpenseChange(
       ...(payload.payerAccountId !== undefined ? { payerAccountId } : {}),
       ...(typeof payload.title === "string" ? { title: payload.title } : {}),
       ...(payload.totalAmountMinor !== undefined ? { totalAmountMinor } : {}),
-      ...(shareData ? { shares: { deleteMany: {}, create: shareData } } : {}),
       ...(typeof payload.currency === "string"
         ? { currency: currencyColumn(payload.currency) }
         : {}),
@@ -2355,6 +2675,17 @@ async function projectFinanceSharedExpenseChange(
       deletedAt: null,
     },
   });
+
+  // The split moves on its own rows, and it moves after the parent write instead
+  // of nested inside it. `shareData` is what the CREATE branch above nests — the
+  // rows here already exist, so nesting would be the rebuild this diff replaces.
+  // A change that says nothing about the split (`allocated` is `undefined`) leaves
+  // every share row exactly where it is: no version churn, no lost `isSettled`.
+  // The `settlement` map is the one the CREATE path above reads from the same
+  // payload, so the two branches cannot answer the same keys differently.
+  if (allocated) {
+    await applyProjectedShareDiff(tx, change.entityId, allocated, settlement);
+  }
 }
 
 async function projectFinanceSettlementChange(
@@ -2521,7 +2852,19 @@ async function projectFinanceTripChange(
     select: { ownerId: true, deletedAt: true, version: true },
   });
 
-  if (existing && existing.ownerId !== userId) {
+  // The trip belongs to somebody else. That is not the end of the question any
+  // more, because `ShareResourceType.TRIP` is a real grant now: an EDITOR or
+  // ADMIN the owner shared the trip with edits it from their own device, and the
+  // change arrives on their log like any other. The rule is the group's, copied
+  // exactly — write operations need the grant, and a DELETE never buys one:
+  // `trips.service.ts` `deleteTrip` refuses a non-owner over REST, and a push
+  // that could tombstone a trip the pusher does not own would be the wider door.
+  if (
+    existing &&
+    existing.ownerId !== userId &&
+    (change.operation === ChangeOperation.DELETE ||
+      !(await canEditFinanceTrip(tx, userId, change.entityId)))
+  ) {
     logger.warn(
       `Ignored a ${String(change.operation)} change for finance_trip ${change.entityId} pushed by ${userId}: the trip belongs to ${existing.ownerId}.`,
     );
@@ -2600,6 +2943,36 @@ async function projectFinanceTripChange(
   });
 }
 
+/**
+ * Whether this pusher may write an itinerary row that hangs off `trip`.
+ *
+ * `FinanceTripItinerary` has no owner column, so the parent trip is the only
+ * thing in the schema that can answer whose item this is, and that rule is
+ * unchanged by sharing: the grant is looked up **on the parent**, never on the
+ * item. An item whose trip cannot be resolved is still refused for everybody —
+ * an orphan has no parent to inherit authority from, which is the same
+ * parent-derived invariant the Flutter client holds locally
+ * (`finance_trip_repository.dart` refuses to create an item without its trip,
+ * `sync_manager.dart` refuses to apply one) and the reason a grantee's cursor
+ * is handed the trip row before its plan rows.
+ *
+ * Owner: always writable. Grantee: writable only on a live `EDITOR`/`ADMIN`
+ * grant, so a `VIEWER` who pulls the plan cannot push a change to it — the
+ * refusal is the silent log-and-drop this branch already made for a stranger,
+ * not an exception, because the change belongs on the pusher's log either way
+ * and nobody else reads that log.
+ */
+async function tripIsWritable(
+  tx: ChangeProjectionClient,
+  userId: string,
+  tripId: string | undefined | null,
+  trip: { ownerId: string },
+): Promise<boolean> {
+  if (trip.ownerId === userId) return true;
+  if (typeof tripId !== "string" || !tripId) return false;
+  return canEditFinanceTrip(tx, userId, tripId);
+}
+
 async function projectFinanceTripItineraryChange(
   tx: ChangeProjectionClient,
   userId: string,
@@ -2635,7 +3008,7 @@ async function projectFinanceTripItineraryChange(
         })
       : null;
 
-  if (!trip || trip.ownerId !== userId) {
+  if (!trip || !(await tripIsWritable(tx, userId, tripId, trip))) {
     // A parent that is not in the table is not the caller's either, and a
     // tombstoned trip belonging to somebody else fails the same comparison —
     // `ownerId` is stamped from the pusher at CREATE and never rewritten, so

@@ -5,8 +5,11 @@ import {
   IsInt,
   IsOptional,
   IsPositive,
+  IsString,
   IsUUID,
+  Matches,
   Max,
+  MaxLength,
 } from "class-validator";
 import { FinanceBudgetPeriod } from "@prisma/client";
 
@@ -20,6 +23,21 @@ export class CreateBudgetDto {
   @IsPositive()
   @Max(Number.MAX_SAFE_INTEGER)
   amountMinor!: number;
+
+  /**
+   * The currency the cap is written in. Same strict rule as
+   * `create-account.dto.ts`: an ISO 4217 code is three letters, so `"RUPEES"` or
+   * `"EURODOLLAR"` is a typo and not a budget. `BudgetsService` upper-cases it on
+   * write and sums spend only over expense rows carrying that code, so an omitted
+   * value means the schema default (`INR`) rather than "any currency".
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(3)
+  @Matches(/^[A-Za-z]{3}$/, {
+    message: "currency must be a 3-letter ISO 4217 code, e.g. INR.",
+  })
+  currency?: string;
 
   @IsOptional()
   @IsEnum(FinanceBudgetPeriod)

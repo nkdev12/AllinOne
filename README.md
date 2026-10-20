@@ -264,9 +264,9 @@ npm run lint                  # ESLint + fixes
 
 # Database
 npm run db:generate           # Generate Prisma client
-npm run db:push               # Apply schema changes — the only one of these that works
-npm run db:migrate            # Fails: Prisma Migrate rejects the mongodb provider
-npm run db:migrate:deploy     # Same error, same reason
+npm run db:push               # Safe schema apply: snapshot, then Prisma db push
+npm run db:migrate            # Alias for the same MongoDB-safe schema apply
+npm run db:migrate:deploy     # Deployment alias for the same safe schema apply
 npm run db:seed               # Seed test data
 npm run db:studio             # Prisma Studio UI
 

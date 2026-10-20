@@ -146,6 +146,12 @@ export class AccountsService {
    * $1000 for what was Rs 1000 (an 83x overstatement) and orphans every
    * transaction already filed in the old code. Same intent as the rule that
    * forbids the edit on groups in `groups.service.ts`.
+   *
+   * This is also what makes the `currentBalanceMinor` write-through in
+   * `updateAccount` safe: the guard proves the ledger is empty and the balance
+   * untouched, so copying the re-entered opening over the running balance loses
+   * nothing. The message is the copy the client's own form prints, so a caller
+   * that races the guard gets the same advice either way.
    */
   private async assertCurrencyChangeAllowed(
     userId: string,
@@ -192,8 +198,18 @@ export class AccountsService {
     const storedCurrency = normaliseCurrency(existing.currency);
     const currency =
       dto.currency === undefined ? undefined : normaliseCurrency(dto.currency);
+    const reDenominates = currency !== undefined && currency !== storedCurrency;
 
-    if (currency !== undefined && currency !== storedCurrency) {
+    // `undefined`/`null` both mean "this patch does not speak about the opening
+    // balance" — a PATCH that zeroes a balance because the key arrived as JSON
+    // `null` is not something the account form can ask for. `toMinorUnits` still
+    // fences a fractional or unsafe value into a 400 before `BigInt()`.
+    const openingMinor =
+      dto.openingBalanceMinor === undefined || dto.openingBalanceMinor === null
+        ? undefined
+        : toMinorUnits(dto.openingBalanceMinor, "openingBalanceMinor");
+
+    if (reDenominates) {
       await this.assertCurrencyChangeAllowed(
         userId,
         id,
@@ -212,6 +228,16 @@ export class AccountsService {
           name: dto.name,
           type: dto.type,
           currency,
+          openingBalanceMinor: openingMinor,
+          // A re-denomination that passed the guard is an account with no
+          // transactions, no recurring rules and a running balance still equal to
+          // its opening one, so the re-entered opening *is* the running balance.
+          // Copied verbatim — no scaling, hundredths stay hundredths for every
+          // currency — which is exactly what the client's own editor writes, so
+          // the two sides converge instead of arguing over one row. Any other
+          // opening-balance edit leaves the running balance alone: there the
+          // ledger, not this patch, owns it.
+          currentBalanceMinor: reDenominates ? openingMinor : undefined,
           color: dto.color,
           iconKey: dto.iconKey,
           isArchived: dto.isArchived,

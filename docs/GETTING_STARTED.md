@@ -136,7 +136,9 @@ npm run db:generate
 npm run db:push
 ```
 
-`prisma db push` creates the MongoDB collections and the indexes declared in `prisma/schema.prisma`. There is no `prisma/migrations/` directory in this repository (it is also listed in `.gitignore`), and Prisma Migrate does not support the `mongodb` provider, so `npm run db:migrate` and `npm run db:migrate:deploy` exist in `package.json` but are dead ends here.
+`prisma db push` creates the MongoDB collections and the indexes declared in `prisma/schema.prisma`. There is no `prisma/migrations/` directory in this repository (it is also listed in `.gitignore`), because Prisma Migrate does not support the `mongodb` provider. The `db:push`, `db:migrate`, and `db:migrate:deploy` package commands therefore all run the safe MongoDB initializer rather than Prisma Migrate.
+
+The initializer snapshots every collection before and after `prisma db push` and fails if a pre-existing document changed. For an upgrade rehearsal on a copy of existing data, run `scripts/db-init.sh --rehearse fin_rehearsal_YYYYMMDD`. See [DATABASE_INITIALIZATION.md](DATABASE_INITIALIZATION.md).
 
 ### (Optional) Seed Test Data
 

@@ -260,7 +260,11 @@ export async function writeDataExport(
     counts[entry.collection] = sectionRecords;
     records += sectionRecords;
     line(
-      { kind: "collection", collection: entry.collection, rows: sectionRecords },
+      {
+        kind: "collection",
+        collection: entry.collection,
+        rows: sectionRecords,
+      },
       writeLine,
     );
 

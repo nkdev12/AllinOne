@@ -460,7 +460,9 @@ docker compose -f docker-compose.prod.yml exec mongodb mongosh \
   --eval "db.getSiblingDB('allinone_prod').getCollectionNames()"
 ```
 
-`prisma/schema.prisma` declares `provider = "mongodb"`, there is no `prisma/migrations/` directory (it is listed in `.gitignore`), and Prisma Migrate does not support the MongoDB connector. The `db:migrate` and `db:migrate:deploy` scripts in `package.json` therefore have no role in this flow; `db:push` is the supported path.
+`prisma/schema.prisma` declares `provider = "mongodb"`, there is no `prisma/migrations/` directory (it is listed in `.gitignore`), and Prisma Migrate does not support the MongoDB connector. The `db:push`, `db:migrate`, and `db:migrate:deploy` scripts are therefore aliases for the supported, guarded `scripts/db-init.sh` path rather than Prisma Migrate.
+
+Because there is no migration file, "will this push lose the data already in there?" is a question the deployer has to answer, not one the toolchain answers. `scripts/db-init.sh` answers it by snapshotting every collection's document count and content hash on either side of the push and exiting non-zero if a pre-existing collection changed, and it has a `--rehearse NAME` mode that runs the whole thing against a copy of the production data on a scratch database first. Both are described in [DATABASE_INITIALIZATION.md](DATABASE_INITIALIZATION.md), including the recorded run of 2026-10-20 against the dev database.
 
 ### Seed Initial Data (Optional)
 

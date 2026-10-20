@@ -1147,11 +1147,18 @@ model FinanceExpenseShare {
   shareUnits      Float?
   isSettled       Boolean   @default(false)
   settledAt       DateTime?
+  deletedAt       DateTime?
+  version         Int       @default(1)
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
   sharedExpense FinanceSharedExpense @relation(fields: [sharedExpenseId], references: [id], onDelete: Cascade)
 
+  // Not `@@unique([sharedExpenseId, userId])`: a participant can be dropped from
+  // a split and added back, and the dropped row keeps its id and its tombstone
+  // (that is the point of the tombstone — see `groups.service.ts`
+  // `updateSharedExpense`). Two live rows for one participant is still refused,
+  // by the diff itself, which keys on `userId`.
   @@index([sharedExpenseId, userId])
   @@map("finance_expense_shares")
 }

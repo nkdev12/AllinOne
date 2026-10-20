@@ -2,7 +2,10 @@ import { Processor, Process, InjectQueue } from "@nestjs/bull";
 import { Logger, Optional } from "@nestjs/common";
 import { Job, Queue } from "bull";
 import { PrismaService } from "@/common/prisma/prisma.service";
-import { RecurringService } from "@/finance/recurring/recurring.service";
+import {
+  RECURRING_CRON_CATCH_UP_WINDOW_DAYS,
+  RecurringService,
+} from "@/finance/recurring/recurring.service";
 import { BudgetsService } from "@/finance/budgets/budgets.service";
 
 @Processor("finance")
@@ -20,12 +23,21 @@ export class FinanceProcessor {
 
   @Process("process-recurring")
   async handleProcessRecurring(job: Job) {
+    // Catch-up, not generation. The phone owns recurring generation because the
+    // app has to work offline (`allmynote_frontend/lib/repositories/
+    // finance_recurring_repository.dart` runs the same schedule on a 1-minute
+    // ticker), so this tick exists only to pick up a bill that came due while
+    // every device was connected but idle. `processAllDueRules` is bounded to
+    // `RECURRING_CRON_CATCH_UP_WINDOW_DAYS` for that reason and shares one
+    // implementation with `POST /finance/recurring/process-due`, which is
+    // idempotent per occurrence: a restart that re-runs the startup job, or a
+    // route and a tick racing each other, mints one bill rather than two.
     this.logger.log(
-      `[FinanceProcessor] Processing due recurring rules... Job #${job.id}`,
+      `[FinanceProcessor] Catching up recurring rules due in the last ${RECURRING_CRON_CATCH_UP_WINDOW_DAYS} day(s)... Job #${job.id}`,
     );
     const result = await this.recurringService.processAllDueRules();
     this.logger.log(
-      `[FinanceProcessor] Processed ${result.processed} due recurring rules.`,
+      `[FinanceProcessor] Generated ${result.processed} recurring transaction(s) for job #${job.id}.`,
     );
     return result;
   }

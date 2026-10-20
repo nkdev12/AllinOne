@@ -477,9 +477,14 @@ export class UsersService {
    * log never mentions is a delete that never propagates.
    *
    * Not touched, on purpose:
-   * - `FinanceExpenseShare` — the row has no `deletedAt` and no `version`, so
-   *   tombstoning it would mean inventing a column, and a hard delete would take
-   *   a settlement fact from the group that is still alive.
+   * - `FinanceExpenseShare` — it does now carry `deletedAt` and `version`, so the
+   *   columns are not the reason. The reason is that a share row is a fact about a
+   *   *participant* inside an expense that may belong to somebody else: tombstoning
+   *   it would drop that person's slice out of a live split and quietly move another
+   *   user's balances, and a hard delete would take the settlement fact from a group
+   *   that outlives this account. The rows this sweep does tombstone include every
+   *   expense the deleted user owned, so their own splits disappear with their
+   *   parents; a share in someone else's group stays and is reported.
    * - `FinanceTripItinerary` — keyed only by `tripId`; it goes with its trip,
    *   which is handled here by resolving the account's trips first.
    * - Rows another account owns that merely *name* this one (a shared expense in

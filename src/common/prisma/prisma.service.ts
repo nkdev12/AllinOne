@@ -34,7 +34,9 @@ export class PrismaService
     if (cleanedUrl) {
       process.env.DATABASE_URL = cleanedUrl;
     }
-    super(cleanedUrl ? { datasources: { db: { url: cleanedUrl } } } : undefined);
+    super(
+      cleanedUrl ? { datasources: { db: { url: cleanedUrl } } } : undefined,
+    );
     for (const model of Prisma.dmmf.datamodel.models) {
       const fields = new Set(
         model.fields

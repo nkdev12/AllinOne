@@ -1,13 +1,19 @@
 import { BadRequestException } from "@nestjs/common";
-import { FinanceTransactionType } from "@prisma/client";
+import { FinanceBudgetPeriod, FinanceTransactionType } from "@prisma/client";
 import { AnalyticsService } from "./analytics/analytics.service";
 import { TransactionsService } from "./transactions/transactions.service";
+import { BudgetsService } from "./budgets/budgets.service";
+import { normaliseCurrency, resolveCurrency } from "./finance.helpers";
 
 describe("Finance currency regressions", () => {
   let prisma: any;
   beforeEach(() => {
     prisma = {
       financeAccount: {
+        findMany: jest.fn().mockResolvedValue([]),
+        findFirst: jest.fn(),
+      },
+      financeBudget: {
         findMany: jest.fn().mockResolvedValue([]),
         findFirst: jest.fn(),
       },
@@ -157,5 +163,109 @@ describe("Finance currency regressions", () => {
       }),
     ).rejects.toThrow(BadRequestException);
     expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  describe("budget spend is measured in the budget's own currency", () => {
+    function budget(id: string, currency: unknown) {
+      return {
+        id,
+        userId: "user",
+        categoryId: null,
+        amountMinor: BigInt(100000),
+        currency,
+        period: FinanceBudgetPeriod.MONTHLY,
+        startDate: null,
+        endDate: null,
+        deletedAt: null,
+        version: 1,
+      };
+    }
+
+    function expense(currency: unknown, amountMinor: bigint) {
+      return {
+        accountId: "acc-1",
+        categoryId: null,
+        type: FinanceTransactionType.EXPENSE,
+        currency,
+        amountMinor,
+        isExcludedFromBudget: false,
+        deletedAt: null,
+        transactionDate: new Date(),
+      };
+    }
+
+    it("asks the database for exactly the currencies its budgets cap", async () => {
+      prisma.financeBudget.findMany.mockResolvedValue([
+        budget("bgt-usd", "USD"),
+        budget("bgt-legacy", null),
+        budget("bgt-blank", ""),
+      ]);
+      prisma.financeTransaction.findMany.mockResolvedValue([]);
+
+      await new BudgetsService(prisma).getBudgetsWithSpending("user");
+
+      // One round trip for three budgets in two currencies, and no code the
+      // budgets did not name is fetched.
+      expect(prisma.financeTransaction.findMany).toHaveBeenCalledTimes(1);
+      expect(
+        prisma.financeTransaction.findMany.mock.calls[0][0].where.currency,
+      ).toEqual({ in: ["INR", "USD"] });
+    });
+
+    it("does not let rupee spend inflate a USD cap, or the other way round", async () => {
+      prisma.financeBudget.findMany.mockResolvedValue([
+        budget("bgt-usd", "USD"),
+        budget("bgt-inr", "INR"),
+      ]);
+      // A naive delegate that ignores the filter still cannot mix the buckets:
+      // the per-currency grouping happens after the rows come back.
+      prisma.financeTransaction.findMany.mockResolvedValue([
+        expense("USD", BigInt(50000)),
+        expense("INR", BigInt(25000)),
+        expense("INR", BigInt(25000)),
+      ]);
+
+      const results = await new BudgetsService(prisma).getBudgetsWithSpending(
+        "user",
+      );
+
+      expect(results.map((b: any) => [b.id, b.spentMinor])).toEqual([
+        ["bgt-usd", 50000],
+        ["bgt-inr", 50000],
+      ]);
+      expect(results[0].currency).toBe("USD");
+      expect(results[1].currency).toBe("INR");
+    });
+
+    it("resolves a blank or missing budget currency to the INR default", async () => {
+      prisma.financeBudget.findMany.mockResolvedValue([
+        budget("bgt-null", null),
+        budget("bgt-blank", "   "),
+        budget("bgt-lower", " usd "),
+      ]);
+      prisma.financeTransaction.findMany.mockResolvedValue([
+        expense("INR", BigInt(700)),
+        expense("USD", BigInt(300)),
+      ]);
+
+      const results = await new BudgetsService(prisma).getBudgetsWithSpending(
+        "user",
+      );
+
+      expect(results.map((b: any) => [b.currency, b.spentMinor])).toEqual([
+        ["INR", 700],
+        ["INR", 700],
+        ["USD", 300],
+      ]);
+    });
+
+    it("resolveCurrency is the blank-tolerant form of normaliseCurrency", () => {
+      expect(normaliseCurrency(undefined)).toBe("INR");
+      expect(normaliseCurrency("")).toBe("");
+      expect(resolveCurrency("")).toBe("INR");
+      expect(resolveCurrency(" ")).toBe("INR");
+      expect(resolveCurrency(null)).toBe("INR");
+      expect(resolveCurrency(" usd ")).toBe("USD");
+    });
   });
 });

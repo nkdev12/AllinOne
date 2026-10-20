@@ -39,8 +39,11 @@ describe("RsvpDto", () => {
     // `design:paramtypes`, which is exactly what Nest reads to decide whether a
     // pipe runs on an argument. The third parameter is the body.
     const paramTypes: any[] =
-      Reflect.getMetadata(PARAMTYPES_METADATA, EventsController.prototype, "updateRSVP") ??
-      [];
+      Reflect.getMetadata(
+        PARAMTYPES_METADATA,
+        EventsController.prototype,
+        "updateRSVP",
+      ) ?? [];
 
     // This is the whole fix, asserted rather than assumed: a parameter whose type
     // is `RsvpDto` is class-validated, whitelisted and stripped of unknown keys by
@@ -132,16 +135,16 @@ describe("RsvpDto", () => {
   it("refuses the RSVP with either half missing", async () => {
     // No defaults on this DTO: an RSVP that names no attendee, or records no
     // answer, is a client bug and must not be silently filled in.
-    await expect(
-      fieldsOf({ email: "colleague@example.com" }),
-    ).resolves.toEqual([
-      {
-        field: "status",
-        messages: [
-          "must be one of the following values: NEEDS_ACTION, ACCEPTED, DECLINED, TENTATIVE.",
-        ],
-      },
-    ]);
+    await expect(fieldsOf({ email: "colleague@example.com" })).resolves.toEqual(
+      [
+        {
+          field: "status",
+          messages: [
+            "must be one of the following values: NEEDS_ACTION, ACCEPTED, DECLINED, TENTATIVE.",
+          ],
+        },
+      ],
+    );
     await expect(
       fieldsOf({ status: AttendeeStatus.DECLINED }),
     ).resolves.toEqual([

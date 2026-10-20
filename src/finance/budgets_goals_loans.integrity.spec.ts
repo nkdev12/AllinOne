@@ -9,6 +9,7 @@ import { createValidationPipe } from "@/common/errors/validation.pipe";
 import { BudgetsService } from "./budgets/budgets.service";
 import { BudgetListQueryDto } from "./budgets/dto/budget-list-query.dto";
 import { CreateBudgetDto } from "./budgets/dto/create-budget.dto";
+import { UpdateBudgetDto } from "./budgets/dto/update-budget.dto";
 import { GoalsService } from "./goals/goals.service";
 import { CreateGoalDto } from "./goals/dto/create-goal.dto";
 import { LoansService } from "./loans/loans.service";
@@ -78,6 +79,8 @@ describe("Budgets, goals and loans integrity", () => {
   let capturedExpenseWhere: any;
   let expenseFindMany: jest.Mock;
   let budgetFindMany: jest.Mock;
+  let budgetCreate: jest.Mock;
+  let budgetUpdate: jest.Mock;
   let goalUpdate: jest.Mock;
   let loanUpdate: jest.Mock;
   let goalCreate: jest.Mock;
@@ -215,6 +218,35 @@ describe("Budgets, goals and loans integrity", () => {
         ),
       );
 
+    budgetCreate = jest.fn().mockImplementation(({ data }: any) =>
+      Promise.resolve({
+        id: BUDGET_ID,
+        userId: USER,
+        categoryId: null,
+        // No `currency` prefilled on purpose: Mongo applies the column's default
+        // only when the write omits the key, so a create that forgot to send it
+        // has to be visible here as an absent field rather than masked.
+        period: FinanceBudgetPeriod.MONTHLY,
+        startDate: null,
+        endDate: null,
+        alertAt80: true,
+        alertAt100: true,
+        alertSentAt: null,
+        deletedAt: null,
+        version: 1,
+        createdAt: NOW,
+        updatedAt: NOW,
+        ...data,
+      }),
+    );
+
+    budgetUpdate = jest.fn().mockImplementation(({ where, data }: any) => {
+      const doc = budgets.find((b) => b.id === where.id);
+      if (!doc) return Promise.resolve(null);
+      minorOps(doc, data);
+      return Promise.resolve({ ...doc });
+    });
+
     expenseFindMany = jest
       .fn()
       .mockImplementation(({ where }: { where: any }) => {
@@ -227,7 +259,14 @@ describe("Budgets, goals and loans integrity", () => {
                 return false;
               }
               if (where.type && e.type !== where.type) return false;
-              if (where.currency && e.currency !== where.currency) return false;
+              if (where.currency) {
+                // `$in` of the currencies the user's budgets are written in, and
+                // nothing else: a row tagged another code is not fetched at all.
+                const allowed: unknown[] = Array.isArray(where.currency.in)
+                  ? where.currency.in
+                  : [where.currency];
+                if (!allowed.includes(e.currency)) return false;
+              }
               if (
                 where.isExcludedFromBudget !== undefined &&
                 e.isExcludedFromBudget !== where.isExcludedFromBudget
@@ -300,7 +339,20 @@ describe("Budgets, goals and loans integrity", () => {
     );
 
     const client: any = {
-      financeBudget: { findMany: budgetFindMany },
+      financeBudget: {
+        findMany: budgetFindMany,
+        findFirst: jest.fn().mockImplementation(({ where }: any) => {
+          const doc = budgets.find(
+            (b) =>
+              b.id === where.id &&
+              b.userId === where.userId &&
+              b.deletedAt === (where.deletedAt ?? null),
+          );
+          return Promise.resolve(doc ? { ...doc } : null);
+        }),
+        create: budgetCreate,
+        update: budgetUpdate,
+      },
       financeTransaction: { findMany: expenseFindMany },
       financeSavingsGoal: {
         findFirst: jest.fn().mockImplementation(({ where }: any) => {
@@ -515,8 +567,9 @@ describe("Budgets, goals and loans integrity", () => {
         type: FinanceTransactionType.EXPENSE,
         isExcludedFromBudget: false,
         deletedAt: null,
-        // The one currency a budget can currently cap, kept in one constant.
-        currency: "INR",
+        // Neither budget names a currency, so both fall back to the schema
+        // default and only rupee rows are asked for.
+        currency: { in: ["INR"] },
       });
     });
 
@@ -621,6 +674,181 @@ describe("Budgets, goals and loans integrity", () => {
           bodyContext(CreateBudgetDto),
         ),
       ).resolves.toMatchObject({ amountMinor: 100000 });
+    });
+  });
+
+  describe("budget spend currency", () => {
+    it("measures each budget in its own currency and never in another's", async () => {
+      seedBudget({
+        id: "bgt-usd",
+        currency: "USD",
+        amountMinor: BigInt(50000),
+      });
+      seedBudget({
+        id: "bgt-inr",
+        currency: "INR",
+        amountMinor: BigInt(100000),
+      });
+      // All four rows sit inside October 2026, so every one of them falls in both
+      // budgets' window. Only the currency separates them.
+      seedExpense("2026-10-04T10:00:00.000Z", BigInt(20000), {
+        currency: "USD",
+      });
+      seedExpense("2026-10-05T10:00:00.000Z", BigInt(50000), {
+        currency: "USD",
+      });
+      seedExpense("2026-10-06T10:00:00.000Z", BigInt(30000), {
+        currency: "INR",
+      });
+      seedExpense("2026-10-07T10:00:00.000Z", BigInt(1000000), {
+        currency: "EUR",
+      });
+
+      const result = await budgetsService.getBudgetsWithSpending(USER);
+      const byId = Object.fromEntries(result.map((b: any) => [b.id, b]));
+
+      // Pre-fix both budgets were summed over one pinned INR filter, so the USD
+      // cap measured 0 while the client measured it at 700, and the rupee cap was
+      // right for the wrong reason.
+      expect(byId["bgt-usd"].spentMinor).toBe(70000);
+      expect(byId["bgt-usd"].remainingMinor).toBe(-20000);
+      expect(byId["bgt-usd"].percentUsed).toBe(140);
+      expect(byId["bgt-usd"].currency).toBe("USD");
+      expect(byId["bgt-inr"].spentMinor).toBe(30000);
+      expect(byId["bgt-inr"].remainingMinor).toBe(70000);
+      expect(byId["bgt-inr"].percentUsed).toBe(30);
+
+      // Still ONE round trip for two currencies, and the euro spend is never even
+      // fetched because no budget caps in euros.
+      expect(expenseFindMany).toHaveBeenCalledTimes(1);
+      expect(capturedExpenseWhere.currency).toEqual({ in: ["INR", "USD"] });
+    });
+
+    it("falls back to INR for a budget whose currency is missing or blank", async () => {
+      seedBudget({ id: "bgt-legacy" });
+      seedBudget({ id: "bgt-null", currency: null });
+      seedBudget({ id: "bgt-blank", currency: "" });
+      seedBudget({ id: "bgt-lowercase", currency: " usd " });
+      seedExpense("2026-10-05T10:00:00.000Z", BigInt(4000));
+      seedExpense("2026-10-06T10:00:00.000Z", BigInt(900), {
+        currency: "USD",
+      });
+
+      const result = await budgetsService.getBudgetsWithSpending(USER);
+      const byId = Object.fromEntries(result.map((b: any) => [b.id, b]));
+
+      // The schema default, and the same fallback the client's `_currencyOf`
+      // applies: a budget that does not say is a rupee budget.
+      expect(byId["bgt-legacy"].spentMinor).toBe(4000);
+      expect(byId["bgt-null"].spentMinor).toBe(4000);
+      expect(byId["bgt-blank"].spentMinor).toBe(4000);
+      expect(byId["bgt-lowercase"].spentMinor).toBe(900);
+      expect(byId["bgt-lowercase"].currency).toBe("USD");
+      expect(capturedExpenseWhere.currency).toEqual({ in: ["INR", "USD"] });
+    });
+
+    it("keeps a category-scoped budget out of another currency's rows", async () => {
+      seedBudget({
+        id: "bgt-rent-usd",
+        categoryId: RENT_CATEGORY,
+        currency: "USD",
+        amountMinor: BigInt(90000),
+      });
+      seedExpense("2026-10-02T10:00:00.000Z", BigInt(90000), {
+        categoryId: RENT_CATEGORY,
+        currency: "INR",
+      });
+      seedExpense("2026-10-03T10:00:00.000Z", BigInt(15000), {
+        categoryId: RENT_CATEGORY,
+        currency: "USD",
+      });
+
+      const [budget] = await budgetsService.getBudgetsWithSpending(USER);
+
+      // Same category, same window, same hundredths-per-unit column: only the
+      // code says which of the two rows this cap is about.
+      expect(budget.spentMinor).toBe(15000);
+      expect(budget.remainingMinor).toBe(75000);
+    });
+
+    it("creates and updates a budget in the currency the caller named, upper-cased", async () => {
+      const created = await budgetsService.createBudget(USER, {
+        amountMinor: 100000,
+        currency: "usd",
+      } as any);
+
+      expect(budgetCreate.mock.calls[0][0].data.currency).toBe("USD");
+      expect(created.currency).toBe("USD");
+      // The pull path replays the log, not the table, so the emitted payload has
+      // to say which currency this cap is written in.
+      const logged = changes[changes.length - 1].data;
+      expect(logged.entityType).toBe("finance_budget");
+      expect(logged.payload.currency).toBe("USD");
+
+      seedBudget({ id: "bgt-1", currency: "INR" });
+      const updated = await budgetsService.updateBudget(
+        USER,
+        "bgt-1",
+        await queryPipe.transform(
+          { currency: "eur" },
+          bodyContext(UpdateBudgetDto),
+        ),
+      );
+
+      expect(budgetUpdate.mock.calls[0][0].data).toMatchObject({
+        currency: "EUR",
+      });
+      expect(updated.currency).toBe("EUR");
+      expect(changes[changes.length - 1].data.payload.currency).toBe("EUR");
+    });
+
+    it("leaves the currency alone when an update does not mention it", async () => {
+      seedBudget({ id: "bgt-1", currency: "USD" });
+
+      const updated = await budgetsService.updateBudget(USER, "bgt-1", {
+        amountMinor: 200000,
+      });
+
+      expect(budgetUpdate.mock.calls[0][0].data.currency).toBeUndefined();
+      expect(updated.currency).toBe("USD");
+    });
+
+    it("defaults a REST create to the schema default instead of no currency", async () => {
+      await budgetsService.createBudget(USER, { amountMinor: 100000 } as any);
+
+      // Mongo only applies `@default("INR")` for an omitted key, so this is the
+      // one write path where leaving it out is allowed to mean INR.
+      expect(budgetCreate.mock.calls[0][0].data.currency).toBe("INR");
+    });
+
+    it("validates a budget currency the same way an account currency is validated", async () => {
+      await expect(
+        queryPipe.transform(
+          { amountMinor: 100000, currency: "usd" },
+          bodyContext(CreateBudgetDto),
+        ),
+      ).resolves.toMatchObject({ amountMinor: 100000, currency: "usd" });
+
+      for (const currency of ["RUPEES", "EURODOLLAR", "US", "usd ", "USD1"]) {
+        await expect(
+          queryPipe.transform(
+            { amountMinor: 100000, currency },
+            bodyContext(CreateBudgetDto),
+          ),
+        ).rejects.toThrow(BadRequestException);
+        await expect(
+          queryPipe.transform({ currency }, bodyContext(UpdateBudgetDto)),
+        ).rejects.toThrow(BadRequestException);
+      }
+
+      // The same payload with a legal code is not rejected for anything else, so
+      // the failures above are the currency rule and not a side effect.
+      await expect(
+        queryPipe.transform(
+          { amountMinor: 100000, currency: "USD" },
+          bodyContext(CreateBudgetDto),
+        ),
+      ).resolves.toMatchObject({ amountMinor: 100000, currency: "USD" });
     });
   });
 

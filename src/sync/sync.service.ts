@@ -385,8 +385,32 @@ export class SyncService {
   }
 
   /**
-   * Sync cursors belong to one account. A group edit is copied to every
+   * Sync cursors belong to one account. A group or trip edit is copied to every
    * collaborator's own log, so each participant can pull it with their cursor.
+   *
+   * Two scopes, because a finance child row answers to two parents:
+   * `finance_group`/`finance_trip` are their own scope (the id in the change is
+   * the id of the parent), and `finance_shared_expense`/`finance_settlement` carry
+   * `groupId` and `tripId` columns that are read back from the row the projection
+   * just wrote — never trusted from the payload, which is the same rule the
+   * projection applies when it resolves references. `finance_trip_itinerary` is
+   * included because an itinerary row has no tenancy of its own
+   * (`prisma/schema.prisma:1208-1226`): its parent trip is the only thing that
+   * says whose plan it is, and a plan change that only lands on its author's log
+   * leaves every other collaborator with a stale itinerary — including after the
+   * owner deletes a trip, whose cascade tombstones the plan rows.
+   *
+   * A change that names both parents (an expense in a group *and* on a trip) is
+   * copied to the union, minus the author, who already has the row.
+   *
+   * Without this fan-out a trip grant is inert: the grantee's own cursor would
+   * never pass the owner's edits, so the shared trip they are allowed to open
+   * would be a snapshot of whenever they last synced.
+   *
+   * The trip reads are guarded on the delegate being present. The group reads are
+   * not, because that is the shape they already had; a missing `resourceShare`
+   * delegate means "no grants are answerable", which fans a change out to the
+   * owner alone rather than failing a push the owner made.
    */
   private async replicateGroupChange(
     tx: Prisma.TransactionClient,
@@ -400,47 +424,41 @@ export class SyncService {
     payload: Prisma.InputJsonValue,
     deviceId: string,
   ): Promise<string[]> {
-    let groupId: string | null = null;
-    if (change.entityType === "finance_group") groupId = change.entityId;
-    if (change.entityType === "finance_shared_expense") {
-      groupId =
-        (
-          await tx.financeSharedExpense.findUnique({
-            where: { id: change.entityId },
-            select: { groupId: true },
-          })
-        )?.groupId ?? null;
-    }
-    if (change.entityType === "finance_settlement") {
-      groupId =
-        (
-          await tx.financeSettlement.findUnique({
-            where: { id: change.entityId },
-            select: { groupId: true },
-          })
-        )?.groupId ?? null;
-    }
-    if (!groupId) return [];
+    const scopes = await this.resolveReplicationScopes(tx, change);
+    if (!scopes.groupId && !scopes.tripId) return [];
 
-    const group = await tx.financeGroup.findUnique({
-      where: { id: groupId },
-      select: { ownerId: true },
-    });
-    if (!group) return [];
-    const shares = await tx.resourceShare.findMany({
-      where: {
-        resourceType: "EXPENSE_GROUP",
-        resourceId: groupId,
-        deletedAt: null,
-      },
-      select: { sharedWithUserId: true },
-    });
-    const recipients = new Set<string>([
-      group.ownerId,
-      ...shares.map(
-        (share: { sharedWithUserId: string }) => share.sharedWithUserId,
-      ),
-    ]);
+    const recipients = new Set<string>();
+    if (scopes.groupId) {
+      const groupId = scopes.groupId;
+      for (const recipientId of await this.financeScopeRecipients(
+        tx,
+        "EXPENSE_GROUP",
+        groupId,
+        () =>
+          tx.financeGroup.findUnique({
+            where: { id: groupId },
+            select: { ownerId: true },
+          }),
+      )) {
+        recipients.add(recipientId);
+      }
+    }
+    if (scopes.tripId) {
+      const tripId = scopes.tripId;
+      for (const recipientId of await this.financeScopeRecipients(
+        tx,
+        "TRIP",
+        tripId,
+        async () =>
+          (await (tx as any).financeTrip?.findUnique({
+            where: { id: tripId },
+            select: { ownerId: true },
+          })) ?? null,
+      )) {
+        recipients.add(recipientId);
+      }
+    }
+
     recipients.delete(authorId);
     for (const recipientId of recipients) {
       await appendChange(tx, {
@@ -454,6 +472,90 @@ export class SyncService {
       });
     }
     return [...recipients];
+  }
+
+  /**
+   * Which parent scope(s) one accepted change belongs to, read from the stored
+   * rows rather than from the payload.
+   */
+  private async resolveReplicationScopes(
+    tx: Prisma.TransactionClient,
+    change: { entityType: string; entityId: string },
+  ): Promise<{ groupId: string | null; tripId: string | null }> {
+    let groupId: string | null = null;
+    let tripId: string | null = null;
+
+    if (change.entityType === "finance_group") groupId = change.entityId;
+    if (change.entityType === "finance_trip") tripId = change.entityId;
+
+    if (change.entityType === "finance_shared_expense") {
+      const row = await tx.financeSharedExpense.findUnique({
+        where: { id: change.entityId },
+        select: { groupId: true, tripId: true },
+      });
+      groupId = row?.groupId ?? null;
+      tripId = row?.tripId ?? null;
+    }
+    if (change.entityType === "finance_settlement") {
+      const row = await tx.financeSettlement.findUnique({
+        where: { id: change.entityId },
+        select: { groupId: true, tripId: true },
+      });
+      groupId = row?.groupId ?? null;
+      tripId = row?.tripId ?? null;
+    }
+    if (change.entityType === "finance_trip_itinerary") {
+      tripId =
+        (
+          await (tx as any).financeTripItinerary?.findUnique({
+            where: { id: change.entityId },
+            select: { tripId: true },
+          })
+        )?.tripId ?? null;
+    }
+
+    return { groupId, tripId };
+  }
+
+  /**
+   * Everyone whose log a change on one finance scope belongs on: the scope's own
+   * owner and every holder of a live grant on it, whatever their role — a VIEWER
+   * cannot write, but they are exactly the person who needs the read replica.
+   *
+   * `deletedAt: null` is what makes a revoked grant stop being a recipient: the
+   * row survives (the grant trail is kept), so without the filter a revoked
+   * collaborator would go on receiving the ledger into their log. The revoke path
+   * countermands this by appending DELETE changes of its own
+   * (`collaboration.service.ts` `queueFinanceRemoval`).
+   *
+   * A scope the collection does not answer for contributes nobody: `ownerOf`
+   * returning `null` means the row is gone, and fanning a change out to a grant
+   * list read beside a missing owner would hand it to collaborators of nothing.
+   */
+  private async financeScopeRecipients(
+    tx: Prisma.TransactionClient,
+    resourceType: "EXPENSE_GROUP" | "TRIP",
+    resourceId: string,
+    ownerOf: () => Promise<{ ownerId: string } | null>,
+  ): Promise<string[]> {
+    const scope = await ownerOf();
+    if (!scope) return [];
+
+    const shares = await (tx as any).resourceShare?.findMany({
+      where: {
+        resourceType,
+        resourceId,
+        deletedAt: null,
+      },
+      select: { sharedWithUserId: true },
+    });
+
+    return [
+      scope.ownerId,
+      ...(shares ?? [])
+        .map((share: { sharedWithUserId: string }) => share.sharedWithUserId)
+        .filter((userId: string) => !!userId),
+    ];
   }
 
   /**
