@@ -848,6 +848,17 @@ const FINANCE_TRANSACTION_FIELDS: ReadonlyArray<DocumentField> = [
     expected: "a string",
   },
   {
+    // `required: false` on purpose. A cash-flow classification is a fact a row can
+    // live without — every device, backup and oplog row predating it says nothing —
+    // and a *required* key would refuse the push of any client that has not been
+    // updated yet. Absent means the schema default, `NORMAL`, and the projection
+    // keeps whatever the row already holds rather than blanking it.
+    key: "transactionKind",
+    required: false,
+    accepts: (value) => value === "NORMAL" || value === "BALANCE_ADJUSTMENT",
+    expected: '"NORMAL" or "BALANCE_ADJUSTMENT"',
+  },
+  {
     key: "amountMinor",
     required: true,
     accepts: (value) =>
@@ -910,6 +921,22 @@ const FINANCE_TRANSACTION_FIELDS: ReadonlyArray<DocumentField> = [
     required: false,
     accepts: (value) => typeof value === "boolean",
     expected: "a boolean",
+  },
+  {
+    // The adjustment this row reverses, for the client's linking only — no
+    // balance logic reads it, so nothing here insists the id resolves. Optional
+    // like `transactionKind` above, for the same reason: an older push simply
+    // does not have the idea.
+    key: "reversalOfTransactionId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
+  },
+  {
+    key: "loanId",
+    required: false,
+    accepts: (value) => value === null || typeof value === "string",
+    expected: "null or a string",
   },
   {
     key: "createdAt",

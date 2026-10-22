@@ -882,6 +882,144 @@ describe("SyncService", () => {
         }),
       );
     });
+
+    /**
+     * Two writers, one deterministic `_id`, one instant.
+     *
+     * A recurring bill is minted from UUIDv5 over `recurring:<ruleId>:<UTC day>`
+     * (`recurringTransactionId` in `src/finance/recurring/recurring.service.ts`),
+     * so the worker, the phone's own generator and a second device that was
+     * offline across the due date can all aim at the same id. The projection
+     * reads the row, finds nothing, and creates — and MongoDB answers with a
+     * duplicate-key violation for a row that appeared between those two calls.
+     *
+     * That is not an outage, and `rejectionFromProjection` cannot tell it apart
+     * from one: only an `HttpException` becomes a per-change refusal, so a raw
+     * Prisma `P2002` would unwind the whole `$transaction` and every healthy
+     * change queued behind it in the same push. A collision degrades into a
+     * normal upsert instead.
+     */
+    it("degrades a duplicate-key create into an update instead of failing the push", async () => {
+      prismaService.device.findFirst.mockResolvedValue(mockDevice);
+
+      // A version-5 id, the shape the app is about to push for its own bills.
+      const billId = "3f2504e0-4f89-51d3-9a0e-26ba0180ed70";
+      const accountId = "a1111111-1111-4111-8111-111111111111";
+
+      prismaService.financeTransaction = {
+        findUnique: jest
+          .fn()
+          // Nothing there when the projection looked, so it takes the create
+          // path — and the winner lands in the gap before the write.
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce({ userId, deletedAt: null, version: 1 }),
+        create: jest.fn().mockRejectedValueOnce(
+          Object.assign(
+            new Error("Unique constraint failed on the fields: (`_id`)"),
+            { code: "P2002", meta: { target: "_id" } },
+          ),
+        ),
+        update: jest.fn().mockResolvedValue({ id: billId }),
+      };
+
+      const result = await service.pushChanges(userId, {
+        deviceId,
+        changes: [
+          {
+            entityType: "finance_transaction",
+            entityId: billId,
+            operation: ChangeOperation.CREATE,
+            version: 1,
+            payload: {
+              accountId,
+              type: "EXPENSE",
+              amountMinor: 49900,
+              currency: "INR",
+              title: "Streaming subscription",
+              transactionDate: "2026-10-31T00:00:00.000Z",
+              recurringRuleId: "rule-1",
+              isExcludedFromBudget: true,
+              transactionKind: "BALANCE_ADJUSTMENT",
+              reversalOfTransactionId:
+                "txn-33333333-3333-4333-8333-333333333333",
+            },
+          },
+        ],
+      });
+
+      // The push completes rather than throwing, so the log row and the cursor
+      // this change earned are kept and the rest of the batch is untouched.
+      expect(result.success).toBe(true);
+      expect(result.rejected).toBeUndefined();
+      expect(result.accepted).toHaveLength(1);
+      expect(prismaService.change.create).toHaveBeenCalledTimes(1);
+      expect(prismaService.financeTransaction.create).toHaveBeenCalledTimes(1);
+      expect(prismaService.financeTransaction.update).toHaveBeenCalledWith({
+        where: { id: billId },
+        data: expect.objectContaining({
+          version: 1,
+          // The flag a reconcile correction sets, and the reason the degraded
+          // path has to be the full update rather than a bare no-op: the row
+          // that won the race was written by a different writer, and this push
+          // still owns the edit it was asked to make.
+          isExcludedFromBudget: true,
+          title: "Streaming subscription",
+          amountMinor: BigInt(49900),
+        }),
+      });
+
+      // The two keys the update path says nothing about. `recurringRuleId` and
+      // `sharedExpenseId` ride the log verbatim, so a peer reads them off the
+      // payload on the next pull; the domain row keeps whatever the winner
+      // stored. Asserted so the gap is a known one rather than a surprise.
+      expect(
+        prismaService.financeTransaction.update.mock.calls[0][0].data,
+      ).not.toHaveProperty("recurringRuleId");
+    });
+
+    /**
+     * The other half: tolerating a collision must not become tolerating a
+     * broken write. A `create` that fails for any reason the id cannot explain
+     * is still a database fault, and swallowing it would report success for a
+     * change whose row never landed.
+     */
+    it("still fails the push on a write error that is not a collision", async () => {
+      prismaService.device.findFirst.mockResolvedValue(mockDevice);
+
+      const billId = "3f2504e0-4f89-51d3-9a0e-26ba0180ed70";
+
+      prismaService.financeTransaction = {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockRejectedValueOnce(
+          new Error("PrismaClientInitializationError: connection lost"),
+        ),
+        update: jest.fn().mockResolvedValue({ id: billId }),
+      };
+
+      await expect(
+        service.pushChanges(userId, {
+          deviceId,
+          changes: [
+            {
+              entityType: "finance_transaction",
+              entityId: billId,
+              operation: ChangeOperation.CREATE,
+              version: 1,
+              payload: {
+                accountId: "a1111111-1111-4111-8111-111111111111",
+                type: "EXPENSE",
+                amountMinor: 49900,
+                currency: "INR",
+                title: "Streaming subscription",
+                transactionDate: "2026-10-31T00:00:00.000Z",
+              },
+            },
+          ],
+        }),
+      ).rejects.toThrow("connection lost");
+
+      expect(prismaService.financeTransaction.update).not.toHaveBeenCalled();
+    });
   });
 
   describe("the reason a device cannot sync", () => {

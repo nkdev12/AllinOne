@@ -276,6 +276,21 @@ describe("Budgets, goals and loans integrity", () => {
               if (where.deletedAt !== undefined && e.deletedAt !== null) {
                 return false;
               }
+              if (where.NOT) {
+                // The one clause that decides whether a balance correction counts
+                // against a cap, honoured the way Mongo answers `$not`: a document
+                // that never carried the key satisfies it. Every expense seeded
+                // here without `transactionKind` is such a document, so dropping
+                // this branch would hide the legacy-row bug instead of testing it.
+                const clauses = Array.isArray(where.NOT)
+                  ? where.NOT
+                  : [where.NOT];
+                for (const clause of clauses) {
+                  for (const [key, expected] of Object.entries(clause)) {
+                    if (e[key] === expected) return false;
+                  }
+                }
+              }
               const date = e.transactionDate as Date;
               if (range.gte && date < range.gte) return false;
               if (range.gt && date <= range.gt) return false;
@@ -565,12 +580,50 @@ describe("Budgets, goals and loans integrity", () => {
       expect(capturedExpenseWhere).toMatchObject({
         account: { userId: USER },
         type: FinanceTransactionType.EXPENSE,
+        // Negative, and asserted as the whole clause: `{ transactionKind:
+        // "NORMAL" }` would pass this test and drop every pre-column row in
+        // production, because Mongo does not match an absent key by equality.
+        NOT: { transactionKind: "BALANCE_ADJUSTMENT" },
         isExcludedFromBudget: false,
         deletedAt: null,
         // Neither budget names a currency, so both fall back to the schema
         // default and only rupee rows are asked for.
         currency: { in: ["INR"] },
       });
+      expect(capturedExpenseWhere).not.toHaveProperty("transactionKind");
+    });
+
+    it("kept a balance correction from spending the rent cap", async () => {
+      seedBudget({ categoryId: RENT_CATEGORY, amountMinor: BigInt(60000) });
+      seedExpense("2026-10-03T10:00:00.000Z", BigInt(40000), {
+        categoryId: RENT_CATEGORY,
+      });
+      // The row the Reconcile action writes: `EXPENSE` in direction, because the
+      // balance went down, and no purchase behind it.
+      seedExpense("2026-10-03T11:00:00.000Z", BigInt(30000), {
+        categoryId: RENT_CATEGORY,
+        transactionKind: "BALANCE_ADJUSTMENT",
+      });
+
+      const [budget] = await budgetsService.getBudgetsWithSpending(USER);
+
+      expect(budget.spentMinor).toBe(40000);
+      expect(budget.remainingMinor).toBe(20000);
+    });
+
+    it("still counted an expense written before the classification existed", async () => {
+      seedBudget({ categoryId: RENT_CATEGORY, amountMinor: BigInt(60000) });
+      // No `transactionKind` key anywhere on the document — the shape every row
+      // this user already has is stored in.
+      seedExpense("2026-10-03T10:00:00.000Z", BigInt(60000), {
+        categoryId: RENT_CATEGORY,
+      });
+      expect(expenses[0]).not.toHaveProperty("transactionKind");
+
+      const [budget] = await budgetsService.getBudgetsWithSpending(USER);
+
+      expect(budget.spentMinor).toBe(60000);
+      expect(budget.percentUsed).toBe(100);
     });
 
     it("answers nothing when the user has no budgets", async () => {

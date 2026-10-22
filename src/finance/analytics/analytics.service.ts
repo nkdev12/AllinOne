@@ -1,6 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { PrismaService } from "@/common/prisma/prisma.service";
 import { FinanceTransactionType } from "@prisma/client";
+import { EXCLUDE_BALANCE_ADJUSTMENTS } from "@/finance/finance.helpers";
 import { ErrorCode } from "@/common/errors/error-code";
 import { badRequest } from "@/common/errors/http-errors";
 
@@ -251,6 +252,11 @@ export class AnalyticsService {
       this.fetchTransactions({
         userId,
         type: FinanceTransactionType.EXPENSE,
+        // Spending is what left the wallet. A Reconcile correction is booked as
+        // an `EXPENSE` for the balance's sake but bought nothing, so it does not
+        // belong in a category breakdown — and the clause has to be a `NOT`, or
+        // every row written before the column existed vanishes from the report.
+        ...EXCLUDE_BALANCE_ADJUSTMENTS,
         deletedAt: null,
         ...(requested ? { currency: requested } : {}),
         transactionDate: { gte: start, lte: end },
@@ -376,6 +382,10 @@ export class AnalyticsService {
 
     const { rows, truncated } = await this.fetchTransactions({
       userId,
+      // Income and spending both exclude a balance correction: it reconciles an
+      // account against the bank, it does not earn or cost anything. Negative
+      // clause for the legacy-document reason — see `EXCLUDE_BALANCE_ADJUSTMENTS`.
+      ...EXCLUDE_BALANCE_ADJUSTMENTS,
       deletedAt: null,
       ...(requested ? { currency: requested } : {}),
       transactionDate: { gte: start, lt: endExclusive },
@@ -710,6 +720,12 @@ export class AnalyticsService {
     const ninetyDaysAgo = new Date(now.getTime() - 90 * MS_PER_DAY);
     const { rows: txns } = await this.fetchTransactions({
       userId,
+      // The five vitals read savings rate, essential ratio and burn off these
+      // rows, and every one of them means cash that actually moved in or out. A
+      // reconcile correction would inflate all three. Excluded from the fetch
+      // rather than from each loop, so the budget-adherence filter below — which
+      // walks the same `txns` — inherits the exclusion instead of repeating it.
+      ...EXCLUDE_BALANCE_ADJUSTMENTS,
       deletedAt: null,
       currency: requested,
       transactionDate: { gte: ninetyDaysAgo },
@@ -1077,238 +1093,6 @@ export class AnalyticsService {
         },
       },
       actionItems,
-    };
-  }
-
-  // -------------------------------------------------------------
-  // Financial Calendar & Payday Planner
-  // -------------------------------------------------------------
-
-  async getFinancialCalendar(
-    userId: string,
-    year?: number,
-    month?: number,
-    currency = "INR",
-  ) {
-    const requested = normaliseCurrencyCode(currency) ?? "INR";
-    const now = new Date();
-    const targetYear = year ?? now.getUTCFullYear();
-    const targetMonth = month ?? now.getUTCMonth() + 1;
-
-    const daysInMonth = new Date(
-      Date.UTC(targetYear, targetMonth, 0),
-    ).getUTCDate();
-
-    const [accounts, rules, loans, goals] = await Promise.all([
-      this.prisma.financeAccount.findMany({
-        where: {
-          userId,
-          deletedAt: null,
-          isArchived: false,
-          currency: requested,
-        },
-      }),
-      this.prisma.financeRecurringRule.findMany({
-        where: { userId, deletedAt: null },
-      }),
-      this.prisma.financeLoan.findMany({
-        where: { userId, deletedAt: null, isSettled: false },
-      }),
-      this.prisma.financeSavingsGoal.findMany({
-        where: { userId, deletedAt: null, isCompleted: false },
-      }),
-    ]);
-
-    let startingBalanceMinor = 0;
-    for (const acc of accounts) {
-      if (
-        acc.type === "BANK" ||
-        acc.type === "CASH" ||
-        acc.type === "SAVINGS" ||
-        acc.type === "WALLET"
-      ) {
-        startingBalanceMinor += Number(acc.currentBalanceMinor);
-      }
-    }
-
-    const eventsByDay = new Map<number, any[]>();
-    for (let d = 1; d <= daysInMonth; d++) eventsByDay.set(d, []);
-
-    // 1. Expand recurring rules
-    for (const rule of rules) {
-      const amt = Number(rule.amountMinor);
-      if (amt <= 0) continue;
-      const isIncome = rule.type === "INCOME";
-      const start = rule.startDate;
-      const end = rule.endDate;
-      const freq = (rule.frequency || "MONTHLY").toUpperCase();
-      const interval = Math.max(1, rule.interval || 1);
-
-      for (let d = 1; d <= daysInMonth; d++) {
-        const dt = new Date(Date.UTC(targetYear, targetMonth - 1, d));
-        if (
-          dt <
-          new Date(
-            Date.UTC(
-              start.getUTCFullYear(),
-              start.getUTCMonth(),
-              start.getUTCDate(),
-            ),
-          )
-        )
-          continue;
-        if (end && dt > end) continue;
-
-        let matches = false;
-        if (freq === "DAILY") {
-          const diff = Math.round(
-            (dt.getTime() - start.getTime()) / MS_PER_DAY,
-          );
-          if (diff >= 0 && diff % interval === 0) matches = true;
-        } else if (freq === "WEEKLY") {
-          if (dt.getUTCDay() === start.getUTCDay()) {
-            const diffWeeks = Math.round(
-              (dt.getTime() - start.getTime()) / (7 * MS_PER_DAY),
-            );
-            if (diffWeeks >= 0 && diffWeeks % interval === 0) matches = true;
-          }
-        } else if (freq === "MONTHLY") {
-          const targetDay = Math.min(start.getUTCDate(), daysInMonth);
-          if (d === targetDay) {
-            const monthDiff =
-              (targetYear - start.getUTCFullYear()) * 12 +
-              (targetMonth - 1 - start.getUTCMonth());
-            if (monthDiff >= 0 && monthDiff % interval === 0) matches = true;
-          }
-        } else if (freq === "YEARLY") {
-          if (
-            targetMonth - 1 === start.getUTCMonth() &&
-            d === Math.min(start.getUTCDate(), daysInMonth)
-          ) {
-            const yearDiff = targetYear - start.getUTCFullYear();
-            if (yearDiff >= 0 && yearDiff % interval === 0) matches = true;
-          }
-        }
-
-        if (matches) {
-          eventsByDay.get(d)!.push({
-            id: `rule_${rule.id}_${d}`,
-            title: rule.title,
-            date: dt.toISOString(),
-            amountMinor: amt,
-            isIncoming: isIncome,
-            type: isIncome ? "payday" : "bill",
-            subtitle: isIncome ? "Scheduled Payday / Inflow" : "Recurring Bill",
-          });
-        }
-      }
-    }
-
-    // 2. Expand loans
-    for (const loan of loans) {
-      if (!loan.dueDate) continue;
-      const due = loan.dueDate;
-      if (
-        due.getUTCFullYear() === targetYear &&
-        due.getUTCMonth() === targetMonth - 1
-      ) {
-        const d = due.getUTCDate();
-        const isLent = loan.type === "LENT";
-        const rem = Math.max(0, Number(loan.remainingAmountMinor));
-        if (rem > 0) {
-          eventsByDay.get(d)?.push({
-            id: `loan_${loan.id}_${d}`,
-            title: isLent
-              ? `Repayment from ${loan.counterpartyName}`
-              : `Loan Due to ${loan.counterpartyName}`,
-            date: due.toISOString(),
-            amountMinor: rem,
-            isIncoming: isLent,
-            type: isLent ? "loanReceivable" : "loanRepayment",
-            subtitle: isLent
-              ? "Expected Loan Collection"
-              : "Loan Repayment Due",
-          });
-        }
-      }
-    }
-
-    // 3. Expand savings goals
-    for (const goal of goals) {
-      if (!goal.targetDate) continue;
-      const target = goal.targetDate;
-      if (
-        target.getUTCFullYear() === targetYear &&
-        target.getUTCMonth() === targetMonth - 1
-      ) {
-        const d = target.getUTCDate();
-        const rem = Math.max(
-          0,
-          Number(goal.targetAmountMinor) - Number(goal.currentAmountMinor),
-        );
-        if (rem > 0) {
-          eventsByDay.get(d)?.push({
-            id: `goal_${goal.id}_${d}`,
-            title: `Goal Target: ${goal.name}`,
-            date: target.toISOString(),
-            amountMinor: rem,
-            isIncoming: false,
-            type: "savingsContribution",
-            subtitle: "Target Goal Date",
-          });
-        }
-      }
-    }
-
-    let currentBalance = startingBalanceMinor;
-    let totalInflow = 0;
-    let totalOutflow = 0;
-    let lowestBalance = startingBalanceMinor;
-    let lowestBalanceDay = 1;
-    const days: any[] = [];
-    const lowBalanceThreshold = 500000; // 5,000 INR
-
-    for (let d = 1; d <= daysInMonth; d++) {
-      const dayEvents = eventsByDay.get(d) ?? [];
-      let dayInflow = 0;
-      let dayOutflow = 0;
-      for (const ev of dayEvents) {
-        if (ev.isIncoming) dayInflow += ev.amountMinor;
-        else dayOutflow += ev.amountMinor;
-      }
-      totalInflow += dayInflow;
-      totalOutflow += dayOutflow;
-      currentBalance = currentBalance + dayInflow - dayOutflow;
-
-      if (currentBalance < lowestBalance) {
-        lowestBalance = currentBalance;
-        lowestBalanceDay = d;
-      }
-
-      const isLow = currentBalance < lowBalanceThreshold;
-      days.push({
-        day: d,
-        date: new Date(Date.UTC(targetYear, targetMonth - 1, d)).toISOString(),
-        events: dayEvents,
-        totalInflowMinor: dayInflow,
-        totalOutflowMinor: dayOutflow,
-        projectedBalanceMinor: currentBalance,
-        isLowBalanceWarning: isLow,
-      });
-    }
-
-    return {
-      year: targetYear,
-      month: targetMonth,
-      currency: requested,
-      startingBalanceMinor,
-      projectedEndingBalanceMinor: currentBalance,
-      totalExpectedInflowMinor: totalInflow,
-      totalExpectedOutflowMinor: totalOutflow,
-      lowestBalanceMinor: lowestBalance,
-      lowestBalanceDay,
-      hasLowBalanceWarning: days.some((d) => d.isLowBalanceWarning),
-      days,
     };
   }
 

@@ -1,7 +1,7 @@
 import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { plainToInstance } from "class-transformer";
 import { validate } from "class-validator";
-import { FinanceTransactionType } from "@prisma/client";
+import { FinanceTransactionKind, FinanceTransactionType } from "@prisma/client";
 import {
   AccountsService,
   normaliseCurrency,
@@ -13,6 +13,7 @@ import {
 } from "./transactions/transactions.service";
 import { CreateTransactionDto } from "./transactions/dto/create-transaction.dto";
 import { QueryTransactionsDto } from "./transactions/dto/query-transaction.dto";
+import { EXCLUDE_BALANCE_ADJUSTMENTS } from "./finance.helpers";
 
 const userId = "user-1";
 const otherUserId = "user-2";
@@ -27,6 +28,16 @@ function matchesWhere(row: any, where: any): boolean {
   return Object.entries(where).every(([key, condition]) => {
     if (key === "OR") {
       return (condition as any[]).some((alt) => matchesWhere(row, alt));
+    }
+    if (key === "NOT") {
+      // Mongo's `$not` matches a document that never carried the key at all, and
+      // that is exactly the case that matters: every transaction written before
+      // `transactionKind` exists has no such key, and a money read that asked for
+      // `transactionKind: "NORMAL"` instead would drop all of them out of the
+      // totals. Negating the inner clause reproduces the real behaviour, because
+      // an absent field fails the inner equality and therefore passes.
+      const clauses = Array.isArray(condition) ? condition : [condition];
+      return clauses.every((clause) => !matchesWhere(row, clause));
     }
     const value = row[key];
     if (
@@ -301,6 +312,158 @@ describe("Accounts and transactions integrity", () => {
       expect(normaliseCurrency(undefined)).toBe("INR");
       expect(normaliseCurrency("inr")).toBe("INR");
       expect(normaliseCurrency(" Usd ")).toBe("USD");
+    });
+  });
+
+  describe("balance corrections", () => {
+    /**
+     * The Mongo trap, as a test.
+     *
+     * Every document written before `transactionKind` exists carries no key at
+     * all, and an equality filter does not match an absent key. Had the money
+     * reads asked for `transactionKind: "NORMAL"`, this row would simply vanish
+     * from the totals and every user's history would move on the day the column
+     * ships. The exclusion is therefore always `{ NOT: { transactionKind:
+     * "BALANCE_ADJUSTMENT" } }`.
+     */
+    it("counted a row that has no classification key as the spending it always was", async () => {
+      const store = createStore();
+      seedAccount(store);
+      seedTransaction(store, {
+        type: FinanceTransactionType.EXPENSE,
+        amountMinor: BigInt(250000),
+      });
+      expect(store.state.transactions[0]).not.toHaveProperty("transactionKind");
+
+      const summary = await new TransactionsService(
+        store.client,
+      ).getCashFlowSummary(userId);
+
+      expect(summary.expenseMinor).toBe(250000);
+      expect(summary.netMinor).toBe(-250000);
+    });
+
+    it("excluded a correction from the income total while still moving the balance", async () => {
+      const store = createStore();
+      const account = seedAccount(store);
+      const transactions = new TransactionsService(store.client);
+
+      await transactions.createTransaction(userId, {
+        accountId: account.id,
+        type: FinanceTransactionType.INCOME,
+        amountMinor: 1000000,
+        title: "October salary",
+        transactionDate: "2026-10-01T09:00:00.000Z",
+      });
+      // What the app's Reconcile action writes: the direction the balance moved,
+      // plus the classification that says it was not earnings.
+      await transactions.createTransaction(userId, {
+        accountId: account.id,
+        type: FinanceTransactionType.INCOME,
+        amountMinor: 250000,
+        title: "Reconciled with the bank",
+        transactionDate: "2026-10-05T09:00:00.000Z",
+        transactionKind: FinanceTransactionKind.BALANCE_ADJUSTMENT,
+      });
+
+      // Both rows are statements about the account, so the balance carries both.
+      expect(store.state.accounts[0].currentBalanceMinor).toBe(BigInt(1250000));
+      // Only one of them is a statement about cash flow.
+      const summary = await transactions.getCashFlowSummary(userId);
+      expect(summary.incomeMinor).toBe(1000000);
+      expect(summary.netMinor).toBe(1000000);
+    });
+
+    it("excluded a correction from spending, and the ordinary row beside it stayed", async () => {
+      const store = createStore();
+      const account = seedAccount(store);
+      const transactions = new TransactionsService(store.client);
+
+      await transactions.createTransaction(userId, {
+        accountId: account.id,
+        type: FinanceTransactionType.EXPENSE,
+        amountMinor: 400000,
+        title: "Groceries",
+        transactionDate: "2026-10-01T09:00:00.000Z",
+      });
+      await transactions.createTransaction(userId, {
+        accountId: account.id,
+        type: FinanceTransactionType.EXPENSE,
+        amountMinor: 150000,
+        title: "Card was charged twice",
+        transactionDate: "2026-10-02T09:00:00.000Z",
+        transactionKind: FinanceTransactionKind.BALANCE_ADJUSTMENT,
+      });
+
+      expect(store.state.accounts[0].currentBalanceMinor).toBe(BigInt(-550000));
+      const summary = await transactions.getCashFlowSummary(userId);
+      expect(summary.expenseMinor).toBe(400000);
+    });
+
+    it("spoke the exclusion as a negative clause for every money read at once", () => {
+      // The one shape all of them share: `src/finance/finance.helpers.ts` holds it
+      // so a summary, a category report, a budget cap and a health check cannot
+      // each re-invent the positive form that drops legacy rows.
+      expect(EXCLUDE_BALANCE_ADJUSTMENTS).toEqual({
+        NOT: { transactionKind: "BALANCE_ADJUSTMENT" },
+      });
+    });
+
+    it("carried the classification and its reversal link into the change a pull replays", async () => {
+      const store = createStore();
+      const account = seedAccount(store);
+      const transactions = new TransactionsService(store.client);
+
+      const salary = await transactions.createTransaction(userId, {
+        accountId: account.id,
+        type: FinanceTransactionType.INCOME,
+        amountMinor: 1000000,
+        title: "October salary",
+        transactionDate: "2026-10-01T09:00:00.000Z",
+      });
+      await transactions.createTransaction(userId, {
+        accountId: account.id,
+        type: FinanceTransactionType.INCOME,
+        amountMinor: 250000,
+        title: "Reconciled with the bank",
+        transactionDate: "2026-10-05T09:00:00.000Z",
+        transactionKind: FinanceTransactionKind.BALANCE_ADJUSTMENT,
+        reversalOfTransactionId: null,
+      });
+      // The correcting correction: it reverses the adjustment above, and the id is
+      // linking for the client's display only.
+      await transactions.createTransaction(userId, {
+        accountId: account.id,
+        type: FinanceTransactionType.EXPENSE,
+        amountMinor: 250000,
+        title: "Undo the reconciliation",
+        transactionDate: "2026-10-06T09:00:00.000Z",
+        transactionKind: FinanceTransactionKind.BALANCE_ADJUSTMENT,
+        reversalOfTransactionId: store.state.transactions[1].id,
+      });
+
+      const logged = store.state.changes.filter(
+        (change) => change.entityType === "finance_transaction",
+      );
+      expect(logged).toHaveLength(3);
+      // An ordinary row answers `NORMAL` rather than staying quiet about it, and
+      // still names the reversal it does not have, so a device reads a complete
+      // document either way.
+      expect(logged[0].payload).toMatchObject({
+        transactionKind: "NORMAL",
+        reversalOfTransactionId: null,
+      });
+      expect(logged[1].payload).toMatchObject({
+        type: "INCOME",
+        transactionKind: "BALANCE_ADJUSTMENT",
+        reversalOfTransactionId: null,
+      });
+      expect(logged[2].payload).toMatchObject({
+        type: "EXPENSE",
+        transactionKind: "BALANCE_ADJUSTMENT",
+        reversalOfTransactionId: store.state.transactions[1].id,
+      });
+      expect(salary.transactionKind).toBe("NORMAL");
     });
   });
 

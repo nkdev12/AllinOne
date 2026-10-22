@@ -15,7 +15,7 @@ import {
   MaxLength,
   Min,
 } from "class-validator";
-import { FinanceTransactionType } from "@prisma/client";
+import { FinanceTransactionKind, FinanceTransactionType } from "@prisma/client";
 
 export class CreateTransactionDto {
   @ApiProperty({ description: "Source account UUID" })
@@ -38,6 +38,16 @@ export class CreateTransactionDto {
   @ApiProperty({ enum: FinanceTransactionType })
   @IsEnum(FinanceTransactionType)
   type!: FinanceTransactionType;
+
+  @ApiPropertyOptional({
+    enum: FinanceTransactionKind,
+    default: FinanceTransactionKind.NORMAL,
+    description:
+      "Whether this row is a cash-flow event. Orthogonal to `type`, which stays the direction the money moved: a balance correction from the Reconcile action is `type: INCOME|EXPENSE` plus `transactionKind: BALANCE_ADJUSTMENT`, so it moves the account balance without counting as income or spending. Omit it for an ordinary transaction.",
+  })
+  @IsOptional()
+  @IsEnum(FinanceTransactionKind)
+  transactionKind?: FinanceTransactionKind;
 
   @ApiProperty({
     example: 50000,
@@ -106,4 +116,24 @@ export class CreateTransactionDto {
   @IsOptional()
   @IsBoolean()
   isExcludedFromBudget?: boolean;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      "For an adjustment row, the id of the adjustment this one reverses. Linking for the client's display only — no balance logic reads it, and nothing here insists the id resolves, so a row that points at a deleted or not-yet-pulled adjustment still saves. Send `null` to clear it.",
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  reversalOfTransactionId?: string | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      "Relational link to an associated loan (e.g. for principal repayments).",
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  loanId?: string | null;
 }

@@ -6,7 +6,6 @@ import { allocatePercentages, formatMinorUnits } from "./analytics.service";
 import {
   CashFlowQueryDto,
   ExportTransactionsQueryDto,
-  FinancialCalendarQueryDto,
   HealthCheckQueryDto,
   SpendingByCategoryQueryDto,
 } from "./dto/analytics-query.dto";
@@ -37,7 +36,26 @@ function tx(overrides: Record<string, any>) {
 }
 
 function prismaWith(transactions: any[]) {
-  const findMany = jest.fn().mockResolvedValue(transactions);
+  const findMany = jest.fn().mockImplementation(({ where }: { where: any }) =>
+    // Only the `NOT` clause is modelled, and it is modelled the way Mongo
+    // answers `$not`: a document that never carried the key satisfies it, so a
+    // row written before `transactionKind` existed stays in every report. The
+    // other keys this fixture has always ignored (`currency`, `type`, the date
+    // range) stay ignored — modelling them would change what the older cases
+    // below feed the service.
+    Promise.resolve(
+      where?.NOT
+        ? transactions.filter((row) => {
+            const clauses = Array.isArray(where.NOT) ? where.NOT : [where.NOT];
+            return clauses.every((clause: any) =>
+              Object.entries(clause).every(
+                ([key, expected]) => row[key] !== expected,
+              ),
+            );
+          })
+        : transactions,
+    ),
+  );
   return {
     financeTransaction: { findMany },
     financeCategory: {
@@ -363,15 +381,6 @@ describe("Analytics integrity", () => {
       await expect(
         pipe.transform({ currency: "inr" }, context(HealthCheckQueryDto)),
       ).resolves.toMatchObject({ currency: "inr" });
-      await expect(
-        pipe.transform(
-          { year: "2026", month: "10", currency: "INR" },
-          context(FinancialCalendarQueryDto),
-        ),
-      ).resolves.toMatchObject({ year: 2026, month: 10, currency: "INR" });
-      await expect(
-        pipe.transform({ month: "13" }, context(FinancialCalendarQueryDto)),
-      ).rejects.toThrow(BadRequestException);
     });
   });
 
@@ -410,55 +419,137 @@ describe("Analytics integrity", () => {
     });
   });
 
-  describe("financial calendar", () => {
-    it("builds calendar with daily running balance and scheduled events", async () => {
-      const { service: analytics, db } = service([]);
+  describe("balance corrections", () => {
+    /**
+     * A Reconcile correction is `type: INCOME|EXPENSE` plus
+     * `transactionKind: BALANCE_ADJUSTMENT`. It belongs to the balance, which
+     * `currentBalanceMinor` already carries, and not to cash flow, which is what
+     * every report below adds up.
+     */
+    it("kept a correction out of the category breakdown", async () => {
+      const { service: analytics } = service([
+        tx({ id: "spent", amountMinor: 4000n, categoryId: "cat-a" }),
+        tx({
+          id: "correction",
+          amountMinor: 6000n,
+          categoryId: "cat-a",
+          transactionKind: "BALANCE_ADJUSTMENT",
+        }),
+      ]);
+
+      const report = await analytics.getSpendingByCategory(USER);
+
+      expect(report.totalSpendingMinor).toBe(4000);
+      expect(report.categories).toHaveLength(1);
+      expect(report.categories[0].transactionCount).toBe(1);
+    });
+
+    it("kept a row with no classification key in the breakdown it always counted in", async () => {
+      // The document shape of every expense written before the column existed.
+      const legacy = tx({ id: "legacy", amountMinor: 4000n, categoryId: "cat-a" });
+      expect(legacy).not.toHaveProperty("transactionKind");
+      const { service: analytics } = service([legacy]);
+
+      const report = await analytics.getSpendingByCategory(USER);
+
+      expect(report.totalSpendingMinor).toBe(4000);
+    });
+
+    it("kept a correction out of both months and totals of the cash-flow report", async () => {
+      const { service: analytics } = service([
+        tx({
+          id: "salary",
+          type: FinanceTransactionType.INCOME,
+          amountMinor: 100000n,
+          transactionDate: new Date("2026-03-05T04:00:00.000Z"),
+        }),
+        tx({
+          id: "groceries",
+          type: FinanceTransactionType.EXPENSE,
+          amountMinor: 30000n,
+          transactionDate: new Date("2026-03-06T04:00:00.000Z"),
+        }),
+        tx({
+          id: "correction",
+          type: FinanceTransactionType.INCOME,
+          amountMinor: 50000n,
+          transactionKind: "BALANCE_ADJUSTMENT",
+          transactionDate: new Date("2026-03-07T04:00:00.000Z"),
+        }),
+      ]);
+
+      const report = await analytics.getCashFlow(USER, 2026, "INR");
+
+      expect(report.totalIncomeMinor).toBe(100000);
+      expect(report.totalExpenseMinor).toBe(30000);
+      expect(report.totalNetSavingsMinor).toBe(70000);
+      const march = report.months[2];
+      expect(march.incomeMinor).toBe(100000);
+      expect(march.expenseMinor).toBe(30000);
+    });
+
+    it("kept a keyless row's income in the twelve-month report", async () => {
+      const { service: analytics } = service([
+        tx({
+          id: "legacy-income",
+          type: FinanceTransactionType.INCOME,
+          amountMinor: 100000n,
+          transactionDate: new Date("2026-03-05T04:00:00.000Z"),
+        }),
+      ]);
+
+      const report = await analytics.getCashFlow(USER, 2026, "INR");
+
+      expect(report.totalIncomeMinor).toBe(100000);
+    });
+
+    it("kept a correction out of the savings rate the health check grades on", async () => {
+      const { service: analytics, db } = service([
+        tx({
+          type: FinanceTransactionType.INCOME,
+          amountMinor: 10000000n,
+          transactionDate: new Date(),
+        }),
+        tx({
+          type: FinanceTransactionType.EXPENSE,
+          amountMinor: 3000000n,
+          transactionDate: new Date(),
+        }),
+        tx({
+          type: FinanceTransactionType.INCOME,
+          amountMinor: 20000000n,
+          transactionKind: "BALANCE_ADJUSTMENT",
+          transactionDate: new Date(),
+        }),
+      ]);
+
       db.financeAccount.findMany = jest.fn().mockResolvedValue([
         {
           id: "acc-1",
           type: "BANK",
-          currentBalanceMinor: 10000000n, // 100,000 INR
+          currentBalanceMinor: 30000000n,
           currency: "INR",
         },
       ]);
-      db.financeRecurringRule.findMany = jest.fn().mockResolvedValue([
-        {
-          id: "rule-salary",
-          type: "INCOME",
-          amountMinor: 8000000n,
-          title: "Salary",
-          frequency: "MONTHLY",
-          interval: 1,
-          startDate: new Date("2026-01-01T00:00:00.000Z"),
-          endDate: null,
-        },
-        {
-          id: "rule-rent",
-          type: "EXPENSE",
-          amountMinor: 2500000n,
-          title: "Rent",
-          frequency: "MONTHLY",
-          interval: 1,
-          startDate: new Date("2026-01-05T00:00:00.000Z"),
-          endDate: null,
-        },
-      ]);
 
-      const calendar = await analytics.getFinancialCalendar(
-        USER,
-        2026,
-        10,
-        "INR",
-      );
-      expect(calendar.year).toBe(2026);
-      expect(calendar.month).toBe(10);
-      expect(calendar.days.length).toBe(31);
-      expect(calendar.totalExpectedInflowMinor).toBe(8000000);
-      expect(calendar.totalExpectedOutflowMinor).toBe(2500000);
-      expect(calendar.startingBalanceMinor).toBe(10000000);
-      expect(calendar.projectedEndingBalanceMinor).toBe(
-        10000000 + 8000000 - 2500000,
-      );
+      const result = await analytics.getFinancialHealthCheck(USER, "INR");
+
+      // 100,000 in, 30,000 out: the 200,000 reconciliation neither earns nor
+      // spends, so the savings rate stays the 70% the real rows say.
+      expect(result.indicators.savingsRate.valueDisplay).toBe("70%");
+    });
+
+    it("asked every report with a negative clause rather than a NORMAL match", async () => {
+      const { service: analytics, db } = service([]);
+
+      await analytics.getSpendingByCategory(USER);
+      await analytics.getCashFlow(USER, 2026);
+      await analytics.getFinancialHealthCheck(USER);
+
+      for (const [args] of db.financeTransaction.findMany.mock.calls) {
+        expect(args.where.NOT).toEqual({ transactionKind: "BALANCE_ADJUSTMENT" });
+        expect(args.where).not.toHaveProperty("transactionKind");
+      }
     });
   });
 

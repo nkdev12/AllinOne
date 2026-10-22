@@ -755,6 +755,110 @@ describe("change-payload validator", () => {
       expect(fields).toContain("changes[1].payload.type");
       expect(fields).toContain("changes[1].payload.amountMinor");
     });
+
+    describe("the cash-flow classification", () => {
+      // The whole document a current client sends for an ordinary expense, so the
+      // two keys below are the only thing each case varies.
+      const bill = {
+        accountId: "acc-1",
+        type: "EXPENSE",
+        amountMinor: 2500,
+        currency: "INR",
+        title: "Lunch",
+        transactionDate: "2026-10-10T12:00:00.000Z",
+      };
+
+      const fieldsOf = (payload: Record<string, unknown>) =>
+        collectChangeViolations([
+          {
+            entityType: "finance_transaction",
+            operation: ChangeOperation.CREATE,
+            payload,
+          },
+        ]).map((violation) => violation.field);
+
+      it("accepted the classification and the reversal link a reconcile push sent", () => {
+        expect(() =>
+          assertPushableChanges([
+            {
+              entityType: "finance_transaction",
+              operation: ChangeOperation.CREATE,
+              payload: {
+                ...bill,
+                transactionKind: "BALANCE_ADJUSTMENT",
+                reversalOfTransactionId: "txn-22222222-2222-4222-8222-222222222222",
+              },
+            },
+            {
+              entityType: "finance_transaction",
+              operation: ChangeOperation.UPDATE,
+              payload: {
+                ...bill,
+                transactionKind: "NORMAL",
+                reversalOfTransactionId: null,
+              },
+            },
+          ]),
+        ).not.toThrow();
+      });
+
+      it("still accepted a push from a client that had never heard of them", () => {
+        // Optional on purpose. A required key would reject every device and every
+        // backup written before the column existed, and the whole log of one user
+        // would stop replaying over a field they have no opinion about.
+        expect(fieldsOf(bill)).toEqual([]);
+        expect(fieldsOf({ ...bill, id: "txn-1", version: 1 })).toEqual([]);
+      });
+
+      it("refused a classification that was neither of the two", () => {
+        expect(
+          fieldsOf({ ...bill, transactionKind: "ADJUSTMENT" }),
+        ).toEqual(["changes[0].payload.transactionKind"]);
+        expect(fieldsOf({ ...bill, transactionKind: null })).toEqual([
+          "changes[0].payload.transactionKind",
+        ]);
+        expect(
+          fieldsOf({ ...bill, transactionKind: "balance_adjustment" }),
+        ).toEqual(["changes[0].payload.transactionKind"]);
+      });
+
+      it("said what the classification had to be, in the message a device read", () => {
+        const [violation] = collectChangeViolations([
+          {
+            entityType: "finance_transaction",
+            operation: ChangeOperation.CREATE,
+            payload: { ...bill, transactionKind: "RECONCILE" },
+          },
+        ]);
+
+        expect(violation.messages[0]).toContain(
+          '"NORMAL" or "BALANCE_ADJUSTMENT"',
+        );
+      });
+
+      it("refused a reversal link that was neither an id nor null", () => {
+        expect(
+          fieldsOf({ ...bill, reversalOfTransactionId: 42 }),
+        ).toEqual(["changes[0].payload.reversalOfTransactionId"]);
+        expect(
+          fieldsOf({ ...bill, reversalOfTransactionId: { id: "txn-1" } }),
+        ).toEqual(["changes[0].payload.reversalOfTransactionId"]);
+      });
+
+      it("kept the classification distinct from the money direction", () => {
+        // Both keys at once is the shape the app writes, and `type` stays required
+        // while `transactionKind` stays optional: the direction a row moves money
+        // in is a fact the row cannot do without, the classification is a fact it
+        // can be older than.
+        expect(fieldsOf({ ...bill, transactionKind: "BALANCE_ADJUSTMENT" })).toEqual(
+          [],
+        );
+        const { type: _omitted, ...withoutType } = bill;
+        expect(fieldsOf({ ...withoutType, transactionKind: "NORMAL" })).toEqual([
+          "changes[0].payload.type",
+        ]);
+      });
+    });
   });
 
   describe("blob size", () => {

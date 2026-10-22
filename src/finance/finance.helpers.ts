@@ -1,4 +1,33 @@
 import { BadRequestException } from "@nestjs/common";
+import { FinanceTransactionKind, Prisma } from "@prisma/client";
+
+/**
+ * The `where` fragment that keeps a balance correction out of an income or
+ * spending total.
+ *
+ * Spread it into every money read that adds cash flow up, and only ever as it is
+ * written here — a *negative* clause. The MongoDB connector does not match an
+ * absent key with an equality filter, so `{ transactionKind: "NORMAL" }` silently
+ * drops every document written before the column existed and moves every user's
+ * historical figures. `{ NOT: { transactionKind: "BALANCE_ADJUSTMENT" } }` is the
+ * `$not` form, which a missing key satisfies, so a legacy row keeps counting as
+ * the ordinary income or expense it always was. (`deletedAt: null` needs no such
+ * care: Mongo null-matches an absent key.)
+ *
+ * An adjustment still moves the account balance — `type` is the money direction
+ * and is untouched — so this clause belongs on cash-flow aggregation only, never
+ * on a ledger listing or a balance write.
+ */
+export const EXCLUDE_BALANCE_ADJUSTMENTS = {
+  NOT: { transactionKind: FinanceTransactionKind.BALANCE_ADJUSTMENT },
+} as const satisfies Prisma.FinanceTransactionWhereInput;
+
+export const EXCLUDE_NON_CASH_FLOW = {
+  NOT: [
+    { transactionKind: FinanceTransactionKind.BALANCE_ADJUSTMENT },
+    { loanId: { not: null } },
+  ],
+} as const satisfies Prisma.FinanceTransactionWhereInput;
 
 /**
  * `BigInt()` on a non-integer throws a `RangeError` and on `Infinity`/`NaN` blows

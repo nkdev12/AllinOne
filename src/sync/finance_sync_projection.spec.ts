@@ -232,4 +232,205 @@ describe("Finance Sync Projection", () => {
 
     expect(tx.financeTransaction.update).not.toHaveBeenCalled();
   });
+
+  describe("the cash-flow classification on a pushed transaction", () => {
+    /** A row that already exists and holds version 1, so version 2 wins the tie. */
+    function existingRow(overrides: Record<string, any> = {}) {
+      return delegates(txId, {
+        findUnique: jest.fn().mockResolvedValue({
+          id: txId,
+          userId,
+          version: 1,
+          deletedAt: null,
+          ...overrides,
+        }),
+      });
+    }
+
+    const bill = {
+      accountId,
+      type: "EXPENSE",
+      amountMinor: 2500,
+      currency: "INR",
+      title: "Lunch",
+      transactionDate: "2026-10-10T12:00:00.000Z",
+    };
+
+    it("minted a row with the classification and the reversal link it was pushed", async () => {
+      const tx = fakeFinanceTx();
+
+      await projectAcceptedChange(
+        tx,
+        userId,
+        change({
+          payload: {
+            ...bill,
+            transactionKind: "BALANCE_ADJUSTMENT",
+            reversalOfTransactionId:
+              "txn-33333333-3333-4333-8333-333333333333",
+          },
+        }),
+      );
+
+      expect(tx.financeTransaction.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          id: txId,
+          type: "EXPENSE",
+          // Orthogonal to `type`, exactly as the client sends it: the direction
+          // the money moved and the reason it moved.
+          transactionKind: "BALANCE_ADJUSTMENT",
+          reversalOfTransactionId: "txn-33333333-3333-4333-8333-333333333333",
+        }),
+      });
+    });
+
+    it("minted a NORMAL row from a push that predates the classification", async () => {
+      const tx = fakeFinanceTx();
+
+      await projectAcceptedChange(tx, userId, change({ payload: bill }));
+
+      expect(tx.financeTransaction.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ transactionKind: "NORMAL" }),
+      });
+      // And no invented link: the column is null, not absent-with-a-guess.
+      expect(tx.financeTransaction.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ reversalOfTransactionId: null }),
+      });
+    });
+
+    it("left both new columns alone on an update whose payload never mentioned them", async () => {
+      // The whole point of gating on `!== undefined`, as `isExcludedFromBudget`
+      // is: a phone on last month's build pushes the six keys it knows, and a
+      // reconciliation made on another device would otherwise be erased back to
+      // ordinary income on this one.
+      const tx = fakeFinanceTx({ financeTransaction: existingRow() });
+
+      await projectAcceptedChange(
+        tx,
+        userId,
+        change({ operation: ChangeOperation.UPDATE, version: 2, payload: bill }),
+      );
+
+      const data = tx.financeTransaction.update.mock.calls[0][0].data;
+      expect(data).not.toHaveProperty("transactionKind");
+      expect(data).not.toHaveProperty("reversalOfTransactionId");
+      // The edit it did speak about still lands.
+      expect(data).toMatchObject({ title: "Lunch", version: 2 });
+    });
+
+    it("wrote the classification on the update branch when the payload carried it", async () => {
+      const tx = fakeFinanceTx({ financeTransaction: existingRow() });
+
+      await projectAcceptedChange(
+        tx,
+        userId,
+        change({
+          operation: ChangeOperation.UPDATE,
+          version: 2,
+          payload: {
+            ...bill,
+            transactionKind: "BALANCE_ADJUSTMENT",
+            reversalOfTransactionId:
+              "txn-33333333-3333-4333-8333-333333333333",
+          },
+        }),
+      );
+
+      expect(tx.financeTransaction.update).toHaveBeenCalledWith({
+        where: { id: txId },
+        data: expect.objectContaining({
+          transactionKind: "BALANCE_ADJUSTMENT",
+          reversalOfTransactionId: "txn-33333333-3333-4333-8333-333333333333",
+        }),
+      });
+    });
+
+    it("cleared a reversal link only for a payload that said null", async () => {
+      const silent = fakeFinanceTx({ financeTransaction: existingRow() });
+      await projectAcceptedChange(
+        silent,
+        userId,
+        change({
+          operation: ChangeOperation.UPDATE,
+          version: 2,
+          payload: { ...bill, transactionKind: "NORMAL" },
+        }),
+      );
+      expect(silent.financeTransaction.update.mock.calls[0][0].data).not.toHaveProperty(
+        "reversalOfTransactionId",
+      );
+
+      const explicit = fakeFinanceTx({ financeTransaction: existingRow() });
+      await projectAcceptedChange(
+        explicit,
+        userId,
+        change({
+          operation: ChangeOperation.UPDATE,
+          version: 2,
+          payload: { ...bill, reversalOfTransactionId: null },
+        }),
+      );
+      expect(explicit.financeTransaction.update).toHaveBeenCalledWith({
+        where: { id: txId },
+        data: expect.objectContaining({ reversalOfTransactionId: null }),
+      });
+    });
+
+    it("wrote no classification at all for a value the column cannot hold", async () => {
+      // `changePayloadRejection` refuses this push before the projection sees it,
+      // so the only way here is another entry point — and an unreadable value
+      // would strand the row outside the `NOT` clause the money reads use.
+      const tx = fakeFinanceTx({ financeTransaction: existingRow() });
+
+      await projectAcceptedChange(
+        tx,
+        userId,
+        change({
+          operation: ChangeOperation.UPDATE,
+          version: 2,
+          payload: { ...bill, transactionKind: "RECONCILE" },
+        }),
+      );
+
+      const data = tx.financeTransaction.update.mock.calls[0][0].data;
+      expect(data).not.toHaveProperty("transactionKind");
+    });
+
+    it("degraded a duplicate-key create into the same silent update", async () => {
+      // The race path shares `updateData` with the plain update, so a phone and
+      // the worker minting one row cannot disagree about what an omitted key
+      // means.
+      const tx = fakeFinanceTx({
+        financeTransaction: delegates(txId, {
+          findUnique: jest
+            .fn()
+            .mockResolvedValueOnce(null)
+            .mockResolvedValueOnce({ userId, deletedAt: null, version: 1 }),
+          create: jest.fn().mockRejectedValueOnce(
+            Object.assign(
+              new Error("Unique constraint failed on the fields: (`_id`)"),
+              { code: "P2002", meta: { target: "_id" } },
+            ),
+          ),
+        }),
+      });
+
+      await projectAcceptedChange(
+        tx,
+        userId,
+        change({
+          operation: ChangeOperation.CREATE,
+          payload: { ...bill, transactionKind: "BALANCE_ADJUSTMENT" },
+        }),
+      );
+
+      expect(tx.financeTransaction.update).toHaveBeenCalledWith({
+        where: { id: txId },
+        data: expect.objectContaining({ transactionKind: "BALANCE_ADJUSTMENT" }),
+      });
+      expect(
+        tx.financeTransaction.update.mock.calls[0][0].data,
+      ).not.toHaveProperty("reversalOfTransactionId");
+    });
+  });
 });

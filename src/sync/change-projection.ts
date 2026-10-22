@@ -20,6 +20,7 @@ import {
 import {
   ChangeOperation,
   EventStatus,
+  FinanceTransactionKind,
   Prisma,
   TaskPriority,
   TaskStatus,
@@ -505,6 +506,29 @@ function noteColumns(payload: Record<string, any>): NoteColumns {
 
 function isTextOrNull(value: unknown): value is string | null {
   return value === null || typeof value === "string";
+}
+
+/**
+ * A payload's `transactionKind` as a column value, or `undefined` for "this
+ * change says nothing about the classification".
+ *
+ * The same shape as the `priority`/`status` gates in `taskColumns`: judged
+ * against the schema's own enum members rather than a hand-written list, so a
+ * value outside them is silence instead of a write. `changePayloadRejection`
+ * already refuses one on the push path, so an unreadable value reaching here
+ * means a different entry point — and writing `"GARBAGE"` into a Mongo enum
+ * column would strand the row outside every filter that reads it, including the
+ * `NOT` clause that keeps balance adjustments out of the money totals.
+ */
+function transactionKindColumn(
+  value: unknown,
+): FinanceTransactionKind | undefined {
+  return typeof value === "string" &&
+    Object.values(FinanceTransactionKind).includes(
+      value as FinanceTransactionKind,
+    )
+    ? (value as FinanceTransactionKind)
+    : undefined;
 }
 
 /**
@@ -1040,6 +1064,44 @@ function referenceIsUnusable(
   return row.userId !== null && row.userId !== userId;
 }
 
+/**
+ * Whether a failed create means "this row already exists".
+ *
+ * `FinanceTransaction.id` is a client-chosen `_id` on a MongoDB collection, and
+ * since the recurring bill is minted from a deterministic UUIDv5
+ * (`recurringTransactionId` in `src/finance/recurring/recurring.service.ts`) two
+ * writers can aim at the same `_id` in the same instant: the worker and the
+ * phone for one occurrence, or two devices that both generated the same bill
+ * offline and pushed it in overlapping requests. Between this projection's
+ * `findUnique` and its `create` that race turns into a unique-index violation,
+ * which Prisma on MongoDB reports as `P2002` for an interactive transaction and
+ * as a raw `E11000` further down the stack.
+ *
+ * Recognising it is load-bearing in a way it is not for the REST writers. A push
+ * appends the `Change` row and projects the domain row inside one `$transaction`
+ * (`sync.service.ts:253-273`), and only an `HttpException` coming out of the
+ * projection is read as a per-change refusal (`rejectionFromProjection`);
+ * anything else stays fatal to the whole batch, on the reasoning that a database
+ * outage must not be reported to the device as a decision about its edits. A
+ * duplicate key would be caught by that same net and crash a request whose only
+ * sin was two devices agreeing on an id. Same recognition as `isAlreadyMintedError`
+ * and `isAlreadySeeded`, applied where the caller cannot afford to stop.
+ */
+function isDuplicateRowIdError(error: unknown): boolean {
+  const code = (error as { code?: string })?.code ?? "";
+  const message = (error as { message?: string })?.message ?? "";
+  const target = JSON.stringify(
+    (error as { meta?: { target?: unknown } })?.meta?.target,
+  );
+  return (
+    code === "P2002" ||
+    code === "E11000" ||
+    message.includes("E11000") ||
+    message.includes("DuplicateKey") ||
+    target?.includes("_id") === true
+  );
+}
+
 async function projectFinanceTransactionChange(
   tx: ChangeProjectionClient,
   userId: string,
@@ -1115,96 +1177,184 @@ async function projectFinanceTransactionChange(
   // it sits, so an unusable one costs the label and not the row.
   const categoryIsUnusable = referenceIsUnusable(categoryRow, userId);
 
+  // What this payload offers a row that already exists, built once up here
+  // because two paths take it: the row a `findUnique` missed can still be there
+  // by the time the `create` runs (see `isDuplicateRowIdError`), and the answer
+  // to "somebody else billed this exact occurrence" is the answer a known row
+  // gets.
+  //
+  // A key the payload does not carry stays out of the write rather than being
+  // blanked: a device on an older build pushes `{accountId, type, amountMinor,
+  // currency, title, transactionDate}` alone, and writing `tags: []` for that
+  // change would clear labels the change never spoke about. `notes`, `tags`,
+  // `categoryId`, `toAccountId`, `receiptAttachmentId`,
+  // `isExcludedFromBudget`, `transactionKind` and `reversalOfTransactionId` are
+  // all gated on `!== undefined` for that reason, so a payload that does say
+  // `null` clears the column and one that stays silent does not. Silencing
+  // `transactionKind` is what keeps a legacy row ordinary cash flow: the write
+  // that says nothing leaves the key absent, and the money reads' `NOT` clause
+  // counts an absent key as income or spending.
+  const kindForUpdate = transactionKindColumn(payload.transactionKind);
+  const updateData = {
+    ...(typeof payload.accountId === "string"
+      ? { accountId: payload.accountId }
+      : {}),
+    ...(payload.toAccountId !== undefined
+      ? {
+          toAccountId: isTextOrNull(payload.toAccountId)
+            ? payload.toAccountId
+            : null,
+        }
+      : {}),
+    ...(payload.categoryId !== undefined
+      ? {
+          categoryId:
+            !categoryIsUnusable && isTextOrNull(payload.categoryId)
+              ? payload.categoryId
+              : null,
+        }
+      : {}),
+    ...(typeof payload.type === "string" ? { type: payload.type as any } : {}),
+    ...(kindForUpdate === undefined ? {} : { transactionKind: kindForUpdate }),
+    ...(payload.amountMinor !== undefined ? { amountMinor } : {}),
+    ...(typeof payload.currency === "string"
+      ? { currency: currencyColumn(payload.currency) }
+      : {}),
+    ...(typeof payload.title === "string" ? { title: payload.title } : {}),
+    ...(payload.notes !== undefined
+      ? { notes: isTextOrNull(payload.notes) ? payload.notes : null }
+      : {}),
+    ...(Array.isArray(payload.tags) ? { tags: payload.tags } : {}),
+    ...(payload.transactionDate ? { transactionDate: txDate } : {}),
+    ...(payload.receiptAttachmentId !== undefined
+      ? {
+          receiptAttachmentId: isTextOrNull(payload.receiptAttachmentId)
+            ? payload.receiptAttachmentId
+            : null,
+        }
+      : {}),
+    ...(payload.isExcludedFromBudget !== undefined
+      ? { isExcludedFromBudget: payload.isExcludedFromBudget }
+      : {}),
+    ...(payload.reversalOfTransactionId !== undefined
+      ? {
+          reversalOfTransactionId: isTextOrNull(payload.reversalOfTransactionId)
+            ? payload.reversalOfTransactionId
+            : null,
+        }
+      : {}),
+    ...(payload.loanId !== undefined
+      ? {
+          loanId: isTextOrNull(payload.loanId)
+            ? payload.loanId
+            : null,
+        }
+      : {}),
+    version: change.version,
+    // An UPDATE or CREATE is a statement that the row lives: the app's own
+    // undelete pushes a whole document rather than a DELETE-shaped one, and a
+    // payload that means "still deleted" arrives as `DELETE` instead.
+    deletedAt: null,
+  };
+
   if (!existing) {
     const createdAt = parsedCreatedAt(payload);
-    await delegate.create({
-      data: {
-        id: change.entityId,
-        userId,
-        accountId: payload.accountId,
-        toAccountId: isTextOrNull(payload.toAccountId)
-          ? payload.toAccountId
-          : null,
-        categoryId:
-          !categoryIsUnusable && isTextOrNull(payload.categoryId)
-            ? payload.categoryId
+    try {
+      await delegate.create({
+        data: {
+          id: change.entityId,
+          userId,
+          accountId: payload.accountId,
+          toAccountId: isTextOrNull(payload.toAccountId)
+            ? payload.toAccountId
             : null,
-        type: payload.type ?? "EXPENSE",
-        amountMinor,
-        currency: currencyColumn(payload.currency),
-        title: payload.title ?? "Transaction",
-        notes: isTextOrNull(payload.notes) ? payload.notes : null,
-        tags: Array.isArray(payload.tags) ? payload.tags : [],
-        transactionDate: txDate,
-        receiptAttachmentId: isTextOrNull(payload.receiptAttachmentId)
-          ? payload.receiptAttachmentId
-          : null,
-        recurringRuleId: isTextOrNull(payload.recurringRuleId)
-          ? payload.recurringRuleId
-          : null,
-        sharedExpenseId: isTextOrNull(payload.sharedExpenseId)
-          ? payload.sharedExpenseId
-          : null,
-        isExcludedFromBudget:
-          typeof payload.isExcludedFromBudget === "boolean"
-            ? payload.isExcludedFromBudget
-            : false,
-        version: change.version,
-        ...(createdAt ? { createdAt } : {}),
-      },
-    });
-    return;
+          categoryId:
+            !categoryIsUnusable && isTextOrNull(payload.categoryId)
+              ? payload.categoryId
+              : null,
+          type: payload.type ?? "EXPENSE",
+          // Stated rather than left to the schema default, exactly as
+          // `isExcludedFromBudget` below is: a row this projection mints from a
+          // payload that predates the classification is ordinary cash flow, and
+          // saying so in the document is what lets a later `NOT` filter read it
+          // without depending on which Prisma version applies the default.
+          transactionKind:
+            transactionKindColumn(payload.transactionKind) ??
+            FinanceTransactionKind.NORMAL,
+          amountMinor,
+          currency: currencyColumn(payload.currency),
+          title: payload.title ?? "Transaction",
+          notes: isTextOrNull(payload.notes) ? payload.notes : null,
+          tags: Array.isArray(payload.tags) ? payload.tags : [],
+          transactionDate: txDate,
+          receiptAttachmentId: isTextOrNull(payload.receiptAttachmentId)
+            ? payload.receiptAttachmentId
+            : null,
+          recurringRuleId: isTextOrNull(payload.recurringRuleId)
+            ? payload.recurringRuleId
+            : null,
+          sharedExpenseId: isTextOrNull(payload.sharedExpenseId)
+            ? payload.sharedExpenseId
+            : null,
+          isExcludedFromBudget:
+            typeof payload.isExcludedFromBudget === "boolean"
+              ? payload.isExcludedFromBudget
+              : false,
+          reversalOfTransactionId: isTextOrNull(payload.reversalOfTransactionId)
+            ? payload.reversalOfTransactionId
+            : null,
+          loanId: isTextOrNull(payload.loanId) ? payload.loanId : null,
+          version: change.version,
+          ...(createdAt ? { createdAt } : {}),
+        },
+      });
+      return;
+    } catch (error) {
+      if (!isDuplicateRowIdError(error)) throw error;
+
+      // Between the `findUnique` above and this `create`, another writer landed
+      // the same `_id` — the worker and a phone both minting one recurring
+      // occurrence, or two devices that generated the same bill offline and
+      // pushed it in overlapping requests. Re-read it and take the update path,
+      // because a collision on a deterministic id is a duplicate of the same
+      // fact and not a corrupted push: the change stays accepted, the batch
+      // stays alive, and the log keeps one row per edit rather than a crash that
+      // would roll back every healthy change queued behind it.
+      //
+      // Anything the re-read cannot explain is still the original error. No row
+      // answering for an id the index just rejected means the database is saying
+      // something other than "already billed", and that stays fatal on purpose.
+      const raced = await delegate.findUnique({
+        where: { id: change.entityId },
+        select: { userId: true, deletedAt: true, version: true },
+      });
+      if (!raced) throw error;
+
+      if (raced.userId !== userId) {
+        logger.warn(
+          `Ignored a ${String(change.operation)} change for finance_transaction ${change.entityId} pushed by ${userId}: the row that holds this id belongs to ${raced.userId}.`,
+        );
+        return;
+      }
+
+      logger.debug(
+        `finance_transaction ${change.entityId} was created while this change was being projected; applied the change as an update instead.`,
+      );
+      if (losesToWhatTheRowHolds(change, raced)) return;
+
+      await delegate.update({
+        where: { id: change.entityId },
+        data: updateData,
+      });
+      return;
+    }
   }
 
   if (losesToWhatTheRowHolds(change, existing)) return;
 
   await delegate.update({
     where: { id: change.entityId },
-    data: {
-      ...(typeof payload.accountId === "string"
-        ? { accountId: payload.accountId }
-        : {}),
-      ...(payload.toAccountId !== undefined
-        ? {
-            toAccountId: isTextOrNull(payload.toAccountId)
-              ? payload.toAccountId
-              : null,
-          }
-        : {}),
-      ...(payload.categoryId !== undefined
-        ? {
-            categoryId:
-              !categoryIsUnusable && isTextOrNull(payload.categoryId)
-                ? payload.categoryId
-                : null,
-          }
-        : {}),
-      ...(typeof payload.type === "string"
-        ? { type: payload.type as any }
-        : {}),
-      ...(payload.amountMinor !== undefined ? { amountMinor } : {}),
-      ...(typeof payload.currency === "string"
-        ? { currency: currencyColumn(payload.currency) }
-        : {}),
-      ...(typeof payload.title === "string" ? { title: payload.title } : {}),
-      ...(payload.notes !== undefined
-        ? { notes: isTextOrNull(payload.notes) ? payload.notes : null }
-        : {}),
-      ...(Array.isArray(payload.tags) ? { tags: payload.tags } : {}),
-      ...(payload.transactionDate ? { transactionDate: txDate } : {}),
-      ...(payload.receiptAttachmentId !== undefined
-        ? {
-            receiptAttachmentId: isTextOrNull(payload.receiptAttachmentId)
-              ? payload.receiptAttachmentId
-              : null,
-          }
-        : {}),
-      ...(payload.isExcludedFromBudget !== undefined
-        ? { isExcludedFromBudget: payload.isExcludedFromBudget }
-        : {}),
-      version: change.version,
-      deletedAt: null,
-    },
+    data: updateData,
   });
 }
 

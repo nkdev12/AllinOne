@@ -99,35 +99,3 @@ export class HealthCheckQueryDto {
   @MaxLength(8)
   currency?: string;
 }
-
-export class FinancialCalendarQueryDto {
-  @ApiPropertyOptional({
-    minimum: 1970,
-    maximum: 2100,
-    description: "Calendar year, defaults to current year.",
-  })
-  @IsOptional()
-  @Transform(({ value }) => (value === "" ? undefined : Number(value)))
-  @IsInt()
-  @Min(1970)
-  @Max(2100)
-  year?: number;
-
-  @ApiPropertyOptional({
-    minimum: 1,
-    maximum: 12,
-    description: "Calendar month (1-12), defaults to current month.",
-  })
-  @IsOptional()
-  @Transform(({ value }) => (value === "" ? undefined : Number(value)))
-  @IsInt()
-  @Min(1)
-  @Max(12)
-  month?: number;
-
-  @ApiPropertyOptional({ description: "ISO 4217 code, defaults to INR." })
-  @IsOptional()
-  @IsString()
-  @MaxLength(8)
-  currency?: string;
-}

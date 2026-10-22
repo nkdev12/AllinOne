@@ -10,6 +10,7 @@ import { CreateBudgetDto } from "./dto/create-budget.dto";
 import { UpdateBudgetDto } from "./dto/update-budget.dto";
 import { appendChange } from "@/sync/change-cursor";
 import {
+  EXCLUDE_BALANCE_ADJUSTMENTS,
   resolveCurrency,
   toDateOrThrow,
   toMinorUnits,
@@ -355,6 +356,12 @@ export class BudgetsService {
             where: {
               account: { userId },
               type: FinanceTransactionType.EXPENSE,
+              // Cap spend on what was actually spent. A balance correction is
+              // `EXPENSE` in direction but is not a purchase, and the clause is a
+              // `NOT` so the rows written before `transactionKind` existed keep
+              // counting — an equality on `"NORMAL"` would drop every one of them
+              // and shrink every budget already on the books.
+              ...EXCLUDE_BALANCE_ADJUSTMENTS,
               isExcludedFromBudget: false,
               currency: { in: currenciesInPlay },
               deletedAt: null,

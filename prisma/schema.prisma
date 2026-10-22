@@ -886,6 +886,16 @@ enum FinanceTransactionType {
   TRANSFER
 }
 
+// Orthogonal to `FinanceTransactionType`: `type` stays the direction the money
+// moved, this says whether the row is a real cash-flow event at all. A balance
+// correction from the app's Reconcile action is `type: INCOME` (or `EXPENSE`)
+// plus `transactionKind: BALANCE_ADJUSTMENT`, so it moves the account balance
+// without being counted as earnings or spending.
+enum FinanceTransactionKind {
+  NORMAL
+  BALANCE_ADJUSTMENT
+}
+
 enum FinanceBudgetPeriod {
   WEEKLY
   MONTHLY
@@ -964,26 +974,39 @@ model FinanceCategory {
 }
 
 model FinanceTransaction {
-  id                   String                 @id @default(uuid()) @map("_id")
-  userId               String
-  accountId            String
-  toAccountId          String?
-  categoryId           String?
-  type                 FinanceTransactionType
-  amountMinor          BigInt
-  currency             String                 @default("INR")
-  title                String
-  notes                String?
-  tags                 String[]               @default([])
-  transactionDate      DateTime
-  receiptAttachmentId  String?
-  recurringRuleId      String?
-  sharedExpenseId      String?
-  isExcludedFromBudget Boolean                @default(false)
-  deletedAt            DateTime?
-  version              Int                    @default(1)
-  createdAt            DateTime               @default(now())
-  updatedAt            DateTime               @updatedAt
+  id                      String                 @id @default(uuid()) @map("_id")
+  userId                  String
+  accountId               String
+  toAccountId             String?
+  categoryId              String?
+  type                    FinanceTransactionType
+  // Whether this row is a cash-flow event at all. `type` stays the direction the
+  // money moved, so the two are orthogonal. Defaults rather than requires: every
+  // document written before this column exists carries no key, and a Mongo
+  // equality filter would then drop all of them out of the totals — which is why
+  // the money reads exclude with `NOT` (see `EXCLUDE_BALANCE_ADJUSTMENTS` in
+  // `src/finance/finance.helpers.ts`) instead of matching `NORMAL` positively.
+  transactionKind         FinanceTransactionKind @default(NORMAL)
+  amountMinor             BigInt
+  currency                String                 @default("INR")
+  title                   String
+  notes                   String?
+  tags                    String[]               @default([])
+  transactionDate         DateTime
+  receiptAttachmentId     String?
+  recurringRuleId         String?
+  sharedExpenseId         String?
+  isExcludedFromBudget    Boolean                @default(false)
+  // The adjustment this row reverses. Presentational linking only — no read path
+  // recomputes a balance from it — and null is a real answer rather than the
+  // "key missing" answer a legacy row gives for `transactionKind`.
+  reversalOfTransactionId String?
+  // Relational link to an associated loan (e.g. for principal repayments).
+  loanId                  String?
+  deletedAt               DateTime?
+  version                 Int                    @default(1)
+  createdAt               DateTime               @default(now())
+  updatedAt               DateTime               @updatedAt
 
   user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   account     FinanceAccount   @relation("AccountTransactions", fields: [accountId], references: [id], onDelete: Cascade)

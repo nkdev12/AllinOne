@@ -17,9 +17,11 @@ import {
 } from "../accounts/accounts.service";
 import {
   ChangeOperation,
+  FinanceTransactionKind,
   FinanceTransactionType,
   Prisma,
 } from "@prisma/client";
+import { EXCLUDE_BALANCE_ADJUSTMENTS } from "../finance.helpers";
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 200;
@@ -45,6 +47,11 @@ export function transactionChangePayload(tx: any): Record<string, any> {
     toAccountId: tx.toAccountId ?? null,
     categoryId: tx.categoryId ?? null,
     type: tx.type,
+    // Always spoken, and always the schema default when the row does not carry
+    // it: a document written before this column exists has no key, and a pull
+    // that stays silent on it would leave every other device guessing. `NORMAL`
+    // is what such a row has always been — ordinary cash flow.
+    transactionKind: tx.transactionKind ?? FinanceTransactionKind.NORMAL,
     amountMinor: Number(tx.amountMinor),
     currency: tx.currency,
     title: tx.title,
@@ -58,6 +65,8 @@ export function transactionChangePayload(tx: any): Record<string, any> {
     recurringRuleId: tx.recurringRuleId ?? null,
     sharedExpenseId: tx.sharedExpenseId ?? null,
     isExcludedFromBudget: tx.isExcludedFromBudget ?? false,
+    reversalOfTransactionId: tx.reversalOfTransactionId ?? null,
+    loanId: tx.loanId ?? null,
     createdAt:
       tx.createdAt instanceof Date
         ? tx.createdAt.toISOString()
@@ -198,10 +207,19 @@ export class TransactionsService {
           recurringRuleId: dto.recurringRuleId,
           sharedExpenseId: dto.sharedExpenseId,
           isExcludedFromBudget: dto.isExcludedFromBudget ?? false,
+          transactionKind: dto.transactionKind ?? FinanceTransactionKind.NORMAL,
+          reversalOfTransactionId: dto.reversalOfTransactionId ?? null,
+          loanId: dto.loanId ?? null,
         },
       });
 
       // Adjust account balance
+      //
+      // Keyed on `type` alone, and deliberately so: a balance correction is the
+      // one row that must move the account while counting as neither income nor
+      // spending, so `transactionKind` belongs to the cash-flow reads below and
+      // not here. Filtering this branch by kind would reconcile to a balance
+      // that never changed.
       if (dto.type === FinanceTransactionType.INCOME) {
         await this.adjustAccount(tx, userId, dto.accountId, amountMinor);
       } else if (dto.type === FinanceTransactionType.EXPENSE) {
@@ -483,6 +501,23 @@ export class TransactionsService {
             dto.isExcludedFromBudget !== undefined
               ? dto.isExcludedFromBudget
               : oldTx.isExcludedFromBudget,
+          // Carried forward the way `isExcludedFromBudget` is, with one
+          // difference worth naming: an edit that does not mention the
+          // classification cannot downgrade a reconcile correction into
+          // ordinary income, and an edit that does not mention the reversal it
+          // links to *can* clear it by sending `null` explicitly.
+          transactionKind:
+            dto.transactionKind !== undefined
+              ? dto.transactionKind
+              : (oldTx.transactionKind ?? FinanceTransactionKind.NORMAL),
+          reversalOfTransactionId:
+            dto.reversalOfTransactionId !== undefined
+              ? dto.reversalOfTransactionId
+              : oldTx.reversalOfTransactionId,
+          loanId:
+            dto.loanId !== undefined
+              ? dto.loanId
+              : oldTx.loanId,
           version: { increment: 1 },
         },
       });
@@ -589,6 +624,11 @@ export class TransactionsService {
       userId,
       deletedAt: null,
       currency: summaryCurrency,
+      // A balance correction reconciles the account; it is not money in or out.
+      // Excluded as a `NOT`, never as `transactionKind: "NORMAL"`, because the
+      // equality form would drop every document written before the column
+      // existed and rewrite this user's history.
+      ...EXCLUDE_BALANCE_ADJUSTMENTS,
     };
     if (startDate || endDate) {
       where.transactionDate = {};
